@@ -1,0 +1,26 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: schedule-engine
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/vibe_schedule?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true}
+    username: root
+    password: root
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR:localhost:8848}
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY:DUMMY}
+      base-url: ${BASE_URL:https://api.openai.com/v1}
+      chat:
+        options:
+          model: ${MODEL:gpt-4o-mini}
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true

@@ -1,0 +1,244 @@
+services:
+  # --- 基础设施 (Infrastructure) ---
+  nacos:
+    image: docker.m.daocloud.io/nacos/nacos-server:v2.2.3
+    container_name: nacos
+    environment:
+      - MODE=standalone
+      - JVM_XMS=256m
+      - JVM_XMX=256m
+    ports:
+      - "8848:8848"
+      - "9848:9848"
+    networks:
+      - vibe-net
+
+  mysql:
+    image: docker.m.daocloud.io/library/mysql:8.0
+    container_name: mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./sql:/docker-entrypoint-initdb.d
+    networks:
+      - vibe-net
+
+  redis:
+    image: docker.m.daocloud.io/library/redis:7.0
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - vibe-net
+
+  rabbitmq:
+    image: docker.m.daocloud.io/library/rabbitmq:3.12-management
+    container_name: rabbitmq
+    environment:
+      - RABBITMQ_DEFAULT_USER=vibe
+      - RABBITMQ_DEFAULT_PASS=vibe123
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - vibe-net
+
+  elasticsearch:
+    image: docker.m.daocloud.io/library/elasticsearch:8.10.2
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9201:9200"
+    networks:
+      - vibe-net
+
+  seata-server:
+    image: docker.m.daocloud.io/seataio/seata-server:1.7.1
+    container_name: seata-server
+    ports:
+      - "8091:8091"
+    depends_on:
+      - mysql
+    networks:
+      - vibe-net
+
+  # --- 微服务 (Microservices) ---
+  goal-service:
+    build:
+      context: .
+      dockerfile: goal-service/Dockerfile
+    container_name: goal-service
+    ports:
+      - "8081:8081"
+    environment:
+      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
+      - SPRING_CLOUD_NACOS_CONFIG_SERVER_ADDR=nacos:8848
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_goal?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      - SPRING_REDIS_HOST=redis
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_USERNAME=vibe
+      - SPRING_RABBITMQ_PASSWORD=vibe123
+      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SPRING_AI_OPENAI_BASE_URL=${BASE_URL}
+      - SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL=${MODEL}
+    depends_on:
+      - nacos
+      - mysql
+      - redis
+      - rabbitmq
+    networks:
+      - vibe-net
+
+  schedule-engine:
+    build:
+      context: .
+      dockerfile: schedule-engine/Dockerfile
+    container_name: schedule-engine
+    ports:
+      - "8082:8082"
+    environment:
+      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_schedule?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_USERNAME=vibe
+      - SPRING_RABBITMQ_PASSWORD=vibe123
+      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SPRING_AI_OPENAI_BASE_URL=${BASE_URL}
+      - SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL=${MODEL}
+    depends_on:
+      - nacos
+      - mysql
+      - rabbitmq
+    networks:
+      - vibe-net
+
+  resource-search:
+    build:
+      context: .
+      dockerfile: resource-search/Dockerfile
+    container_name: resource-search
+    ports:
+      - "8083:8083"
+    environment:
+      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_resource?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      - SPRING_ELASTICSEARCH_URIS=http://elasticsearch:9200
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_USERNAME=vibe
+      - SPRING_RABBITMQ_PASSWORD=vibe123
+      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SPRING_AI_OPENAI_BASE_URL=${BASE_URL}
+      - SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL=${MODEL}
+    depends_on:
+      - nacos
+      - elasticsearch
+      - rabbitmq
+    networks:
+      - vibe-net
+
+  punch-service:
+    build:
+      context: .
+      dockerfile: punch-service/Dockerfile
+    container_name: punch-service
+    ports:
+      - "8084:8084"
+    environment:
+      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_punch?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      - SPRING_REDIS_HOST=redis
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_USERNAME=vibe
+      - SPRING_RABBITMQ_PASSWORD=vibe123
+      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SPRING_AI_OPENAI_BASE_URL=${BASE_URL}
+      - SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL=${MODEL}
+    depends_on:
+      - nacos
+      - redis
+      - rabbitmq
+    networks:
+      - vibe-net
+
+  user-service:
+    build:
+      context: .
+      dockerfile: user-service/Dockerfile
+    container_name: user-service
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_USERNAME=vibe
+      - SPRING_RABBITMQ_PASSWORD=vibe123
+      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SPRING_AI_OPENAI_BASE_URL=${BASE_URL}
+      - SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL=${MODEL}
+      - JWT_SECRET=dev-jwt-secret-change-me-please-32bytes
+      - JWT_ISSUER=http://vibe
+      - AUTH_DEMO_USERNAME=demo
+      - AUTH_DEMO_PASSWORD=demo123
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_user?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_USERNAME=root
+      - SPRING_DATASOURCE_PASSWORD=root
+    depends_on:
+      - nacos
+      - mysql
+      - rabbitmq
+    networks:
+      - vibe-net
+
+  gateway-service:
+    build:
+      context: .
+      dockerfile: gateway-service/Dockerfile
+    container_name: gateway-service
+    ports:
+      - "8088:8088"
+    environment:
+      # 关键：允许OPTIONS方法
+      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDORIGINPATTERNS[0]=*
+      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[0]=GET
+      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[1]=POST
+      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[2]=PUT
+      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[3]=DELETE
+      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[4]=OPTIONS  # 重要！
+      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDHEADERS[0]=*
+      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWCREDENTIALS=true
+      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
+      - SPRING_REDIS_HOST=redis
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_USERNAME=vibe
+      - SPRING_RABBITMQ_PASSWORD=vibe123
+      - JWT_SECRET=dev-jwt-secret-change-me-please-32bytes
+      - GATEWAY_RL_REPLENISH=5
+      - GATEWAY_RL_BURST=60
+    depends_on:
+      - nacos
+      - redis
+      - user-service
+      - rabbitmq
+    networks:
+      - vibe-net
+
+  web-front:
+    build:
+      context: .
+      dockerfile: web-front/Dockerfile
+    container_name: web-front
+    ports:
+      - "5175:80"
+    depends_on:
+      - gateway-service
+    networks:
+      - vibe-net
+
+networks:
+  vibe-net:
+    driver: bridge

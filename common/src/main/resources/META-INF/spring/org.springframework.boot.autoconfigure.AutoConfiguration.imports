@@ -1,0 +1,3 @@
+com.chao.common.ai.OpenAiCompatAutoConfiguration
+com.chao.common.config.RabbitMqConfig
+

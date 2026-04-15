@@ -1,0 +1,69 @@
+openapi: 3.0.0
+info:
+  title: 大学生目标驱动自律规划系统 API
+  version: 1.0.0
+  description: 包含目标管理、资源检索、智能排程与打卡监督的微服务 API。
+
+paths:
+  /api/goals:
+    post:
+      summary: 创建并拆解学习目标
+      parameters:
+        - name: userId
+          in: query
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          text/plain:
+            schema:
+              type: string
+              example: "我要学习分布式系统"
+      responses:
+        '200':
+          description: 目标已接收，异步拆解中
+
+  /api/schedule/auto-schedule:
+    post:
+      summary: 触发智能排程引擎
+      parameters:
+        - name: userId
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 排程成功
+
+  /api/resources/search:
+    get:
+      summary: 语义检索在线课程资源
+      parameters:
+        - name: topic
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 资源列表
+
+  /api/punch/submit:
+    post:
+      summary: 提交任务打卡
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                userId: { type: integer }
+                taskId: { type: integer }
+                type: { type: integer, description: "1-GPS, 2-截图, 3-问答" }
+                location: { type: string }
+                evidence: { type: string, format: binary }
+      responses:
+        '200':
+          description: 打卡成功
