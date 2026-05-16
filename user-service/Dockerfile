@@ -1,4 +1,4 @@
-FROM docker.m.daocloud.io/library/maven:3.8.4-openjdk-17-slim AS build
+FROM docker.1panel.live/library/maven:3.8.4-openjdk-17-slim AS build
 WORKDIR /app
 
 COPY pom.xml .
@@ -17,7 +17,7 @@ COPY user-service/src user-service/src
 RUN mvn clean install -pl common -am -DskipTests -s /root/.m2/settings.xml
 RUN mvn package -pl user-service -am -DskipTests -s /root/.m2/settings.xml
 
-FROM docker.m.daocloud.io/library/eclipse-temurin:17-jre-alpine
+FROM docker.1panel.live/library/eclipse-temurin:17-jre-alpine
 WORKDIR /app
 COPY --from=build /app/user-service/target/*.jar app.jar
 EXPOSE 8080

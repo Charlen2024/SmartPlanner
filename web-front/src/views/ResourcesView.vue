@@ -1,8 +1,8 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, watch } from 'vue'
 import api from '../plugins/api'
 
-const topic = ref('分布式')
+const topic = ref('')
 const title = ref('')
 const platform = ref('')
 const url = ref('')
@@ -10,17 +10,56 @@ const summary = ref('')
 const list = ref([])
 const loading = ref(false)
 const error = ref('')
+const advice = ref('')
+const jobSeq = ref(0)
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms))
+}
 
 async function searchOnline() {
+  if (!topic.value?.trim()) {
+    advice.value = ''
+    error.value = ''
+    list.value = []
+    return
+  }
+  const seq = (jobSeq.value += 1)
   loading.value = true
   error.value = ''
+  advice.value = ''
+  list.value = []
   try {
-    const res = await api.get('/user/resources/search', { params: { topic: topic.value } })
-    list.value = res?.data?.data ?? []
+    const startRes = await api.post('/user/resources/search/advice/jobs', { topic: topic.value.trim() }, { timeout: 15000 })
+    const jobId = startRes?.data?.data?.jobId
+    if (!jobId) throw new Error('启动检索任务失败')
+
+    for (let i = 0; i < 180; i++) {
+      await sleep(1000)
+      if (seq !== jobSeq.value) return
+      const st = await api.get(`/user/resources/search/advice/jobs/${jobId}`, { timeout: 15000 })
+      const data = st?.data?.data ?? null
+      if (data?.status === 'DONE') {
+        const r = data?.result ?? null
+        advice.value = r?.advice ?? ''
+        list.value = r?.resources ?? []
+        return
+      }
+      if (data?.status === 'FAILED') {
+        throw new Error(data?.error || '检索失败')
+      }
+    }
+    throw new Error('等待检索结果超时，请稍后重试')
   } catch (e) {
-    error.value = e?.response?.data?.message || e?.message || '检索失败'
+    if (e?.response?.status === 401) {
+      error.value = '未登录或登录已过期，请重新登录后再检索'
+    } else if (e?.code === 'ECONNABORTED') {
+      error.value = '请求超时，请稍后重试'
+    } else {
+      error.value = e?.response?.data?.message || e?.message || '检索失败'
+    }
   } finally {
-    loading.value = false
+    if (seq === jobSeq.value) loading.value = false
   }
 }
 
@@ -35,6 +74,10 @@ async function createResource() {
 }
 
 async function loadLocal() {
+  if (!topic.value?.trim()) {
+    list.value = []
+    return
+  }
   const res = await api.get('/user/resources', { params: { topic: topic.value } })
   list.value = res?.data?.data ?? []
 }
@@ -44,14 +87,27 @@ async function remove(id) {
   await loadLocal()
 }
 
-onMounted(loadLocal)
+watch(
+  topic,
+  async (v) => {
+    if (!v?.trim()) {
+      advice.value = ''
+      error.value = ''
+      list.value = []
+      return
+    }
+    await loadLocal()
+  },
+  { immediate: true }
+)
 </script>
 
 <template>
   <v-row class="mb-2">
     <v-col cols="12" md="3"><v-text-field v-model="topic" label="主题" variant="outlined" /></v-col>
-    <v-col cols="12" md="3"><v-btn color="primary" :loading="loading" @click="searchOnline">AI 推荐</v-btn></v-col>
+    <v-col cols="12" md="3"><v-btn color="primary" :loading="loading" :disabled="!topic?.trim()" @click="searchOnline">ES 检索 / RAG 推荐</v-btn></v-col>
   </v-row>
+  <v-alert v-if="advice" type="info" variant="tonal" class="mb-4" style="white-space: pre-wrap;">{{ advice }}</v-alert>
   <v-alert v-if="error" type="error" variant="tonal" class="mb-4">{{ error }}</v-alert>
   <v-row class="mb-2">
     <v-col cols="12" md="3"><v-text-field v-model="title" label="标题" variant="outlined" /></v-col>
@@ -75,7 +131,7 @@ onMounted(loadLocal)
       >
         <template #append>
           <v-btn size="small" variant="text" v-if="r.id" color="error" @click="remove(r.id)">删除</v-btn>
-          <v-btn size="small" variant="text" v-if="r.url" :href="r.url" target="_blank">打开</v-btn>
+          <v-btn size="small" variant="text" v-if="r.url || r.sourceUrl" :href="r.url || r.sourceUrl" target="_blank">打开</v-btn>
         </template>
         <div v-if="r.summary || r.contentSummary" class="text-caption mt-1" style="opacity:0.8">
           {{ r.summary || r.contentSummary }}

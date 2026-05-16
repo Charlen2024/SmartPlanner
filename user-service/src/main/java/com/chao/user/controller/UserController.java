@@ -223,6 +223,29 @@ public class UserController {
         return resourceClient.searchOnlineCourses(topic);
     }
 
+    @GetMapping("/resources/search/advice")
+    public Result<ResourceClient.ResourceAdviceResponse> searchResourcesWithAdvice(@RequestParam String topic) {
+        return resourceClient.searchOnlineCoursesWithAdvice(topic);
+    }
+
+    @PostMapping("/resources/search/advice/jobs")
+    public Result<ResourceAdviceJobStartResponse> startResourceAdviceJob(
+            @AuthenticationPrincipal Jwt jwt,
+            @RequestHeader(value = "X-User-Id", required = false) Long headerUserId,
+            @RequestParam(required = false) Long userId,
+            @RequestBody ResourceAdviceJobStartRequest request) {
+        return resourceClient.startResourceAdviceJob(resolveUserId(jwt, headerUserId, userId), request);
+    }
+
+    @GetMapping("/resources/search/advice/jobs/{jobId}")
+    public Result<ResourceAdviceJobStatusResponse> getResourceAdviceJobStatus(
+            @PathVariable String jobId,
+            @AuthenticationPrincipal Jwt jwt,
+            @RequestHeader(value = "X-User-Id", required = false) Long headerUserId,
+            @RequestParam(required = false) Long userId) {
+        return resourceClient.getResourceAdviceJobStatus(resolveUserId(jwt, headerUserId, userId), jobId);
+    }
+
     @PostMapping("/resources")
     public Result<CourseResourceDto> createResource(
             @RequestParam String topic,

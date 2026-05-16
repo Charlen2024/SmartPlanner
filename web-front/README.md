@@ -1,5 +1,26 @@
-# Vue 3 + Vite
+# web-front
 
-This template should help get you started developing with Vue 3 in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+SmartPlanner 前端（Vue3 + Vite + Vuetify）。默认通过 Nginx/网关转发访问后端接口。
 
-Learn more about IDE Support for Vue in the [Vue Docs Scaling up Guide](https://vuejs.org/guide/scaling-up/tooling.html#ide-support).
+## 本地运行
+
+```bash
+npm install
+npm run dev
+```
+
+默认 dev server 会走 `vite.config.js` 的代理配置（将 `/api` 转发到网关）。
+
+## 构建
+
+```bash
+npm run build
+```
+
+## Docker
+
+项目根目录执行：
+
+```bash
+docker compose up -d --build web-front
+```

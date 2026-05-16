@@ -18,13 +18,52 @@ export function setupApi() {
 
   api.interceptors.response.use(
     (res) => res,
-    (err) => {
+    async (err) => {
       const status = err?.response?.status
-      if (status === 401) {
+      const original = err?.config
+      if (status !== 401 || !original) {
+        return Promise.reject(err)
+      }
+
+      if (original.url && String(original.url).includes('/auth/')) {
         localStorage.removeItem('accessToken')
         localStorage.removeItem('refreshToken')
+        return Promise.reject(err)
       }
-      return Promise.reject(err)
+
+      if (original._retry) {
+        localStorage.removeItem('accessToken')
+        localStorage.removeItem('refreshToken')
+        return Promise.reject(err)
+      }
+
+      const refreshToken = localStorage.getItem('refreshToken')
+      if (!refreshToken) {
+        localStorage.removeItem('accessToken')
+        return Promise.reject(err)
+      }
+
+      original._retry = true
+      try {
+        const refreshRes = await axios.post('/api/auth/refresh', { refreshToken }, { timeout: 15000 })
+        const newAccess = refreshRes?.data?.data?.accessToken
+        const newRefresh = refreshRes?.data?.data?.refreshToken
+        if (!newAccess) {
+          localStorage.removeItem('accessToken')
+          localStorage.removeItem('refreshToken')
+          return Promise.reject(err)
+        }
+        localStorage.setItem('accessToken', newAccess)
+        if (newRefresh) localStorage.setItem('refreshToken', newRefresh)
+
+        original.headers = original.headers ?? {}
+        original.headers.Authorization = `Bearer ${newAccess}`
+        return api(original)
+      } catch (e) {
+        localStorage.removeItem('accessToken')
+        localStorage.removeItem('refreshToken')
+        return Promise.reject(err)
+      }
     },
   )
 }

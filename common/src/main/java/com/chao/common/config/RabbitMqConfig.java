@@ -26,6 +26,10 @@ public class RabbitMqConfig {
     public static final String NOTIFICATION_QUEUE = "user.notification.queue";
     public static final String NOTIFICATION_ROUTING_KEY = "notification.route";
 
+    public static final String RESOURCE_EXCHANGE = "resource.exchange";
+    public static final String RESOURCE_ADVICE_QUEUE = "resource.advice.queue";
+    public static final String RESOURCE_ADVICE_ROUTING_KEY = "resource.advice.route";
+
     @Bean
     public DirectExchange goalExchange() {
         return new DirectExchange(GOAL_EXCHANGE);
@@ -54,5 +58,20 @@ public class RabbitMqConfig {
     @Bean
     public Binding notificationBinding(Queue notificationQueue, DirectExchange notificationExchange) {
         return BindingBuilder.bind(notificationQueue).to(notificationExchange).with(NOTIFICATION_ROUTING_KEY);
+    }
+
+    @Bean
+    public DirectExchange resourceExchange() {
+        return new DirectExchange(RESOURCE_EXCHANGE);
+    }
+
+    @Bean
+    public Queue resourceAdviceQueue() {
+        return new Queue(RESOURCE_ADVICE_QUEUE, true);
+    }
+
+    @Bean
+    public Binding resourceAdviceBinding(Queue resourceAdviceQueue, DirectExchange resourceExchange) {
+        return BindingBuilder.bind(resourceAdviceQueue).to(resourceExchange).with(RESOURCE_ADVICE_ROUTING_KEY);
     }
 }
