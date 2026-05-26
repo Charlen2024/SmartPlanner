@@ -34,6 +34,13 @@ spring:
 smartplanner:
   ai:
     rag-timeout-seconds: 45
+  crawler:
+    bilibili:
+      enabled: true
+      topics: "Java,Spring Boot,Python,Vue,数据结构,算法,计算机网络,操作系统,数据库,机器学习,前端,Linux,Go,Rust,分布式,微服务,设计模式,计算机组成原理"
+      interval-ms: 21600000
+      per-topic-limit: 8
+      initial-delay-ms: 120000
 
 mybatis-plus:
   configuration:

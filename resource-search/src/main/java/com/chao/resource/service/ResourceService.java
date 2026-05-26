@@ -558,8 +558,9 @@ public class ResourceService {
             NativeQuery query = NativeQuery.builder()
                     .withQuery(qb -> qb.multiMatch(m -> m
                             .query(queryText)
-                            .fields("title", "topic", "contentSummary")
-                            .operator(co.elastic.clients.elasticsearch._types.query_dsl.Operator.And)))
+                            .fields("title^3", "topic^2", "contentSummary")
+                            .type(co.elastic.clients.elasticsearch._types.query_dsl.TextQueryType.BestFields)
+                            .operator(co.elastic.clients.elasticsearch._types.query_dsl.Operator.Or)))
                     .withPageable(PageRequest.of(0, Math.max(1, Math.min(limit, 50))))
                     .build();
 
@@ -1051,9 +1052,10 @@ public class ResourceService {
 
     private List<ResourceClient.CourseResource> recommendByAi(String topic) {
         String prompt = ""
-                + "你是学习资源推荐助手。请为主题生成 8 条真实可打开的资源入口。\n"
-                + "要求：url 必须是可访问的真实网站链接（允许是站内搜索链接），必须以 https:// 开头。\n"
-                + "平台优先：官方文档、GitHub、B站、Coursera/edX、Medium/知乎、博客。\n"
+                + "你是学习资源推荐助手。请为主题推荐 8 条学习资源入口。\n"
+                + "重要：url 必须是真实平台的搜索链接（如 B站搜索、GitHub搜索、知乎搜索等），不要编造具体课程URL。\n"
+                + "格式：https://search.bilibili.com/all?keyword=关键词 或 https://github.com/search?q=关键词 等。\n"
+                + "平台优先：官方文档、GitHub、B站、Coursera/edX、知乎、博客园。\n"
                 + "只输出严格 JSON 数组，不要 Markdown，不要额外文字。\n"
                 + "[{\"title\":\"...\",\"platform\":\"...\",\"url\":\"https://...\",\"summary\":\"...\"}]\n\n"
                 + "主题：" + topic;
@@ -1465,24 +1467,40 @@ public class ResourceService {
     }
 
     private String httpGetTextWithUA(String url, String userAgent, String referer, String origin) {
-        try {
-            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(8000);
-            conn.setRequestProperty("User-Agent", userAgent);
-            conn.setRequestProperty("Referer", referer);
-            if (origin != null) conn.setRequestProperty("Origin", origin);
-            conn.setRequestProperty("Accept", "application/json, text/plain, */*");
-            conn.setInstanceFollowRedirects(true);
-            if (conn.getResponseCode() >= 200 && conn.getResponseCode() < 300) {
-                byte[] bytes = conn.getInputStream().readAllBytes();
-                return new String(bytes, StandardCharsets.UTF_8);
+        int maxRetries = 2;
+        for (int attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(10000);
+                conn.setRequestProperty("User-Agent", userAgent);
+                conn.setRequestProperty("Referer", referer);
+                if (origin != null) conn.setRequestProperty("Origin", origin);
+                conn.setRequestProperty("Accept", "application/json, text/plain, */*");
+                conn.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9");
+                conn.setInstanceFollowRedirects(true);
+                int code = conn.getResponseCode();
+                if (code >= 200 && code < 300) {
+                    byte[] bytes = conn.getInputStream().readAllBytes();
+                    return new String(bytes, StandardCharsets.UTF_8);
+                }
+                if (code == 429 || code >= 500) {
+                    if (attempt < maxRetries) {
+                        try { Thread.sleep((attempt + 1) * 1000L); } catch (InterruptedException ignored) {}
+                        continue;
+                    }
+                }
+                return null;
+            } catch (Exception e) {
+                if (attempt < maxRetries) {
+                    try { Thread.sleep((attempt + 1) * 500L); } catch (InterruptedException ignored) {}
+                } else {
+                    log.debug("httpGetTextWithUA failed after {} retries: {}", maxRetries, e.getMessage());
+                    return null;
+                }
             }
-            return null;
-        } catch (Exception e) {
-            System.err.println("httpGetTextWithUA FAILED: " + e.getClass().getName() + " - " + e.getMessage());
-            return null;
         }
+        return null;
     }
 
     List<ResourceClient.CourseResource> fetchBilibiliCandidates(String query, String topic, int limit) {
@@ -1512,14 +1530,23 @@ public class ResourceService {
                     String bvid = item.path("bvid").asText();
                     String title = item.path("title").asText().replaceAll("<[^>]+>", "").trim();
                     int play = item.path("play").asInt();
+                    String author = item.path("author").asText();
+                    String description = item.path("description").asText().replaceAll("<[^>]+>", "").trim();
+                    int duration = parseBilibiliDuration(item.path("duration").asText());
                     if (title.isBlank()) continue;
                     String url = !arcurl.isBlank() ? arcurl : (!bvid.isBlank() ? "https://www.bilibili.com/video/" + bvid : "");
                     if (url.isBlank()) continue;
+                    // Build richer summary
+                    StringBuilder summary = new StringBuilder();
+                    if (!author.isBlank()) summary.append("UP主: ").append(author).append(" | ");
+                    summary.append("播放: ").append(play);
+                    if (duration > 0) summary.append(" | ").append(duration).append("分钟");
+                    if (!description.isBlank()) summary.append(" | ").append(description);
                     ResourceClient.CourseResource r = new ResourceClient.CourseResource();
                     r.setTitle(title);
                     r.setPlatform("B站");
                     r.setUrl(url);
-                    r.setSummary("播放: " + play);
+                    r.setSummary(summary.toString());
                     out.add(r);
                 }
             }
@@ -1527,6 +1554,20 @@ public class ResourceService {
             log.warn("Bilibili crawl failed: query={}, err={}", q, e.getMessage());
         }
         return out;
+    }
+
+    private int parseBilibiliDuration(String duration) {
+        if (duration == null || duration.isBlank()) return 0;
+        try {
+            String[] parts = duration.split(":");
+            if (parts.length == 2) {
+                return Integer.parseInt(parts[0]) + (Integer.parseInt(parts[1]) >= 30 ? 1 : 0);
+            } else if (parts.length == 3) {
+                return Integer.parseInt(parts[0]) * 60 + Integer.parseInt(parts[1]);
+            }
+        } catch (NumberFormatException ignored) {
+        }
+        return 0;
     }
 
 }

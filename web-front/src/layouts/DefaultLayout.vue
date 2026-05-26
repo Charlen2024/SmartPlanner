@@ -39,6 +39,17 @@ let sseRetryCount = 0
 let sseRetryTimer = null
 const SSE_MAX_DELAY = 30000
 
+function onChatLinkClick(e) {
+  const anchor = e.target.closest('a')
+  if (!anchor) return
+  const href = anchor.getAttribute('href')
+  if (!href) return
+  if (href.startsWith('/') && !href.startsWith('//')) {
+    e.preventDefault()
+    router.push(href)
+  }
+}
+
 function stopSse() {
   if (sseRetryTimer) {
     clearTimeout(sseRetryTimer)
@@ -494,7 +505,7 @@ function onResizeEnd() {
             <div v-for="m in assistant.chatMessages" :key="m._key" class="mb-3">
               <div :class="['vibe-chat-bubble', m.role === 'user' ? 'vibe-chat-user' : 'vibe-chat-ai']">
                 <span v-if="m.role === 'user'" style="white-space: pre-wrap;">{{ m.text }}</span>
-                  <span v-else style="white-space: pre-wrap;">{{ m.text }}</span>
+                  <span v-else class="vibe-chat-markdown" v-html="m.html || m.text" @click="onChatLinkClick"></span>
                 <div v-if="m.navs?.length" class="mt-2 d-flex flex-wrap ga-1">
                   <v-chip
                     v-for="nav in m.navs"
@@ -739,6 +750,38 @@ function onResizeEnd() {
   margin-right: auto;
   background: rgba(var(--v-theme-on-surface), 0.06);
   border-bottom-left-radius: 6px;
+}
+.vibe-chat-markdown :deep(p) {
+  margin: 0 0 6px;
+  line-height: 1.55;
+}
+.vibe-chat-markdown :deep(p:last-child) {
+  margin-bottom: 0;
+}
+.vibe-chat-markdown :deep(ul), .vibe-chat-markdown :deep(ol) {
+  margin: 0 0 6px;
+  padding-left: 18px;
+}
+.vibe-chat-markdown :deep(li) {
+  margin-bottom: 2px;
+}
+.vibe-chat-markdown :deep(a) {
+  color: rgb(var(--v-theme-primary));
+  text-decoration: none;
+}
+.vibe-chat-markdown :deep(a:hover) {
+  text-decoration: underline;
+}
+.vibe-chat-markdown :deep(strong) {
+  font-weight: 600;
+}
+.vibe-chat-markdown :deep(h1), .vibe-chat-markdown :deep(h2), .vibe-chat-markdown :deep(h3) {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 8px 0 4px;
+}
+.vibe-chat-markdown :deep(h1:first-child), .vibe-chat-markdown :deep(h2:first-child), .vibe-chat-markdown :deep(h3:first-child) {
+  margin-top: 0;
 }
 .vibe-chat-scroll {
   scroll-behavior: smooth;
