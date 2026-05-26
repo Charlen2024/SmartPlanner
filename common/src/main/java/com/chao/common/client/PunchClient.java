@@ -27,6 +27,7 @@ public interface PunchClient {
             @RequestParam(value = "startedAtMs", required = false) Long startedAtMs,
             @RequestParam(value = "endedAtMs", required = false) Long endedAtMs,
             @RequestParam(value = "location", required = false) String location,
+            @RequestParam(value = "taskTitle", required = false) String taskTitle,
             @RequestPart(value = "evidence", required = false) MultipartFile evidence);
 
     @GetMapping("/api/punch/records")

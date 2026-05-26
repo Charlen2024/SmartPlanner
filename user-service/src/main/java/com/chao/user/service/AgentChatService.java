@@ -107,6 +107,7 @@ public class AgentChatService {
             - 所有查询类问题必须先调工具拿到真实数据再回答，不要给泛泛的"操作步骤"
             - 今天没有排程就说"今天暂无排程"，绝不编造
             - 绝对不重复已经说过的内容
+            - 回复始终使用 taskTitle 字段（任务名），绝对禁止出现 taskId（任务编号如"任务132"）
             - 回复末尾附上相关页面链接，格式：跳转: /路径
 
             可用页面：/ /plan /goals /journals /schedule /resources /punch /profile /games/2048
@@ -957,11 +958,12 @@ public class AgentChatService {
             List<PunchRecordDto> list = res != null ? res.getData() : List.of();
             list = list == null ? List.of() : list;
 
-            // Resolve task titles
+            // Resolve task titles (goal_tasks → schedule fallback)
             Map<Long, String> titleMap = new HashMap<>();
             try {
                 List<Long> taskIds = list.stream().map(PunchRecordDto::getTaskId).filter(Objects::nonNull).distinct().collect(java.util.stream.Collectors.toList());
                 if (!taskIds.isEmpty()) {
+                    // 1. Try goal_tasks
                     Result<List<GoalTaskDto>> tr = goalClient.getTasksByIds(taskIds);
                     List<GoalTaskDto> tasks = tr != null ? tr.getData() : List.of();
                     if (tasks != null) {
@@ -969,6 +971,22 @@ public class AgentChatService {
                             if (t != null && t.getId() != null) {
                                 titleMap.put(t.getId(), t.getTitle() != null ? t.getTitle() : "未命名任务");
                             }
+                        }
+                    }
+                    // 2. Fallback: try schedule for any unresolved IDs
+                    List<Long> unresolved = taskIds.stream().filter(id -> !titleMap.containsKey(id)).collect(java.util.stream.Collectors.toList());
+                    if (!unresolved.isEmpty()) {
+                        try {
+                            Result<List<TaskScheduleDto>> sr = scheduleClient.listTaskSchedules(userId, null, null);
+                            List<TaskScheduleDto> schedules = sr != null ? sr.getData() : List.of();
+                            if (schedules != null) {
+                                for (TaskScheduleDto s : schedules) {
+                                    if (s != null && s.getTaskId() != null && unresolved.contains(s.getTaskId()) && s.getTaskTitle() != null) {
+                                        titleMap.put(s.getTaskId(), s.getTaskTitle());
+                                    }
+                                }
+                            }
+                        } catch (Exception ignored) {
                         }
                     }
                 }
@@ -981,7 +999,8 @@ public class AgentChatService {
                 Map<String, Object> m = new HashMap<>();
                 m.put("id", p.getId());
                 m.put("taskId", p.getTaskId());
-                m.put("taskTitle", titleMap.getOrDefault(p.getTaskId(), "任务" + p.getTaskId()));
+                String storedTitle = p.getTaskTitle();
+                m.put("taskTitle", (storedTitle != null && !storedTitle.isBlank()) ? storedTitle : titleMap.getOrDefault(p.getTaskId(), "未知任务"));
                 m.put("startedAt", p.getStartedAt());
                 m.put("endedAt", p.getEndedAt());
                 m.put("createdAt", p.getCreatedAt());

@@ -725,8 +725,9 @@ public class UserController {
             @RequestParam(required = false) Long startedAtMs,
             @RequestParam(required = false) Long endedAtMs,
             @RequestParam(required = false) String location,
+            @RequestParam(required = false) String taskTitle,
             @RequestParam(required = false) MultipartFile evidence) {
-        return punchClient.submitPunch(resolveUserId(jwt, headerUserId, userId), taskId, type, durationSeconds, startedAtMs, endedAtMs, location, evidence);
+        return punchClient.submitPunch(resolveUserId(jwt, headerUserId, userId), taskId, type, durationSeconds, startedAtMs, endedAtMs, location, taskTitle, evidence);
     }
 
     @GetMapping("/resources/search")
