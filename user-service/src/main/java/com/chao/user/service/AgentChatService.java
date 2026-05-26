@@ -63,6 +63,10 @@ import java.util.regex.Pattern;
 @Service
 @RequiredArgsConstructor
 public class AgentChatService {
+    static {
+        reactor.core.publisher.Hooks.enableAutomaticContextPropagation();
+    }
+
     private static final Logger log = LoggerFactory.getLogger(AgentChatService.class);
     private final ChatModel chatModel;
     private final GoalClient goalClient;
