@@ -79,34 +79,18 @@ public class AgentChatService {
     private final ThreadLocal<Long> currentUserId = new ThreadLocal<>();
     private volatile ReactAgent agent;
 
-    private static final String SYSTEM_PROMPT = """
-            你是 SmartPlanner 的学习助理（Agent）。
-            你可以通过工具读取用户的目标/任务/排程/打卡/随笔/课程资源。
-            你仅能读取数据，不能修改或创建任何数据。
-            原则：
-            1) 先问清楚用户意图（查询/建议），再决定是否调用工具。
-            1) 用户意图是查询数据时，必须先调用对应工具获取真实数据，再基于数据回答，严禁跳过工具直接回复。
-            2) 用户问"我有哪些目标/任务/排程/是否完成/我今天做什么/我的任务"时，必须立即调用对应工具，不得跳过。
-            4) 不要建议用户修改、创建或执行任何操作（如设定已完成、添加任务、生成排程等）。这些需要用户自己到对应页面操作。
-            5) 用户要学习指导时：先用工具获取今天排程，然后给出学习建议。
-            5) 用户问"我今天有哪些任务/今天做什么/我的日程"时，必须立即调用 listTaskSchedules 工具获取今天排程，列出每个任务及其时间段，然后加跳转链接。只返回跳转链接不给任务列表是不合格的回答。
-            7) 用户问"我的心情怎么样"或类似情绪问题时，请用 searchNotesAndCourses 工具以"心情 情绪 焦虑 开心 压力"等语义检索随笔向量库，获取最相关随笔片段后再综合分析。同时用 listRecentJournals 补充最近的 mood 字段作为参照。
-            8) 当你向用户展示任务/排程/目标/随笔等信息后，必须在回答末尾追加对应页面的跳转链接，方便用户导航。
-            - 仪表盘：/
-            - 学习计划：/plan
-            - 目标：/goals
-            - 随笔：/journals
-            - 日程：/schedule
-            - 资源：/resources
-            - 打卡：/punch
-            - 画像：/profile
-            - 2048：/games/2048
+        private static final String SYSTEM_PROMPT = """
+            你是只读助手，无权排程或规划。只展示已有数据+导航链接。
 
-            跳转输出格式（用于前端识别并展示“跳转按钮”）：
-            - 当用户明确要求"打开/进入/跳转到某页面"时，你需要在回答末尾追加一行：跳转: /path
-            - 当你在回答中建议用户查看排程、写随笔、打卡等操作时，也请在末尾追加对应的跳转链接，例如：跳转 /schedule
-            - 回答中优先用工具获取真实数据，列出近期任务时需同时关注用户问到的其他方面（如心情），不要只回答任务列表
-            - 重要：你不能代替用户执行任何写操作，只能提供数据查询和页面导航。
+            规则：
+            1. 用户问"今天有什么/做什么/日程" → 调用 listTodaySchedules。禁止调用其他工具。禁止编造日程表。
+            2. 用户问"所有待办" → 调用 listPendingTasks。
+            3. 绝不说"建议的日程安排""可以这样安排""假设你有X小时""上午X点"。这是违规。只列已有排程数据。
+            4. 无排程时说"今天暂无排程，去日程页面创建吧" + 跳转: /schedule
+            5. 回答末尾加跳转链接，格式：跳转: /path
+            6. 不重复内容。
+
+            跳转：/仪表盘 /plan学习计划 /goals目标 /journals随笔 /schedule日程 /resources资源 /punch打卡 /profile画像
             """;
 
     public String chat(Long userId, String question) {
@@ -807,7 +791,32 @@ public class AgentChatService {
             return out;
         }
 
-        @Tool(description = "查询当前用户已排程的任务列表（task_schedule，包含具体开始/结束时间）。当用户询问【今天有什么任务/我的日程/排程/今天做什么】时使用。返回每个任务的具体时间段。")
+                @Tool(description = "查询当前用户今天的排程（今天有什么任务/日程）。无参数，自动查今天。禁止用此结果编造日程建议。")
+        public List<Map<String, Object>> listTodaySchedules() {
+            Long userId = requireUserId();
+            LocalDate today = LocalDate.now(java.time.ZoneId.of("Asia/Shanghai"));
+            String from = today + "T00:00:00";
+            String to = today + "T23:59:59";
+            Result<List<TaskScheduleDto>> res = scheduleClient.listTaskSchedules(userId, from, to);
+            List<TaskScheduleDto> list = res != null ? res.getData() : List.of();
+            list = list == null ? List.of() : list;
+            List<Map<String, Object>> out = new ArrayList<>();
+            for (TaskScheduleDto s : list) {
+                if (s == null || s.getTaskId() == null) continue;
+                Map<String, Object> m = new HashMap<>();
+                m.put("id", s.getId());
+                m.put("taskId", s.getTaskId());
+                m.put("taskTitle", s.getTaskTitle());
+                m.put("startTime", s.getStartTime());
+                m.put("endTime", s.getEndTime());
+                m.put("status", s.getStatus());
+                out.add(m);
+                if (out.size() >= 50) break;
+            }
+            return out;
+        }
+
+        @Tool(description = "查询当前用户已排程的任务列表'（task_schedule，包含具体开始/结束时间）。当用户询问【今天有什么任务/我的日程/排程/今天做什么】时使用。返回每个任务的具体时间段。")
         public List<Map<String, Object>> listTaskSchedules(
                 @ToolParam(description = "起始时间（ISO-8601，如 2026-05-22T00:00:00）", required = false) @Nullable String from,
                 @ToolParam(description = "结束时间（ISO-8601，如 2026-05-22T23:59:59）", required = false) @Nullable String to) {
