@@ -140,9 +140,13 @@ public class NotificationController {
         try {
             Result<List<UserJournalDto>> jr = goalClient.listJournals(userId, null);
             List<UserJournalDto> list = jr != null && jr.getData() != null ? jr.getData() : List.of();
-            if (!list.isEmpty()) {
-                String mood = list.get(0).getMood();
-                latestMood = mood != null ? mood.trim() : "";
+            LocalDate today = LocalDate.now(SHANGHAI);
+            for (UserJournalDto j : list) {
+                if (j == null || j.getCreatedAt() == null) continue;
+                if (j.getCreatedAt().toLocalDate().equals(today) && j.getMood() != null && !j.getMood().trim().isBlank()) {
+                    latestMood = j.getMood().trim();
+                    break;
+                }
             }
         } catch (Exception ignored) {
         }

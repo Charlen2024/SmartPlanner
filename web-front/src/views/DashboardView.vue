@@ -7,6 +7,8 @@ const error = ref('')
 const goalQuery = ref('')
 const dashboard = ref(null)
 const weather = ref(null)
+const weatherLocation = ref(localStorage.getItem('weatherLocation') || '深圳')
+const weatherLocations = ['深圳', '北京', '上海', '广州', '杭州', '成都', '武汉', '南京']
 const today = ref(new Date().toISOString().slice(0, 10))
 const selectedGoalId = ref(null)
 const selectedGoalTitle = ref('')
@@ -59,17 +61,30 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [res, w] = await Promise.all([
-      api.get('/user/dashboard'),
-      api.get('/user/weather'),
-    ])
+    const res = await api.get('/user/dashboard')
     dashboard.value = res?.data?.data ?? null
-    weather.value = w?.data?.data ?? null
   } catch (e) {
     error.value = '加载失败'
   } finally {
     loading.value = false
   }
+  // Weather loads independently, never blocks the dashboard
+  loadWeather()
+}
+
+async function loadWeather() {
+  try {
+    const w = await api.get('/user/weather', { params: { location: weatherLocation.value } })
+    weather.value = w?.data?.data ?? null
+  } catch (e) {
+    // silently ignore weather errors
+  }
+}
+
+function selectWeatherLocation(loc) {
+  weatherLocation.value = loc
+  localStorage.setItem('weatherLocation', loc)
+  loadWeather()
 }
 
 const filteredGoals = computed(() => {
@@ -297,14 +312,41 @@ onMounted(load)
     </v-col>
     <v-col cols="12" md="6">
       <v-card class="pa-2">
-        <v-card-title class="d-flex align-center">
-          <v-icon icon="mdi-weather-partly-cloudy" class="mr-2" />
-          今日 {{ today }}
+        <v-card-title class="d-flex align-center justify-space-between">
+          <div class="d-flex align-center">
+            <v-icon icon="mdi-weather-partly-cloudy" class="mr-2" />
+            今日 {{ today }}
+          </div>
+          <v-menu>
+            <template #activator="{ props: menuProps }">
+              <v-btn v-bind="menuProps" size="small" variant="text" :icon="true">
+                <v-icon>mdi-map-marker</v-icon>
+                <span class="text-caption ml-1">{{ weatherLocation }}</span>
+              </v-btn>
+            </template>
+            <v-list density="compact">
+              <v-list-item
+                v-for="loc in weatherLocations"
+                :key="loc"
+                :title="loc"
+                :active="loc === weatherLocation"
+                @click="selectWeatherLocation(loc)"
+              />
+            </v-list>
+          </v-menu>
         </v-card-title>
         <v-card-text>
-          <div v-if="weather">
+          <div v-if="weather && weather.summary !== '天气服务不可用'">
             <div class="text-h5 font-weight-bold">{{ weather.summary || '天气' }} {{ tempText() }}°C</div>
-            <div class="text-body-2" style="opacity:0.75">风速 {{ windText() }} km/h</div>
+            <div class="text-body-2" style="opacity:0.75">
+              风速 {{ windText() }} km/h
+              <span v-if="weather.feelsLike != null"> · 体感 {{ weather.feelsLike }}°C</span>
+              <span v-if="weather.humidity"> · 湿度 {{ weather.humidity }}%</span>
+            </div>
+          </div>
+          <div v-else-if="weather && weather.summary === '天气服务不可用'" class="text-body-2" style="opacity:0.7">
+            天气服务暂不可用
+            <v-btn size="x-small" variant="text" class="ml-2" @click="loadWeather">重试</v-btn>
           </div>
           <div v-else class="text-body-2" style="opacity:0.7">天气加载中…</div>
         </v-card-text>
