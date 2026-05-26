@@ -85,10 +85,11 @@ public class AgentChatService {
             禁止任何markdown符号（### ** ` * - 等）。
 
             规则：
-            1. 日程查询用listTodaySchedules，如实返回，不编造任何日程。
-            2. "今天做什么"类问题先查排程再回答，如果今天已有排程就直接列出。
+            1. 日程查询用listTodaySchedules，如实列出每条的任务名+时间段，格式：任务名 开始时间-结束时间。
+            2. 今天没有排程就说"今天暂无排程"，绝不编造。
             3. 回答要简洁自然，不要套模板句式。
             4. 绝对不重复已经说过的内容。
+            5. 如果用户问的问题超出你的能力范围，诚实告知并给出可用页面的跳转建议。
 
             可用页面：/仪表盘  /plan  /goals  /journals  /schedule  /resources  /punch  /profile  /games/2048
             """;
