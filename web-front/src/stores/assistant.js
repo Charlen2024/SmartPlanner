@@ -203,14 +203,14 @@ export const useAssistantStore = defineStore('assistant', {
               if (line.startsWith('data:')) {
                 dataLines.push(line.slice(5).trimStart())
                 inData = true
-              } else if (inData && line !== '') {
-                // embedded newline from LLM output (not proper SSE encoding)
+              } else if (inData) {
+                // all lines after data: belong to LLM content (including empty lines = paragraph breaks)
                 dataLines.push(line)
-              } else {
-                inData = false
               }
             }
             if (dataLines.length) {
+              // trim trailing blank lines but preserve internal paragraph breaks
+              while (dataLines.length && dataLines[dataLines.length - 1] === '') dataLines.pop()
               buf += dataLines.join('\n')
             }
             aiMsg.text = buf

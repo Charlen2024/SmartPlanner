@@ -5,6 +5,9 @@ import { useRouter, useRoute } from 'vue-router'
 import { useDisplay, useTheme } from 'vuetify'
 import { useNotifyStore } from '../stores/notify'
 import { useAssistantStore } from '../stores/assistant'
+import { marked } from 'marked'
+
+marked.setOptions({ breaks: true, gfm: true })
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -201,6 +204,15 @@ function logout() {
 }
 
 const quickPrompts = ['今天该做什么？', '总结本周进度', '给我一个学习建议']
+
+function renderMarkdown(text) {
+  if (!text) return ''
+  try {
+    return marked.parse(text)
+  } catch {
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+  }
+}
 
 function chatHint() {
   if (assistant.chatMessages?.length) return ''
@@ -491,7 +503,8 @@ function onResizeEnd() {
           <div v-if="assistant.chatMessages?.length">
             <div v-for="m in assistant.chatMessages" :key="m._key || m.text?.slice(0,8) + Math.random()" class="mb-3">
               <div :class="['vibe-chat-bubble', m.role === 'user' ? 'vibe-chat-user' : 'vibe-chat-ai']">
-                <span style="white-space: pre-wrap;">{{ m.text }}</span>
+                <span v-if="m.role === 'user'" style="white-space: pre-wrap;">{{ m.text }}</span>
+                  <span v-else class="vibe-md" v-html="renderMarkdown(m.text)"></span>
                 <div v-if="m.navs?.length" class="mt-2 d-flex flex-wrap ga-1">
                   <v-chip
                     v-for="nav in m.navs"
@@ -781,3 +794,16 @@ function onResizeEnd() {
   -webkit-backdrop-filter: blur(20px) saturate(160%) !important;
 }
 </style>
+/* Markdown rendered content */
+.vibe-md p { margin: 0 0 6px; }
+.vibe-md p:last-child { margin-bottom: 0; }
+.vibe-md ul, .vibe-md ol { margin: 4px 0; padding-left: 18px; }
+.vibe-md li { margin-bottom: 2px; }
+.vibe-md strong { font-weight: 600; }
+.vibe-md h1, .vibe-md h2, .vibe-md h3 { font-size: 14px; font-weight: 600; margin: 10px 0 4px; }
+.vibe-md code { background: rgba(var(--v-theme-on-surface), 0.08); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+.vibe-md pre { background: rgba(var(--v-theme-on-surface), 0.06); padding: 8px; border-radius: 6px; overflow-x: auto; font-size: 12px; margin: 6px 0; }
+.vibe-md pre code { background: none; padding: 0; }
+.vibe-md blockquote { border-left: 3px solid rgba(var(--v-theme-primary), 0.4); margin: 6px 0; padding: 2px 10px; opacity: 0.85; }
+.vibe-md hr { border: none; border-top: 1px solid rgba(var(--v-theme-on-surface), 0.1); margin: 8px 0; }
+.vibe-md a { color: rgb(var(--v-theme-primary)); }
