@@ -72,6 +72,7 @@ function startSse(token) {
     try {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
+      notify.info(data.content || '新消息')
       assistant.setCareText(data.content || '')
     } catch (err) {}
   })
@@ -79,6 +80,7 @@ function startSse(token) {
     try {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
+      notify.success(data.content || '成就解锁！')
     } catch (err) {}
   })
   sseSource.addEventListener('RESOURCE_ADVICE_DONE', (e) => {
@@ -410,7 +412,7 @@ function onResizeEnd() {
         </v-card>
       </div>
 
-      <v-list nav density="comfortable">
+      <v-list nav density="compact" class="mt-1">
         <v-list-item
             v-for="m in menu"
             :key="m.to"
@@ -418,14 +420,24 @@ function onResizeEnd() {
             :prepend-icon="m.icon"
             rounded="lg"
         >
-          <v-list-item-title v-if="!rail">{{ m.title }}</v-list-item-title>
+          <v-list-item-title v-if="!rail" class="text-body-2">{{ m.title }}</v-list-item-title>
         </v-list-item>
       </v-list>
 
       <template #append>
-        <div class="pa-3">
-          <v-btn block variant="text" @click="rail = !rail">
-            {{ rail ? '展开菜单' : '收起菜单' }}
+        <div class="pa-2">
+          <v-btn
+            v-if="rail"
+            icon="mdi-bell-outline"
+            variant="text"
+            size="small"
+            class="mb-1"
+            @click="notifMenu = !notifMenu"
+          >
+            <v-badge :model-value="unreadCount > 0" :content="unreadCount" color="error" dot overlap style="position: absolute; top: 4px; right: 4px;" />
+          </v-btn>
+          <v-btn block variant="text" size="small" @click="rail = !rail" :icon="rail ? 'mdi-chevron-right' : 'mdi-chevron-left'">
+            <span v-if="!rail">{{ rail ? '展开' : '收起' }}</span>
           </v-btn>
         </div>
       </template>
@@ -496,15 +508,16 @@ function onResizeEnd() {
         <v-divider v-show="!assistant.minimized" class="flex-shrink-0" />
 
         <div v-show="!assistant.minimized" class="px-3 py-3 flex-grow-1" style="overflow-y: auto;">
-          <div class="text-caption mb-2" style="opacity:0.75">学习建议</div>
-          <v-alert v-if="assistant.adviceError" type="error" variant="tonal" class="mb-2">{{ assistant.adviceError }}</v-alert>
-          <v-textarea v-model="assistant.adviceText" rows="5" auto-grow variant="outlined" readonly />
+          <v-alert v-if="assistant.adviceError" type="error" variant="tonal" class="mb-2" density="compact">{{ assistant.adviceError }}</v-alert>
+          <v-sheet rounded="lg" class="pa-3 mb-2" color="transparent" style="background: rgba(var(--v-theme-on-surface), 0.04) !important; border: 1px solid rgba(var(--v-theme-on-surface), 0.08);">
+            <div class="text-caption mb-1" style="opacity:0.55; font-weight:500;">学习建议</div>
+            <div class="text-body-2" style="line-height:1.6; opacity:0.9;">{{ assistant.adviceText }}</div>
+          </v-sheet>
 
           <div class="text-caption mt-3 mb-2" style="opacity:0.75">向我提问</div>
-          <div v-if="assistant.chatMessages?.length" class="vibe-agent-chat mb-2">
-            <div v-for="(m, i) in assistant.chatMessages" :key="i" class="mb-2">
-              <div class="text-caption" style="opacity:0.7">{{ m.role === 'user' ? '你' : 'AI' }}</div>
-              <div class="text-body-2" style="white-space: pre-wrap">{{ m.text }}</div>
+          <div v-if="assistant.chatMessages?.length" class="vibe-chat-scroll mb-2" style="max-height: 220px; overflow-y: auto;">
+            <div v-for="(m, i) in assistant.chatMessages" :key="i" class="mb-3">
+              <div :class="['vibe-chat-bubble', m.role === 'user' ? 'vibe-chat-user' : 'vibe-chat-ai']">{{ m.text }}</div>
             </div>
           </div>
           <v-textarea
@@ -513,7 +526,10 @@ function onResizeEnd() {
               rows="2"
               auto-grow
               variant="outlined"
+              density="compact"
               :disabled="assistant.chatLoading"
+              class="vibe-chat-input"
+              hide-details
           />
           <div class="d-flex justify-end mt-2">
             <v-btn color="primary" variant="tonal" :loading="assistant.chatLoading" @click="assistant.sendChat">发送</v-btn>
@@ -667,20 +683,69 @@ function onResizeEnd() {
   -webkit-backdrop-filter: blur(14px);
 }
 
-.glass-snackbar .v-overlay__scrim { background: transparent !important; opacity: 0 !important; }
-.glass-snackbar .v-overlay__content {
+.glass-snackbar.v-snackbar {
   border-radius: 16px !important;
-  background: rgba(255, 255, 255, 0.16) !important;
-  backdrop-filter: blur(28px) saturate(180%);
-  -webkit-backdrop-filter: blur(28px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.30);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.10);
+  overflow: visible !important;
+}
+.glass-snackbar .v-overlay__scrim { background: transparent !important; opacity: 0 !important; }
+.glass-snackbar .v-overlay__content,
+.glass-snackbar.v-snackbar > .v-overlay__content {
+  border-radius: 16px !important;
+  background: rgba(255, 255, 255, 0.18) !important;
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
 }
 .glass-snackbar .v-snackbar__wrapper,
 .glass-snackbar .v-snackbar__content { background: transparent !important; border-radius: 16px !important; }
-.glass-snackbar .v-snackbar__content { padding: 12px 20px; }
-.theme--dark .glass-snackbar .v-overlay__content {
-  background: rgba(15, 23, 42, 0.58) !important;
-  border: 1px solid rgba(255, 255, 255, 0.11);
+.glass-snackbar .v-snackbar__content { padding: 12px 20px; color: inherit !important; }
+.theme--dark .glass-snackbar .v-overlay__content,
+.theme--dark .glass-snackbar.v-snackbar > .v-overlay__content {
+  background: rgba(15, 23, 42, 0.62) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+/* Sidebar menu items */
+.vibe-menu-item {
+  margin: 2px 8px;
+  border-radius: 10px;
+}
+/* Chat bubbles */
+.vibe-chat-bubble {
+  padding: 10px 14px;
+  border-radius: 16px;
+  max-width: 92%;
+  word-break: break-word;
+  line-height: 1.55;
+  font-size: 13px;
+}
+.vibe-chat-user {
+  margin-left: auto;
+  background: rgba(var(--v-theme-primary), 0.15);
+  border-bottom-right-radius: 6px;
+}
+.vibe-chat-ai {
+  margin-right: auto;
+  background: rgba(var(--v-theme-on-surface), 0.06);
+  border-bottom-left-radius: 6px;
+}
+.vibe-chat-scroll {
+  scroll-behavior: smooth;
+}
+.vibe-chat-input :deep(.v-field) {
+  background: transparent !important;
+}
+.vibe-chat-input :deep(.v-field__overlay) {
+  opacity: 0 !important;
+}
+/* Agent card stronger glass */
+.vibe-agent-card {
+  backdrop-filter: blur(20px) saturate(160%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(160%) !important;
+}
+.vibe-agent-card::before {
+  backdrop-filter: blur(20px) saturate(160%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(160%) !important;
 }
 </style>
