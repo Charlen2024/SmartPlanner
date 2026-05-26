@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import jakarta.servlet.http.HttpServletResponse;
 
 import java.io.IOException;
 import java.util.concurrent.ExecutorService;
@@ -40,16 +41,19 @@ public class AgentController {
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chatStream(
             @AuthenticationPrincipal Jwt jwt,
-            @RequestBody(required = false) String question) {
+            @RequestBody(required = false) String question,
+            HttpServletResponse response) {
         Long userId = jwt.getClaim("userId");
         SseEmitter emitter = new SseEmitter(300_000L);
+        response.setHeader("X-Accel-Buffering", "no");
+        response.setHeader("Cache-Control", "no-cache");
         SSE_EXECUTOR.execute(() -> {
             try {
                 agentChatService.chatStream(userId, question)
                         .doOnComplete(() -> safeComplete(emitter))
                         .doOnError(e -> fallbackComplete(emitter, userId, question, e))
                         .subscribe(
-                                chunk -> safeSend(emitter, chunk),
+                                chunk -> safeSend(emitter, chunk, response),
                                 e -> fallbackComplete(emitter, userId, question, e)
                         );
             } catch (Exception e) {
@@ -60,10 +64,11 @@ public class AgentController {
         return emitter;
     }
 
-    private void safeSend(SseEmitter emitter, String chunk) {
+    private void safeSend(SseEmitter emitter, String chunk, HttpServletResponse response) {
         try {
             if (chunk != null && !chunk.isEmpty()) {
                 emitter.send(SseEmitter.event().data(chunk));
+                try { response.flushBuffer(); } catch (IOException ignored) {}
             }
         } catch (IOException e) {
             // client disconnected
