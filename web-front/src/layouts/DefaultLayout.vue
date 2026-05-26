@@ -506,9 +506,7 @@ function onResizeEnd() {
           </div>
           <div class="vibe-agent-actions" @pointerdown.stop>
             <v-btn size="small"  :disabled="assistant.adviceLoading" @click.stop="assistant.refreshAdvice" v-show="!assistant.minimized">刷新</v-btn>
-            <v-btn size="small"  @click.stop="assistant.toggleMinimize">
-              {{ assistant.minimized ? '展开' : '收起' }}
-            </v-btn>
+            <v-btn size="small" variant="text" :icon="assistant.minimized ? 'mdi-arrow-expand' : 'mdi-arrow-collapse'" @click.stop="assistant.toggleMinimize" />
           </div>
         </div>
         <v-divider v-show="!assistant.minimized" class="flex-shrink-0" />
@@ -707,28 +705,32 @@ function onResizeEnd() {
 .glass-snackbar.v-snackbar {
   border-radius: 16px !important;
   overflow: visible !important;
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
 }
-.glass-snackbar .v-overlay__scrim { background: transparent !important; opacity: 0 !important; }
+.glass-snackbar .v-overlay__scrim {
+  background: rgba(var(--v-theme-surface), 0.35) !important;
+  backdrop-filter: blur(20px) saturate(160%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(160%) !important;
+  opacity: 1 !important;
+}
+.theme--dark .glass-snackbar .v-overlay__scrim {
+  background: rgba(10, 15, 30, 0.4) !important;
+  backdrop-filter: blur(20px) saturate(160%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(160%) !important;
+}
 .glass-snackbar .v-overlay__content,
 .glass-snackbar.v-snackbar > .v-overlay__content {
   border-radius: 16px !important;
-  background: rgba(255, 255, 255, 0.28) !important;
-  backdrop-filter: blur(28px) saturate(180%);
-  -webkit-backdrop-filter: blur(28px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.45);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
+  background: rgb(var(--v-theme-surface)) !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.1) !important;
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.08) !important;
 }
 .glass-snackbar .v-snackbar__wrapper,
 .glass-snackbar .v-snackbar__content { background: transparent !important; border-radius: 16px !important; }
-.glass-snackbar .v-snackbar__content { padding: 12px 20px; color: inherit !important; }
+.glass-snackbar .v-snackbar__content { padding: 12px 20px !important; color: inherit !important; }
 .theme--dark .glass-snackbar .v-overlay__content,
 .theme--dark .glass-snackbar.v-snackbar > .v-overlay__content {
-  background: rgba(15, 23, 42, 0.72) !important;
-  backdrop-filter: blur(28px) saturate(180%);
-  -webkit-backdrop-filter: blur(28px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgb(var(--v-theme-surface)) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
 }
 
 /* Sidebar menu items */
