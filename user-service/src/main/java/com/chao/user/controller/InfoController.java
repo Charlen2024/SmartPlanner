@@ -62,10 +62,13 @@ public class InfoController {
         try {
             String encoded = java.net.URLEncoder.encode(loc, java.nio.charset.StandardCharsets.UTF_8);
             String url = "https://wttr.in/" + encoded + "?format=j1";
-            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(10)).build();
-            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url)).timeout(java.time.Duration.ofSeconds(15)).GET().build();
-            HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
-            JsonNode root = objectMapper.readTree(resp.body());
+            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(10000);
+            conn.setRequestProperty("User-Agent", "SmartPlanner/1.0");
+            conn.setInstanceFollowRedirects(true);
+            byte[] bytes = conn.getInputStream().readAllBytes();
+            JsonNode root = objectMapper.readTree(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
             JsonNode cc = root.path("current_condition");
             if (cc.isArray() && !cc.isEmpty()) {
                 JsonNode c = cc.get(0);
@@ -75,7 +78,7 @@ public class InfoController {
                 dto.setHumidity(parseStringNode(c, "humidity"));
                 String desc = c.path("weatherDesc").isArray() && !c.path("weatherDesc").isEmpty()
                         ? c.path("weatherDesc").get(0).path("value").asText() : null;
-                dto.setSummary(desc != null ? desc : "天气");
+                dto.setSummary(translateWeather(desc));
             }
         } catch (Exception e) {
             log.warn("Weather fetch failed for location={}: {}", loc, e.toString());
@@ -407,18 +410,43 @@ public class InfoController {
         return n.asText();
     }
 
-    private String weatherSummary(Integer code) {
-        if (code == null) {
-            return "未知";
-        }
-        if (code == 0) return "晴";
-        if (code == 1 || code == 2 || code == 3) return "多云";
-        if (code == 45 || code == 48) return "雾";
-        if (code == 51 || code == 53 || code == 55) return "毛毛雨";
-        if (code == 61 || code == 63 || code == 65) return "下雨";
-        if (code == 71 || code == 73 || code == 75) return "下雪";
-        if (code == 80 || code == 81 || code == 82) return "阵雨";
-        if (code == 95 || code == 96 || code == 99) return "雷暴";
-        return "天气";
+    private String translateWeather(String desc) {
+        if (desc == null) return "天气";
+        String d = desc.trim();
+        // Exact matches
+        return switch (d) {
+            case "Sunny" -> "晴";
+            case "Clear" -> "晴";
+            case "Partly Cloudy", "Partly cloudy" -> "多云";
+            case "Cloudy" -> "阴";
+            case "Overcast" -> "阴";
+            case "Mist", "Fog", "Freezing fog" -> "雾";
+            case "Light drizzle", "Patchy light drizzle" -> "毛毛雨";
+            case "Light rain", "Light Rain" -> "小雨";
+            case "Moderate rain", "Moderate or heavy rain shower" -> "中雨";
+            case "Heavy rain", "Torrential rain shower" -> "大雨";
+            case "Patchy rain possible", "Patchy rain nearby" -> "可能有雨";
+            case "Thunderstorm", "Thundery outbreaks possible" -> "雷暴";
+            case "Light snow", "Patchy light snow" -> "小雪";
+            case "Moderate snow" -> "中雪";
+            case "Heavy snow" -> "大雪";
+            case "Blizzard" -> "暴风雪";
+            case "Light sleet" -> "雨夹雪";
+            default -> {
+                String lower = d.toLowerCase();
+                if (lower.contains("sunny") || lower.contains("clear")) yield "晴";
+                if (lower.contains("cloudy")) yield "多云";
+                if (lower.contains("overcast")) yield "阴";
+                if (lower.contains("fog") || lower.contains("mist")) yield "雾";
+                if (lower.contains("drizzle")) yield "毛毛雨";
+                if (lower.contains("heavy rain") || lower.contains("torrential")) yield "大雨";
+                if (lower.contains("rain") || lower.contains("shower")) yield "有雨";
+                if (lower.contains("thunder") || lower.contains("lightning")) yield "雷暴";
+                if (lower.contains("snow") || lower.contains("blizzard")) yield "雪";
+                if (lower.contains("sleet") || lower.contains("ice")) yield "雨夹雪";
+                if (lower.contains("wind")) yield "大风";
+                yield "天气";
+            }
+        };
     }
 }
