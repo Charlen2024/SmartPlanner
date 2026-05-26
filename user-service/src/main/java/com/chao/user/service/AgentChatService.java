@@ -812,8 +812,10 @@ public class AgentChatService {
                 @ToolParam(description = "起始时间（ISO-8601，如 2026-05-22T00:00:00）", required = false) @Nullable String from,
                 @ToolParam(description = "结束时间（ISO-8601，如 2026-05-22T23:59:59）", required = false) @Nullable String to) {
             Long userId = requireUserId();
-            // Default to today when no date range provided
-            if (from == null && to == null) {
+            // Default to today when no date range provided (handle both null and empty string from LLM)
+            boolean fromBlank = from == null || from.isBlank();
+            boolean toBlank = to == null || to.isBlank();
+            if (fromBlank && toBlank) {
                 LocalDate today = LocalDate.now(java.time.ZoneId.of("Asia/Shanghai"));
                 from = today + "T00:00:00";
                 to = today + "T23:59:59";
