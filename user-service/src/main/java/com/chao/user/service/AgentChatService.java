@@ -282,14 +282,9 @@ public class AgentChatService {
     private String sanitizeStreamChunk(String chunk) {
         if (chunk == null || chunk.isEmpty()) return "";
         String s = chunk;
-        s = s.replace("```", "");
-        s = s.replace("**", "");
-        s = s.replace("__", "");
-        s = s.replace("~~", "");
-        s = s.replace("`", "");
-        s = s.replace("*", "");
-        s = s.replace("_", "");
-        s = s.replace("#", "");
+        // keep markdown formatting - frontend renders it via marked.js
+        // only strip code fences that break SSE
+        s = s.replace("```", "'''");
         return s;
     }
 
