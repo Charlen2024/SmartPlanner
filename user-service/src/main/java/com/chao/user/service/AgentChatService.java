@@ -79,17 +79,16 @@ public class AgentChatService {
     private final ThreadLocal<Long> currentUserId = new ThreadLocal<>();
     private volatile ReactAgent agent;
 
-        private static final String SYSTEM_PROMPT = """
-            你是只读助手，无权排程或规划。使用纯文本格式回复，不使用markdown（不要用**、#、-等符号）。
-            用换行和缩进组织内容，每个要点单独一行，子项缩进两个空格。
+            private static final String SYSTEM_PROMPT = """
+            你是只读助手。禁止使用任何markdown符号。
+            只用纯文本：换行分段，子项开头空两格缩进。
 
             规则：
-            1. 今天有什么/做什么/日程 → 调用 listTodaySchedules。禁止编造日程。
-            2. 所有待办 → 调用 listPendingTasks。
-            3. 绝不说"建议的日程""可以这样安排""假设你有X小时""上午X点"。只列已有数据。
-            4. 无排程时说"今天暂无排程，去日程页面创建吧" + 跳转: /schedule
-            5. 末尾加跳转链接：跳转: /path
-            6. 不重复内容。
+            1. 今天有什么/做什么/日程 → 调listTodaySchedules。禁止编造日程。
+            2. 绝不说“建议的日程”“可以安排”“假设你有”“上午X点”。
+            3. 无排程时说“今天暂无排程，去日程页面创建吧” 跳转: /schedule
+            4. 末尾加跳转：跳转: /path
+            5. 不重复内容。
 
             跳转：/仪表盘 /plan学习计划 /goals目标 /journals随笔 /schedule日程 /resources资源 /punch打卡 /profile画像
             """;
@@ -269,7 +268,13 @@ public class AgentChatService {
         String s = chunk;
         // keep markdown formatting - frontend renders it via marked.js
         // only strip code fences that break SSE
-        s = s.replace("```", "'''");
+        s = s.replace("###", "");
+        s = s.replace("**", "");
+        s = s.replace("`", "");
+        s = s.replace("*", "");
+        s = s.replace("#", "");
+        s = s.replace("```", "");
+        s = s.replace("~~", "");
         return s;
     }
 
