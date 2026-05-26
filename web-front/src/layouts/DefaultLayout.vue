@@ -12,6 +12,13 @@ const route = useRoute()
 const display = useDisplay()
 const theme = useTheme()
 const isDark = computed(() => theme.global.current.value.dark)
+const chatScrollRef = ref(null)
+watch(() => assistant.chatMessages?.length, () => {
+  nextTick(() => {
+    const el = chatScrollRef.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
+})
 const notify = useNotifyStore()
 const assistant = useAssistantStore()
 const slots = useSlots()
@@ -208,6 +215,8 @@ function logout() {
   assistant.$reset()
   router.push('/login')
 }
+
+const quickPrompts = ['今天该做什么？', '总结本周进度', '给我一个学习建议']
 
 function chatHint() {
   if (assistant.chatMessages?.length) return ''
@@ -489,8 +498,13 @@ function onResizeEnd() {
         </div>
         <v-divider v-show="!assistant.minimized" class="flex-shrink-0" />
 
-        <div v-show="!assistant.minimized" class="px-3 py-3 flex-grow-1" style="overflow-y: auto;">
-          <div v-if="assistant.chatMessages?.length" class="vibe-chat-scroll mb-2" style="max-height: 220px; overflow-y: auto;">
+        <!-- Messages area (scrollable) -->
+        <div v-show="!assistant.minimized" ref="chatScrollRef" class="flex-grow-1 px-3 pt-3" style="overflow-y: auto; min-height: 0;">
+          <div v-if="!assistant.chatMessages?.length && !assistant.chatLoading" class="d-flex flex-column align-center justify-center" style="height: 100%; opacity: 0.45; padding-top: 60px;">
+            <v-icon size="48" class="mb-2">mdi-robot-outline</v-icon>
+            <div class="text-caption">问我任何关于学习计划的问题</div>
+          </div>
+          <div v-if="assistant.chatMessages?.length">
             <div v-for="m in assistant.chatMessages" :key="m._key || m.text?.slice(0,8) + Math.random()" class="mb-3">
               <div :class="['vibe-chat-bubble', m.role === 'user' ? 'vibe-chat-user' : 'vibe-chat-ai']">
                 <span style="white-space: pre-wrap;">{{ m.text }}</span>
@@ -507,22 +521,41 @@ function onResizeEnd() {
               </div>
             </div>
           </div>
-          <div v-if="assistant.chatLoading" class="d-flex align-center ga-2 mb-2">
-            <v-progress-circular indeterminate size="16" width="2" />
-            <span class="text-caption" style="opacity:0.65">AI 正在思考...</span>
-          </div>
-          <v-text-field
-              v-model="assistant.chatInput"
-              :placeholder="chatHint()"
-              variant="outlined"
-              density="compact"
+
+        </div>
+
+        <!-- Input area (sticky bottom) -->
+        <div v-show="!assistant.minimized" class="flex-shrink-0 px-3 pb-3 pt-1">
+          <div class="d-flex flex-wrap ga-1 mb-2">
+            <v-chip
+              v-for="p in quickPrompts"
+              :key="p"
+              size="x-small"
+              variant="tonal"
               :disabled="assistant.chatLoading"
-              class="vibe-chat-input"
-              hide-details
-              @keyup.enter="assistant.sendChat()"
-          />
-          <div class="d-flex justify-end mt-2">
-            <v-btn color="primary" variant="tonal" :loading="assistant.chatLoading" @click="assistant.sendChat">发送</v-btn>
+              @click="assistant.chatInput = p; assistant.sendChat()"
+            >{{ p }}</v-chip>
+          </div>
+          <div class="vibe-chat-bar">
+            <v-text-field
+                v-model="assistant.chatInput"
+                :placeholder="chatHint()"
+                variant="plain"
+                density="compact"
+                :disabled="assistant.chatLoading"
+                class="vibe-chat-field"
+                hide-details
+                @keyup.enter="assistant.sendChat()"
+            />
+            <v-btn
+                icon="mdi-send"
+                :color="assistant.chatInput.trim() ? 'primary' : undefined"
+                variant="text"
+                size="small"
+                :loading="assistant.chatLoading"
+                :disabled="!assistant.chatInput.trim() && !assistant.chatLoading"
+                @click="assistant.sendChat()"
+            />
           </div>
         </div>
 
@@ -725,6 +758,31 @@ function onResizeEnd() {
 }
 .vibe-chat-input :deep(.v-field) {
   background: transparent !important;
+}
+.vibe-chat-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: 16px;
+  background: rgba(var(--v-theme-on-surface), 0.04);
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.08);
+  transition: border-color 0.2s;
+}
+.vibe-chat-bar:focus-within {
+  border-color: rgba(var(--v-theme-primary), 0.35);
+  background: rgba(var(--v-theme-on-surface), 0.06);
+}
+.vibe-chat-field {
+  flex: 1;
+}
+.vibe-chat-field :deep(.v-field__overlay) {
+  opacity: 0 !important;
+}
+.vibe-chat-field :deep(.v-field__input) {
+  font-size: 13px !important;
+  padding-top: 6px !important;
+  padding-bottom: 6px !important;
 }
 .vibe-chat-input :deep(.v-field__overlay) {
   opacity: 0 !important;

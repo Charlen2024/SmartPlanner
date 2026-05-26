@@ -1,4 +1,4 @@
-import { defineStore } from 'pinia'
+﻿import { defineStore } from 'pinia'
 import api from '../plugins/api'
 
 const NAV_ITEMS = [
@@ -204,7 +204,7 @@ export const useAssistantStore = defineStore('assistant', {
               }
             }
             if (dataLines.length) {
-              buf += dataLines.join('\n')
+              buf += dataLines.join('')
             }
             aiMsg.text = buf
           }

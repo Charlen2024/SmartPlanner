@@ -1,4 +1,4 @@
-package com.chao.user.service;
+﻿package com.chao.user.service;
 
 import com.chao.common.client.GoalClient;
 import com.chao.common.client.PunchClient;
@@ -817,6 +817,12 @@ public class AgentChatService {
                 @ToolParam(description = "起始时间（ISO-8601，如 2026-05-22T00:00:00）", required = false) @Nullable String from,
                 @ToolParam(description = "结束时间（ISO-8601，如 2026-05-22T23:59:59）", required = false) @Nullable String to) {
             Long userId = requireUserId();
+            // Default to today when no date range provided
+            if (from == null && to == null) {
+                LocalDate today = LocalDate.now(java.time.ZoneId.of("Asia/Shanghai"));
+                from = today + "T00:00:00";
+                to = today + "T23:59:59";
+            }
             Result<List<TaskScheduleDto>> res = scheduleClient.listTaskSchedules(userId, from, to);
             List<TaskScheduleDto> list = res != null ? res.getData() : List.of();
             list = list == null ? List.of() : list;
