@@ -13,6 +13,11 @@ import com.chao.user.dto.UserPortraitDto;
 import com.chao.user.dto.SchedulePreferenceDto;
 import com.chao.user.dto.WeatherDto;
 import com.chao.user.service.UserPortraitAiService;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
+import org.springframework.beans.factory.ObjectProvider;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -43,6 +48,7 @@ public class InfoController {
     private final PunchClient punchClient;
     private final ScheduleClient scheduleClient;
     private final UserPortraitAiService userPortraitAiService;
+    private final ObjectProvider<VectorStore> vectorStoreProvider;
 
     @GetMapping("/weather")
     public Result<WeatherDto> weather(
@@ -110,7 +116,9 @@ public class InfoController {
 
         UserPortraitAiService.AiPortraitResult ai = null;
         try {
-            ai = userPortraitAiService.analyze(records, schedules, streak);
+        List<String> journalSnippets = searchJournalSnippets(userId);
+
+            ai = userPortraitAiService.analyze(records, schedules, streak, journalSnippets);
         } catch (Exception ignored) {
         }
 
@@ -126,6 +134,33 @@ public class InfoController {
         dto.setRecommendation(ai != null ? ai.getRecommendation() : recommend(insights, habits));
         dto.setTips(insights.getTips());
         return Result.success(dto);
+    }
+
+    private List<String> searchJournalSnippets(Long userId) {
+        try {
+            VectorStore vs = vectorStoreProvider != null ? vectorStoreProvider.getIfAvailable() : null;
+            if (vs == null) {
+                return List.of();
+            }
+            FilterExpressionBuilder fb = new FilterExpressionBuilder();
+            List<Document> docs = vs.similaritySearch(
+                SearchRequest.builder()
+                    .query("心情 情绪 学习状态 焦虑 效率 拖延 专注 压力 动力")
+                    .topK(8)
+                    .filterExpression(fb.eq("userId", userId).build())
+                    .build()
+            );
+            if (docs == null || docs.isEmpty()) {
+                return List.of();
+            }
+            return docs.stream()
+                .map(d -> d.getText() != null ? d.getText() : "")
+                .filter(s -> !s.isBlank())
+                .limit(6)
+                .collect(Collectors.toList());
+        } catch (Exception ignored) {
+            return List.of();
+        }
     }
 
     private UserInsightDto computeInsights(Long userId, LocalDateTime from, LocalDateTime to) {

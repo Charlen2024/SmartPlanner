@@ -9,10 +9,10 @@ import GoalsView from '../views/GoalsView.vue'
 import TasksView from '../views/TasksView.vue'
 import JournalsView from '../views/JournalsView.vue'
 import ScheduleView from '../views/ScheduleView.vue'
-import OnboardingView from '../views/OnboardingView.vue'
 import ResourcesView from '../views/ResourcesView.vue'
 import PunchView from '../views/PunchView.vue'
 import ProfileView from '../views/ProfileView.vue'
+import Game2048View from '../views/Game2048View.vue'
 
 export function createRouter() {
   const router = _createRouter({
@@ -20,11 +20,14 @@ export function createRouter() {
     routes: [
       { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
       {
+        path: '/onboarding',
+        redirect: (to) => ({ name: 'plan', query: to.query }),
+      },
+      {
         path: '/',
         component: DefaultLayout,
         children: [
           { path: '', name: 'dashboard', component: DashboardView },
-          { path: 'onboarding', name: 'onboarding', component: OnboardingView },
           { path: 'plan', name: 'plan', component: PlanView },
           { path: 'goals', name: 'goals', component: GoalsView },
           { path: 'tasks', name: 'tasks', component: TasksView },
@@ -33,6 +36,7 @@ export function createRouter() {
           { path: 'resources', name: 'resources', component: ResourcesView },
           { path: 'punch', name: 'punch', component: PunchView },
           { path: 'profile', name: 'profile', component: ProfileView },
+          { path: 'games/2048', name: 'game2048', component: Game2048View },
         ],
       },
     ],
@@ -50,8 +54,8 @@ export function createRouter() {
         return { name: 'login' }
       }
     }
-    if (auth.me?.scheduleImported === false && to.name !== 'onboarding') {
-      return { name: 'onboarding', query: { next: to.fullPath } }
+    if (auth.me?.scheduleImported === false && to.name !== 'plan') {
+      return { name: 'plan', query: { next: to.fullPath } }
     }
     return true
   })

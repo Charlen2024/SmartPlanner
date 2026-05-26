@@ -28,8 +28,8 @@ const vuetify = createVuetify({
       vibeLight: {
         dark: false,
         colors: {
-          primary: '#6D28D9',
-          secondary: '#06B6D4',
+          primary: '#2563EB',
+          secondary: '#F59E0B',
           background: '#F8FAFC',
           surface: '#FFFFFF',
           'on-surface': '#0F172A',
@@ -38,8 +38,8 @@ const vuetify = createVuetify({
       vibeDark: {
         dark: true,
         colors: {
-          primary: '#8B5CF6',
-          secondary: '#22D3EE',
+          primary: '#3B82F6',
+          secondary: '#FBBF24',
           background: '#0B1020',
           surface: '#0F172A',
           'on-surface': '#E5E7EB',

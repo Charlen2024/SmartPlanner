@@ -75,6 +75,15 @@ public interface ScheduleClient {
     @PatchMapping("/api/schedule/task-schedules/{scheduleId}/status")
     Result<String> updateTaskScheduleStatus(@PathVariable("scheduleId") Long scheduleId, @RequestParam("status") Integer status);
 
+    @PostMapping("/api/schedule/task-schedules/delete-by-task-ids")
+    Result<String> deleteTaskSchedulesByTaskIds(@RequestParam("userId") Long userId, @RequestBody List<Long> taskIds);
+
+    @DeleteMapping("/api/schedule/task-schedules/by-date")
+    Result<String> deleteTaskSchedulesByDate(@RequestParam("userId") Long userId, @RequestParam("date") String date);
+
+    @DeleteMapping("/api/schedule/task-schedules/{scheduleId}")
+    Result<String> deleteTaskSchedule(@RequestParam("userId") Long userId, @PathVariable("scheduleId") Long scheduleId);
+
     @DeleteMapping("/api/schedule/task-schedules/future")
     Result<String> deleteFutureTaskSchedules(@RequestParam("userId") Long userId);
 

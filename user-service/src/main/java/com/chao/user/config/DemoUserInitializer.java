@@ -26,6 +26,5 @@ public class DemoUserInitializer implements ApplicationRunner {
             return;
         }
         appUserService.register(demoUsername, demoPassword);
-        appUserService.markScheduleImported(appUserService.getUserIdOrThrow(demoUsername));
     }
 }

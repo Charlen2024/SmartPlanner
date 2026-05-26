@@ -1,13 +1,18 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import api from '../plugins/api'
 import { useNotifyStore } from '../stores/notify'
+import { useAuthStore } from '../stores/auth'
+import { useRouter } from 'vue-router'
 
-const step = ref(1)
+const step = ref(0)
+const initializing = ref(true)
 const busy = ref(false)
 const error = ref('')
 const importResult = ref(null)
 const notify = useNotifyStore()
+const auth = useAuthStore()
+const router = useRouter()
 
 const scheduleFile = ref(null)
 const goalText = ref('学习分布式系统')
@@ -15,30 +20,53 @@ const topic = ref('分布式')
 
 const dashboard = ref(null)
 const tasks = ref([])
-const schedules = ref([])
 const currentGoalId = ref(null)
 const currentGoalTitle = ref('')
 const goalsList = ref([])
 const feedbackOpen = ref(false)
 const feedbackText = ref('')
+const tasksPolling = ref(false)
+const tasksPollingMessage = ref('')
+const tasksPollTimer = ref(null)
 
 const today = computed(() => new Date().toISOString().slice(0, 10))
+const needsImport = computed(() => auth.me?.scheduleImported === false)
+const showScheduleUpload = ref(false)
+const step1Title = computed(() => (needsImport.value ? '导入课表' : '课表（可选）'))
 
 const displayTasks = computed(() => tasks.value?.slice?.(0, 80) ?? [])
-const displaySchedules = computed(() => schedules.value?.slice?.(0, 80) ?? [])
 
-function fmt(dt) {
-  if (!dt) return '-'
-  return String(dt).replace('T', ' ').slice(0, 16)
+const WIZARD_KEY = 'smartplanner.planWizard.v1'
+
+function safeLoadWizardState() {
+  try {
+    const raw = localStorage.getItem(WIZARD_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return null
+    return parsed
+  } catch (e) {
+    return null
+  }
+}
+
+function safeSaveWizardState(patch) {
+  try {
+    const prev = safeLoadWizardState() || {}
+    const next = { ...prev, ...patch, updatedAt: Date.now() }
+    localStorage.setItem(WIZARD_KEY, JSON.stringify(next))
+  } catch (e) {}
+}
+
+function safeClearWizardState() {
+  try {
+    localStorage.removeItem(WIZARD_KEY)
+  } catch (e) {}
 }
 
 async function refreshAll() {
-  const [d, s] = await Promise.all([
-    api.get('/user/dashboard', { params: { topic: topic.value } }),
-    api.get('/user/schedule/task-schedules'),
-  ])
+  const d = await api.get('/user/dashboard', { params: { topic: topic.value } })
   dashboard.value = d?.data?.data ?? null
-  schedules.value = s?.data?.data ?? []
   await loadGoals(false)
 }
 
@@ -66,6 +94,48 @@ async function loadGoalTasks(goalId) {
   tasks.value = res?.data?.data ?? []
 }
 
+function stopTasksPolling() {
+  tasksPolling.value = false
+  tasksPollingMessage.value = ''
+  if (tasksPollTimer.value) clearTimeout(tasksPollTimer.value)
+  tasksPollTimer.value = null
+}
+
+function isTasksReady(list) {
+  const arr = Array.isArray(list) ? list : []
+  if (!arr.length) return false
+  const hasReal = arr.some((t) => t?.id && !String(t?.title || '').startsWith('[AI降级]'))
+  return hasReal
+}
+
+async function pollTasksUntilReady(goalId) {
+  stopTasksPolling()
+  const gid = Number(goalId)
+  if (!Number.isFinite(gid) || gid <= 0) return
+  tasksPolling.value = true
+  tasksPollingMessage.value = '任务拆解进行中（你可以先去写随笔/看别的，稍后回来）'
+  const startedAt = Date.now()
+  const loop = async () => {
+    if (!tasksPolling.value) return
+    try {
+      await loadGoalTasks(gid)
+      if (isTasksReady(tasks.value)) {
+        tasksPollingMessage.value = '任务已生成'
+        tasksPollTimer.value = setTimeout(() => stopTasksPolling(), 800)
+        return
+      }
+    } catch (e) {}
+    const elapsed = Date.now() - startedAt
+    if (elapsed > 120000) {
+      tasksPollingMessage.value = '任务拆解耗时较长，可稍后点击刷新'
+      tasksPollTimer.value = setTimeout(() => stopTasksPolling(), 1500)
+      return
+    }
+    tasksPollTimer.value = setTimeout(loop, 2000)
+  }
+  await loop()
+}
+
 async function onSelectGoal(goalId) {
   currentGoalId.value = goalId
   const g = goalsList.value.find((x) => x.id === goalId)
@@ -75,6 +145,7 @@ async function onSelectGoal(goalId) {
 
 function acceptTasks() {
   notify.success('已标记为满意')
+  safeSaveWizardState({ tasksAcceptedGoalId: currentGoalId.value || null })
 }
 
 async function submitFeedback() {
@@ -86,13 +157,7 @@ async function submitFeedback() {
     feedbackOpen.value = false
     feedbackText.value = ''
     notify.info('已提交意见，后台正在重新生成任务')
-    for (let i = 0; i < 25; i++) {
-      await new Promise((r) => setTimeout(r, 1500))
-      await loadGoalTasks(currentGoalId.value)
-      if ((tasks.value?.length ?? 0) >= 3 && !tasks.value.some((t) => String(t?.title || '').startsWith('[AI降级]'))) {
-        break
-      }
-    }
+    await pollTasksUntilReady(currentGoalId.value)
   } catch (e) {
     error.value = e?.response?.data?.message || '提交失败'
   } finally {
@@ -111,6 +176,9 @@ async function importSchedule() {
     const res = await api.post('/user/schedule/import', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
     importResult.value = res?.data?.data ?? null
     notify.success(`课表导入成功：${importResult.value?.inserted ?? 0} 条`)
+    try {
+      await auth.fetchMe()
+    } catch (e) {}
     step.value = 2
   } catch (e) {
     error.value = e?.response?.data?.message || '课表导入失败（请使用 .ics / .xlsx）'
@@ -146,6 +214,8 @@ async function createGoalByAi() {
     currentGoalTitle.value = goal?.title ?? ''
     notify.info('目标已提交，后台正在拆解任务（完成后右上角会提示）')
     step.value = 4
+    safeSaveWizardState({ step: 4, currentGoalId: currentGoalId.value, topic: topic.value, goalText: goalText.value })
+    await pollTasksUntilReady(currentGoalId.value)
   } catch (e) {
     error.value = e?.response?.data?.message || '提交目标失败'
   } finally {
@@ -153,66 +223,72 @@ async function createGoalByAi() {
   }
 }
 
-async function autoSchedule() {
-  busy.value = true
-  error.value = ''
+function finishWizard() {
+  stopTasksPolling()
+  safeClearWizardState()
+  notify.success('已完成本次向导')
+  router.push('/')
+}
+
+function finishWizardAndGo(to) {
+  stopTasksPolling()
+  safeClearWizardState()
+  notify.success('已结束本页流程，请在目标页完成排程')
+  router.push(to)
+}
+
+async function initWizard() {
+  initializing.value = true
   try {
-    const t = new Date()
-    const d = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`
-    const startRes = await api.post('/user/schedule/daily-plan/jobs', { date: d, mode: 'replace' }, { timeout: 15000 })
-    const jobId = startRes?.data?.data?.jobId
-    if (!jobId) throw new Error('启动排程任务失败')
-    notify.info('已启动后台智能排程（完成后右上角会提示）')
-    setTimeout(async () => {
-      try {
-        for (let i = 0; i < 180; i++) {
-          await new Promise((r) => setTimeout(r, 2000))
-          const st = await api.get(`/user/schedule/daily-plan/jobs/${jobId}`)
-          const data = st?.data?.data ?? null
-          if (data?.status === 'DONE') {
-            await refreshAll()
-            break
-          }
-          if (data?.status === 'FAILED') {
-            break
-          }
-        }
-      } catch (e) {}
-    }, 1000)
-    step.value = 5
-  } catch (e) {
-    if (e?.code === 'ECONNABORTED') {
-      error.value = '智能排程请求超时，请稍后重试'
-    } else {
-      error.value = e?.response?.data?.message || e?.message || '智能排程失败'
+    await auth.fetchMe()
+  } catch (e) {}
+  await refreshAll()
+
+  const saved = safeLoadWizardState()
+  const savedStep = Number(saved?.step)
+  const savedGoalId = Number(saved?.currentGoalId)
+  let desiredStep = 1
+  if (Number.isFinite(savedStep) && savedStep >= 1 && savedStep <= 5) desiredStep = savedStep
+  if (Number.isFinite(savedGoalId) && savedGoalId > 0) {
+    currentGoalId.value = savedGoalId
+    await loadGoals(false)
+    if (desiredStep === 4 && !isTasksReady(tasks.value)) {
+      await pollTasksUntilReady(savedGoalId)
     }
-    notify.error(error.value)
-  } finally {
-    busy.value = false
   }
+  step.value = desiredStep
+  initializing.value = false
 }
 
-async function punchFirstTask() {
-  const t = tasks.value?.[0]
-  if (!t) return
-  busy.value = true
-  error.value = ''
-  try {
-    const fd = new FormData()
-    fd.append('taskId', t.id)
-    fd.append('type', 1)
-    fd.append('location', '31.2304,121.4737')
-    await api.post('/user/punch/submit', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
-    notify.success('已打卡')
-  } catch (e) {
-    error.value = '打卡失败'
-    notify.error(error.value)
-  } finally {
-    busy.value = false
-  }
-}
+onMounted(initWizard)
 
-onMounted(refreshAll)
+watch(
+  () => step.value,
+  (v) => {
+    if (initializing.value) return
+    const n = Number(v)
+    if (Number.isFinite(n) && n >= 1 && n <= 5) safeSaveWizardState({ step: n })
+    if (n !== 4) stopTasksPolling()
+  },
+)
+
+watch(
+  () => currentGoalId.value,
+  (v) => {
+    safeSaveWizardState({ currentGoalId: v || null })
+  },
+)
+
+watch(
+  () => topic.value,
+  (v) => {
+    safeSaveWizardState({ topic: v })
+  },
+)
+
+onBeforeUnmount(() => {
+  stopTasksPolling()
+})
 </script>
 
 <template>
@@ -220,7 +296,7 @@ onMounted(refreshAll)
     <v-row class="mb-4" align="center">
       <v-col cols="12" md="7">
         <div class="text-h5 font-weight-bold">学习计划向导</div>
-        <div class="text-body-2" style="opacity: 0.78">导入课表 → 识别空闲时间 → 设定目标 → 拆解任务 → 智能排程 → 打卡</div>
+        <div class="text-body-2" style="opacity: 0.78">课表（一次导入即可）→ 识别空闲时间 → 添加新目标 → 拆解任务 → 去目标页排程 → 打卡</div>
       </v-col>
       <v-col cols="12" md="5" class="d-flex justify-end">
         <v-btn variant="tonal" :loading="busy" @click="refreshAll">刷新数据</v-btn>
@@ -229,22 +305,27 @@ onMounted(refreshAll)
 
     <v-alert v-if="error" type="error" variant="tonal" class="mb-4">{{ error }}</v-alert>
 
-    <v-stepper v-model="step" elevation="0">
+    <div v-if="initializing" class="mb-4">
+      <v-alert type="info" variant="tonal" class="mb-2">正在加载向导数据…</v-alert>
+      <v-progress-linear indeterminate height="8" rounded color="primary" />
+    </div>
+
+    <v-stepper v-else v-model="step" elevation="0">
       <v-stepper-header>
-        <v-stepper-item :value="1" title="导入课表" />
+        <v-stepper-item :value="1" :title="step1Title" />
         <v-divider />
         <v-stepper-item :value="2" title="识别空闲时间" />
         <v-divider />
-        <v-stepper-item :value="3" title="设定目标" />
+        <v-stepper-item :value="3" title="添加新目标" />
         <v-divider />
         <v-stepper-item :value="4" title="任务拆解" />
         <v-divider />
-        <v-stepper-item :value="5" title="智能排程/打卡" />
+        <v-stepper-item :value="5" title="去目标页排程/完成" />
       </v-stepper-header>
 
       <v-stepper-window>
         <v-stepper-window-item :value="1">
-          <v-card class="pa-4">
+          <v-card v-if="needsImport || showScheduleUpload" class="pa-4">
             <div class="text-subtitle-1 font-weight-semibold mb-2">上传大学课表文件</div>
             <v-file-input v-model="scheduleFile" label="选择文件" prepend-icon="mdi-upload" variant="outlined" />
             <v-alert type="info" variant="tonal" class="mt-2">
@@ -267,7 +348,19 @@ onMounted(refreshAll)
               <div v-for="(w, i) in importResult.warnings ?? []" :key="i" class="text-body-2">{{ w }}</div>
             </v-alert>
             <div class="d-flex justify-end mt-2">
+              <v-btn v-if="!needsImport" variant="text" @click="showScheduleUpload = false">暂不更换</v-btn>
               <v-btn color="primary" :loading="busy" @click="importSchedule">导入</v-btn>
+            </div>
+          </v-card>
+          <v-card v-else class="pa-4">
+            <div class="text-subtitle-1 font-weight-semibold mb-2">课表已导入</div>
+            <v-alert type="success" variant="tonal">
+              已检测到你之前导入过课表。这里默认不再要求重复上传，直接进入“添加新目标”。
+            </v-alert>
+            <div class="d-flex justify-end mt-3">
+              <v-btn variant="tonal" @click="router.push('/schedule')">查看/管理课表</v-btn>
+              <v-btn class="ml-3" variant="tonal" @click="showScheduleUpload = true">更换课表</v-btn>
+              <v-btn class="ml-3" color="primary" @click="step = 3">开始添加目标</v-btn>
             </div>
           </v-card>
         </v-stepper-window-item>
@@ -289,7 +382,7 @@ onMounted(refreshAll)
 
         <v-stepper-window-item :value="3">
           <v-card class="pa-4">
-            <div class="text-subtitle-1 font-weight-semibold mb-2">设定学习目标</div>
+            <div class="text-subtitle-1 font-weight-semibold mb-2">添加新目标</div>
             <v-textarea v-model="goalText" label="例如：学习分布式系统" variant="outlined" rows="3" auto-grow />
             <v-text-field v-model="topic" label="资源主题（用于推荐）" variant="outlined" />
             <div class="d-flex justify-end">
@@ -300,28 +393,18 @@ onMounted(refreshAll)
 
         <v-stepper-window-item :value="4">
           <v-card class="pa-4">
-            <v-alert v-if="!tasks?.length" type="info" variant="tonal" class="mb-3">暂无待办任务，稍后刷新重试</v-alert>
+            <v-alert v-if="tasksPolling" type="info" variant="tonal" class="mb-3">
+              {{ tasksPollingMessage || '任务拆解进行中…' }}
+            </v-alert>
+            <v-alert v-else-if="!tasks?.length" type="info" variant="tonal" class="mb-3">暂无待办任务，稍后刷新重试</v-alert>
             <div v-else class="vibe-scroll">
               <div class="vibe-scroll-header">
                 <div class="d-flex align-center">
                   <div class="text-subtitle-1 font-weight-semibold">任务列表</div>
-                  <v-spacer />
-                  <v-select
-                    v-model="currentGoalId"
-                    :items="goalsList"
-                    item-title="title"
-                    item-value="id"
-                    label="切换目标"
-                    density="compact"
-                    variant="outlined"
-                    style="max-width: 360px"
-                    class="mr-2"
-                    @update:modelValue="onSelectGoal"
-                  />
                   <v-btn variant="tonal" class="mr-2" :disabled="!currentGoalId" @click="acceptTasks">满意</v-btn>
                   <v-btn variant="tonal" color="warning" class="mr-2" :disabled="!currentGoalId" @click="feedbackOpen = true">不满意</v-btn>
                   <v-btn variant="tonal" class="mr-2" :loading="busy" @click="refreshAll">刷新</v-btn>
-                  <v-btn color="primary" :loading="busy" @click="autoSchedule">智能排程</v-btn>
+                  <v-btn color="primary" @click="finishWizardAndGo('/goals')">去目标页排程</v-btn>
                 </div>
                 <div class="text-caption mt-1" style="opacity:0.75">
                   当前目标：{{ currentGoalTitle || '-' }}（ID {{ currentGoalId || '-' }}）｜当前显示 {{ displayTasks.length }} / {{ tasks.length }}（仅展示前 80 条）
@@ -331,6 +414,10 @@ onMounted(refreshAll)
                 <v-list-item v-for="t in displayTasks" :key="t.id" :title="t.title" :subtitle="t.description" />
               </v-list>
             </div>
+            <div v-if="tasksPolling || !tasks?.length" class="d-flex justify-end mt-3">
+              <v-btn variant="tonal" class="mr-2" @click="router.push('/journals')">去写随笔</v-btn>
+              <v-btn variant="tonal" :loading="busy" @click="refreshAll">刷新</v-btn>
+            </div>
           </v-card>
         </v-stepper-window-item>
 
@@ -338,27 +425,21 @@ onMounted(refreshAll)
           <v-row>
             <v-col cols="12" md="6">
               <v-card class="pa-4">
-                <div class="text-subtitle-1 font-weight-semibold mb-2">排程结果</div>
-                <v-alert v-if="!schedules?.length" type="info" variant="tonal">暂无排程记录</v-alert>
-                <div v-else class="vibe-scroll">
-                  <div class="vibe-scroll-header">
-                    <div class="text-caption" style="opacity:0.75">
-                      当前显示 {{ displaySchedules.length }} / {{ schedules.length }}（为避免页面卡顿，仅展示前 80 条）
-                    </div>
-                  </div>
-                  <div v-for="s in displaySchedules" :key="s.id" class="mb-2 px-3 py-2">
-                    <div class="text-subtitle-2 font-weight-semibold">{{ s.taskTitle || `任务 ${s.taskId}` }}</div>
-                    <div class="text-body-2" style="opacity:0.8">{{ fmt(s.startTime) }} - {{ fmt(s.endTime) }}</div>
-                  </div>
+                <div class="text-subtitle-1 font-weight-semibold mb-2">排程</div>
+                <v-alert type="info" variant="tonal" class="mb-3">
+                  课表提交统一在本页完成。智能排程统一在「目标」页生成（异步执行，完成后会通知）。
+                </v-alert>
+                <div class="d-flex justify-end">
+                  <v-btn variant="tonal" class="mr-2" @click="finishWizardAndGo('/goals')">去目标页</v-btn>
+                  <v-btn variant="tonal" @click="finishWizardAndGo('/schedule')">查看日程</v-btn>
                 </div>
               </v-card>
             </v-col>
             <v-col cols="12" md="6">
               <v-card class="pa-4">
-                <div class="text-subtitle-1 font-weight-semibold mb-2">开始打卡</div>
-                <div class="text-body-2 mb-3" style="opacity: 0.78">默认对第一条待办任务进行定位打卡（可在“打卡”页面上传证据/查看更多）</div>
+                <div class="text-subtitle-1 font-weight-semibold mb-2">完成</div>
                 <div class="d-flex justify-end">
-                  <v-btn color="primary" :loading="busy" @click="punchFirstTask">一键打卡</v-btn>
+                  <v-btn color="primary" @click="finishWizard">完成</v-btn>
                 </div>
               </v-card>
             </v-col>

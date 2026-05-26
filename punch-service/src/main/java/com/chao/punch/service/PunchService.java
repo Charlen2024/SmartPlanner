@@ -8,24 +8,26 @@ import com.chao.punch.mapper.PunchRecordMapper;
 import com.chao.punch.mapper.UserHabitMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.ChatClient;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class PunchService {
 
-    private final ChatClient chatClient;
+    private static final ZoneId SHANGHAI = ZoneId.of("Asia/Shanghai");
     private final StringRedisTemplate redisTemplate;
     private final PunchRecordMapper punchRecordMapper;
     private final UserHabitMapper userHabitMapper;
@@ -68,7 +70,7 @@ public class PunchService {
         if (ms == null) {
             return null;
         }
-        return LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(ms), ZoneId.of("Asia/Shanghai"));
+        return LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(ms), SHANGHAI);
     }
 
     @Async
@@ -85,35 +87,42 @@ public class PunchService {
     }
 
     private void awardPoints(Long userId) {
-        String script = """
-            local key = KEYS[1]
-            local current = redis.call('get', key)
-            if not current then
-                redis.call('set', key, 1)
-                return 1
-            else
-                local next = tonumber(current) + 1
-                redis.call('set', key, next)
-                return next
-            end
-            """;
-        Long streak = redisTemplate.execute(
-            new DefaultRedisScript<>(script, Long.class),
-            Collections.singletonList("user:streak:" + userId)
-        );
+        long streak = computeStreakByDb(userId);
+        redisTemplate.opsForValue().set("user:streak:" + userId, String.valueOf(streak));
         log.info("用户 {} 连续打卡天数: {}", userId, streak);
     }
 
     public Long getStreak(Long userId) {
-        String v = redisTemplate.opsForValue().get("user:streak:" + userId);
-        if (v == null) {
-            return 0L;
+        return computeStreakByDb(userId);
+    }
+
+    private long computeStreakByDb(Long userId) {
+        if (userId == null) return 0L;
+        LocalDateTime from = LocalDateTime.now(SHANGHAI).minusDays(60);
+        List<PunchRecord> records = punchRecordMapper.selectList(
+                new LambdaQueryWrapper<PunchRecord>()
+                        .eq(PunchRecord::getUserId, userId)
+                        .ge(PunchRecord::getCreatedAt, from)
+                        .orderByDesc(PunchRecord::getCreatedAt)
+                        .last("LIMIT 300")
+        );
+        if (records == null || records.isEmpty()) return 0L;
+
+        Set<LocalDate> days = new HashSet<>();
+        for (PunchRecord r : records) {
+            if (r == null || r.getCreatedAt() == null) continue;
+            days.add(r.getCreatedAt().atZone(SHANGHAI).toLocalDate());
         }
-        try {
-            return Long.parseLong(v);
-        } catch (NumberFormatException e) {
-            return 0L;
+        if (days.isEmpty()) return 0L;
+
+        LocalDate today = LocalDate.now(SHANGHAI);
+        LocalDate cursor = days.contains(today) ? today : today.minusDays(1);
+        long streak = 0;
+        while (days.contains(cursor)) {
+            streak++;
+            cursor = cursor.minusDays(1);
         }
+        return streak;
     }
 
     public List<PunchRecord> listRecords(Long userId, Long taskId, LocalDateTime from, LocalDateTime to) {

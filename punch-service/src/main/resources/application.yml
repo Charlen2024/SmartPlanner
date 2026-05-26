@@ -14,12 +14,14 @@ spring:
       discovery:
         server-addr: ${SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR:localhost:8848}
   ai:
-    openai:
-      api-key: ${OPENAI_API_KEY:DUMMY}
-      base-url: ${BASE_URL:https://api.openai.com/v1}
+    retry:
+      max-attempts: 1
+    dashscope:
+      read-timeout: 180
+      api-key: ${AI_DASHSCOPE_API_KEY}
       chat:
         options:
-          model: ${MODEL:gpt-4o-mini}
+          model: ${MODEL:qwen-max}
   data:
     redis:
       host: ${SPRING_REDIS_HOST:localhost}

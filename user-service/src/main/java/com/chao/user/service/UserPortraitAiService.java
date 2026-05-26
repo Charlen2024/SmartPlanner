@@ -23,12 +23,18 @@ public class UserPortraitAiService {
     }
 
     public AiPortraitResult analyze(List<PunchRecordDto> records, List<TaskScheduleDto> schedules, int streak) {
-        String prompt = buildPrompt(records, schedules, streak);
+        return analyze(records, schedules, streak, List.of());
+    }
+
+    public AiPortraitResult analyze(List<PunchRecordDto> records, List<TaskScheduleDto> schedules, int streak,
+                                     List<String> journalSnippets) {
+        String prompt = buildPrompt(records, schedules, streak, journalSnippets);
         String text = openAiCompatClient.complete(prompt);
         return parse(text);
     }
 
-    private String buildPrompt(List<PunchRecordDto> records, List<TaskScheduleDto> schedules, int streak) {
+    private String buildPrompt(List<PunchRecordDto> records, List<TaskScheduleDto> schedules, int streak,
+                                 List<String> journalSnippets) {
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
         StringBuilder sb = new StringBuilder();
@@ -44,6 +50,14 @@ public class UserPortraitAiService {
         sb.append("- procrastinationIndex: 0-1（越高越拖延）\n");
         sb.append("- recommendation.focusMinutes 必须是 30/45/60 之一；breakMinutes 固定 10；maxDailyMinutes 建议 120-300\n");
         sb.append("- tips 给 3-6 条中文短建议。\n\n");
+
+        if (journalSnippets != null && !journalSnippets.isEmpty()) {
+            sb.append("用户近期随笔片段（来自向量检索，反映情绪与学习状态）：\n");
+            for (String snippet : journalSnippets) {
+                sb.append("- ").append(snippet).append("\n");
+            }
+            sb.append("\n");
+        }
 
         sb.append("连续打卡天数：").append(streak).append("\n");
         sb.append("打卡记录（start-end, createdAt, taskId, durationMinutes）：\n");

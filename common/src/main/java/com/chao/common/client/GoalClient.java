@@ -70,6 +70,9 @@ public interface GoalClient {
             @RequestParam("content") String content,
             @RequestParam(value = "mood", required = false) String mood);
 
+    @DeleteMapping("/api/goals/journals/{journalId}")
+    Result<String> deleteJournal(@RequestParam("userId") Long userId, @PathVariable("journalId") Long journalId);
+
     @GetMapping("/api/goals/pending-tasks")
     Result<List<GoalTaskDto>> getPendingTasks(@RequestParam("userId") Long userId);
 
@@ -87,4 +90,7 @@ public interface GoalClient {
 
     @PostMapping("/api/goals/{goalId}/tasks/regenerate")
     Result<String> regenerateTasks(@PathVariable("goalId") Long goalId, @RequestParam("userId") Long userId, @RequestBody(required = false) String feedback);
+
+    @GetMapping("/api/goals/topics")
+    Result<java.util.List<String>> getDistinctTopics();
 }

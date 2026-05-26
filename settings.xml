@@ -5,9 +5,9 @@
     <mirrors>
         <mirror>
             <id>aliyun-maven</id>
-            <mirrorOf>central</mirrorOf>
             <name>Aliyun Maven Mirror</name>
             <url>https://maven.aliyun.com/repository/public</url>
+            <mirrorOf>*</mirrorOf>
         </mirror>
     </mirrors>
 </settings>

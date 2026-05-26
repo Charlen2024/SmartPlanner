@@ -14,8 +14,8 @@ COPY gateway-service/pom.xml gateway-service/
 COPY common/src common/src
 COPY user-service/src user-service/src
 
-RUN mvn clean install -pl common -am -DskipTests -s /root/.m2/settings.xml
-RUN mvn package -pl user-service -am -DskipTests -s /root/.m2/settings.xml
+RUN mvn clean install -pl common -am -DskipTests -s /root/.m2/settings.xml -Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5 -Dmaven.wagon.http.retryHandler.requestSentEnabled=true
+RUN mvn package -pl user-service -am -DskipTests -s /root/.m2/settings.xml -Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5 -Dmaven.wagon.http.retryHandler.requestSentEnabled=true
 
 FROM docker.1panel.live/library/eclipse-temurin:17-jre-alpine
 WORKDIR /app

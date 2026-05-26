@@ -84,6 +84,18 @@ public class ScheduleController {
         return Result.success("删除成功");
     }
 
+    @PostMapping("/task-schedules/delete-by-task-ids")
+    public Result<String> deleteTaskSchedulesByTaskIds(@RequestParam Long userId, @RequestBody List<Long> taskIds) {
+        scheduleService.deleteTaskSchedulesByTaskIds(userId, taskIds);
+        return Result.success("删除成功");
+    }
+
+    @DeleteMapping("/task-schedules/by-date")
+    public Result<String> deleteTaskSchedulesByDate(@RequestParam Long userId, @RequestParam String date) {
+        scheduleService.deleteTaskSchedulesByDate(userId, date);
+        return Result.success("已删除该日排程");
+    }
+
     @PostMapping("/plan-candidates")
     public Result<PlanCandidateDto> generatePlanCandidate(@RequestParam Long userId, @RequestBody GeneratePlanCandidateRequest request) {
         return Result.success(scheduleService.generatePlanCandidate(userId, request));

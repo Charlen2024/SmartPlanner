@@ -22,4 +22,3 @@ WORKDIR /app
 COPY --from=build /app/gateway-service/target/*.jar app.jar
 EXPOSE 8088
 ENTRYPOINT ["java", "-jar", "app.jar"]
-

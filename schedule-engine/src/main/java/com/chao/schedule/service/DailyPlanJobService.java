@@ -12,7 +12,10 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.time.Instant;
 import java.time.LocalDate;
-import java.util.Map;
+import java.util.*;
+import java.util.stream.Collectors;
+import com.chao.common.client.ResourceClient;
+import com.chao.common.dto.ResourceAdviceJobStartRequest;
 import java.util.UUID;
 import com.chao.common.config.RabbitMqConfig;
 import com.chao.common.dto.NotificationMessage;
@@ -28,12 +31,14 @@ public class DailyPlanJobService {
     private final ScheduleService scheduleService;
     private final Executor executor;
     private final RabbitTemplate rabbitTemplate;
+    private final ResourceClient resourceClient;
     private final Map<String, JobState> jobs = new ConcurrentHashMap<>();
 
-    public DailyPlanJobService(ScheduleService scheduleService, @Qualifier("applicationTaskExecutor") Executor executor, RabbitTemplate rabbitTemplate) {
+    public DailyPlanJobService(ScheduleService scheduleService, @Qualifier("applicationTaskExecutor") Executor executor, RabbitTemplate rabbitTemplate, ResourceClient resourceClient) {
         this.scheduleService = scheduleService;
         this.executor = executor;
         this.rabbitTemplate = rabbitTemplate;
+        this.resourceClient = resourceClient;
     }
 
     public DailyPlanJobStartResponse start(Long userId, DailyPlanJobStartRequest request) {
@@ -54,6 +59,9 @@ public class DailyPlanJobService {
         if (request != null) {
             commit.setDate(request.getDate());
             commit.setMode(request.getMode());
+            commit.setGoalId(request.getGoalId());
+            commit.setTaskIds(request.getTaskIds());
+            commit.setDays(request.getDays());
         }
         executor.execute(() -> run(jobId, userId, commit));
 
@@ -86,12 +94,40 @@ public class DailyPlanJobService {
             DailyPlanCommitResponse resp = scheduleService.commitDailyPlan(userId, request, (stage, progress, message) -> update(state, "RUNNING", stage, progress, message));
             update(state, "DONE", "DONE", 100, "已完成排程并写入日程");
             state.result = resp;
+            triggerResourceAdviceForSchedules(userId, resp);
             sendNotification(userId, "SCHEDULE_DONE", "你的智能学习计划已经排好，快去查看吧！");
         } catch (Exception e) {
             update(state, "FAILED", "FAILED", 100, "排程失败");
             state.error = e.getMessage() != null ? e.getMessage() : "服务异常";
             log.warn("日程排程 job 失败: userId={}, jobId={}, error={}", userId, jobId, state.error);
             sendNotification(userId, "SCHEDULE_FAILED", "智能排程失败：" + state.error);
+        }
+    }
+
+    private void triggerResourceAdviceForSchedules(Long userId, DailyPlanCommitResponse resp) {
+        if (resp == null || resp.getSchedules() == null || resp.getSchedules().isEmpty()) {
+            log.info("Schedule done, no tasks for advice: userId={}", userId);
+            return;
+        }
+        try {
+            Set<String> topics = resp.getSchedules().stream()
+                    .filter(s -> s.getTaskTitle() != null && !s.getTaskTitle().isBlank())
+                    .map(s -> s.getTaskTitle().trim())
+                    .limit(5)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            if (topics.isEmpty()) return;
+            log.info("Schedule done, auto-trigger RAG: userId={}, topics={}", userId, topics);
+            for (String topic : topics) {
+                try {
+                    ResourceAdviceJobStartRequest req = new ResourceAdviceJobStartRequest();
+                    req.setTopic(topic);
+                    resourceClient.startResourceAdviceJob(userId, req);
+                } catch (Exception e) {
+                    log.warn("Auto advice trigger FAILED (resource-search not running?): userId={}, topic={}, err={}", userId, topic, e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to extract schedule topics: userId={}, err={}", userId, e.getMessage());
         }
     }
 
@@ -102,7 +138,8 @@ public class DailyPlanJobService {
             notif.setType(type);
             notif.setContent(content);
             rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, notif);
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            log.warn("Notification FAILED (RabbitMQ not running?): userId={}, type={}, err={}", userId, type, e.getMessage());
         }
     }
 

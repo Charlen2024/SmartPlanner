@@ -1,6 +1,6 @@
 <script setup>
 import { useAuthStore } from '../stores/auth'
-import { computed, onMounted, onUnmounted, ref, useSlots } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, useSlots, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useDisplay, useTheme } from 'vuetify'
 import { useNotifyStore } from '../stores/notify'
@@ -22,8 +22,87 @@ let resizeStart = null
 
 const drawer = ref(true)
 const rail = ref(false)
+const notifMenu = ref(false)
+const unreadCount = computed(() => (notify.reminders || []).filter(r => !r.read).length)
 
 let sseSource = null
+let sseRetryCount = 0
+let sseRetryTimer = null
+const SSE_MAX_DELAY = 30000
+
+function stopSse() {
+  if (sseRetryTimer) {
+    clearTimeout(sseRetryTimer)
+    sseRetryTimer = null
+  }
+  if (sseSource) {
+    try { sseSource.close() } catch (e) {}
+  }
+  sseSource = null
+  sseRetryCount = 0
+}
+
+function startSse(token) {
+  const t = String(token || '').trim()
+  if (!t) return
+  stopSse()
+  sseSource = new EventSource(`/api/user/notifications/stream?access_token=${encodeURIComponent(t)}`)
+  sseSource.addEventListener('GOAL_TASK_READY', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      notify.addReminder(data)
+      notify.success(data.content || 'AI任务拆解已完成！')
+    } catch (err) {}
+  })
+  sseSource.addEventListener('SCHEDULE_DONE', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      notify.addReminder(data)
+      notify.success(data.content || '智能排程已完成！')
+    } catch (err) {}
+  })
+  sseSource.addEventListener('SCHEDULE_FAILED', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      notify.addReminder(data)
+      notify.error(data.content || '智能排程失败！')
+    } catch (err) {}
+  })
+  sseSource.addEventListener('AGENT_REMINDER', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      notify.addReminder(data)
+      assistant.setCareText(data.content || '')
+    } catch (err) {}
+  })
+  sseSource.addEventListener('AGENT_BADGE', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      notify.addReminder(data)
+    } catch (err) {}
+  })
+  sseSource.addEventListener('RESOURCE_ADVICE_DONE', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      notify.addReminder(data)
+      notify.success(data.content || '资源推荐已完成')
+    } catch (err) {}
+  })
+  sseSource.addEventListener('RESOURCE_ADVICE_FAILED', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      notify.addReminder(data)
+      notify.error(data.content || '资源推荐失败')
+    } catch (err) {}
+  })
+  sseSource.onerror = () => {
+    stopSse()
+    const delay = Math.min(SSE_MAX_DELAY, 1000 * Math.pow(2, sseRetryCount))
+    sseRetryCount++
+    sseRetryTimer = setTimeout(() => startSse(token), delay)
+  }
+  sseSource.onopen = () => { sseRetryCount = 0 }
+}
 
 onMounted(() => {
   const saved = localStorage.getItem('theme')
@@ -34,25 +113,7 @@ onMounted(() => {
   const token = localStorage.getItem('accessToken')
   if (token) {
     assistant.init()
-    sseSource = new EventSource(`/api/user/notifications/stream?access_token=${token}`)
-    sseSource.addEventListener('GOAL_TASK_READY', (e) => {
-      try {
-        const data = JSON.parse(e.data)
-        notify.success(data.content || 'AI任务拆解已完成！')
-      } catch (err) {}
-    })
-    sseSource.addEventListener('SCHEDULE_DONE', (e) => {
-      try {
-        const data = JSON.parse(e.data)
-        notify.success(data.content || '智能排程已完成！')
-      } catch (err) {}
-    })
-    sseSource.addEventListener('SCHEDULE_FAILED', (e) => {
-      try {
-        const data = JSON.parse(e.data)
-        notify.error(data.content || '智能排程失败！')
-      } catch (err) {}
-    })
+    startSse(token)
   }
 
   if (assistant.x == null || assistant.y == null) {
@@ -64,9 +125,36 @@ onMounted(() => {
   }
 })
 
+function scrollChatToBottom() {
+  import('vue').then(({ nextTick }) => {
+    nextTick(() => {
+      const el = document.querySelector('.vibe-chat-scroll')
+      if (el) el.scrollTop = el.scrollHeight
+    })
+  })
+}
+
+// Use simpler approach - just define the function
+const scrollChatToBottom2 = () => {
+  const el = document.querySelector('.vibe-chat-scroll')
+  if (el) el.scrollTop = el.scrollHeight
+}
+
 onUnmounted(() => {
-  if (sseSource) {
-    sseSource.close()
+  stopSse()
+})
+
+watch(() => assistant.chatMessages?.length, () => {
+  import('vue').then(({ nextTick }) => nextTick(() => {
+    const el = document.querySelector('.vibe-chat-scroll')
+    if (el) el.scrollTop = el.scrollHeight
+  }))
+})
+
+watch(() => assistant.navRequest, (nav) => {
+  if (nav?.to && router) {
+    router.push(nav.to)
+    assistant.clearNavRequest()
   }
 })
 
@@ -95,6 +183,7 @@ const menu = [
   { to: '/resources', title: '资源', icon: 'mdi-book-open-variant' },
   { to: '/punch', title: '打卡', icon: 'mdi-checkbox-multiple-marked' },
   { to: '/profile', title: '画像', icon: 'mdi-account-circle' },
+  { to: '/games/2048', title: '2048', icon: 'mdi-grid' },
 ]
 
 const isDark = computed(() => theme.global.current.value.dark)
@@ -265,7 +354,44 @@ function onResizeEnd() {
       <v-btn variant="text" class="mr-2" @click="toggleTheme">
         {{ isDark ? '浅色' : '深色' }}
       </v-btn>
-      <v-btn variant="tonal" color="primary" @click="logout">退出</v-btn>
+      <v-menu v-model="notifMenu" :close-on-content-click="false" location="bottom end">
+        <template #activator="{ props: menuProps }">
+          <v-badge :model-value="unreadCount > 0" :content="unreadCount" color="error" overlap>
+            <v-btn v-bind="menuProps" icon="mdi-bell-outline" variant="text" class="mr-2" />
+          </v-badge>
+        </template>
+        <v-card min-width="340" max-width="420" max-height="480" class="overflow-y-auto">
+          <div class="d-flex align-center pa-3 border-b">
+            <span class="text-subtitle-1 font-weight-semibold">消息通知</span>
+            <v-spacer />
+            <v-btn v-if="notify.reminders.length" size="small" variant="text" @click="notify.clearReminders()">清空</v-btn>
+          </div>
+          <div v-if="!notify.reminders.length" class="pa-6 text-center text-medium-emphasis">
+            <v-icon size="40" class="mb-2">mdi-bell-off-outline</v-icon>
+            <div class="text-caption">暂无消息</div>
+          </div>
+          <v-list v-else density="compact" class="py-1">
+            <v-list-item
+                v-for="r in notify.reminders"
+                :key="r._key"
+                :class="{ 'bg-primary-lighten-5': !r.read }"
+                @click="notify.markReminderRead(r._key); if (r.payload?.nav) { router.push(r.payload.nav); notifMenu = false }"
+            >
+              <template #prepend>
+                <v-icon :color="r.payload?.level === 'warning' ? 'warning' : r.payload?.level === 'success' ? 'success' : undefined" size="18">
+                  {{ r.type === 'AGENT_BADGE' ? 'mdi-trophy' : r.type === 'AGENT_REMINDER' ? 'mdi-bell-ring' : 'mdi-bell' }}
+                </v-icon>
+              </template>
+              <v-list-item-title class="text-body-2" style="white-space: normal">{{ r.content }}</v-list-item-title>
+              <v-list-item-subtitle class="text-caption mt-1">
+                {{ new Date(r.ts).toLocaleString('zh-CN', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' }) }}
+                <v-chip v-if="r.payload?.nav" size="x-small" variant="tonal" class="ml-1">可跳转</v-chip>
+              </v-list-item-subtitle>
+            </v-list-item>
+          </v-list>
+        </v-card>
+      </v-menu>
+      <v-btn variant="tonal" color="primary" class="ml-2" @click="logout">退出</v-btn>
     </v-app-bar>
 
     <v-navigation-drawer
@@ -318,8 +444,8 @@ function onResizeEnd() {
         v-model="n.open"
         :timeout="n.timeout"
         location="top end"
-        :color="n.type === 'error' ? 'error' : n.type === 'success' ? 'success' : 'primary'"
-        variant="tonal"
+        variant="text"
+        class="glass-snackbar"
         style="position: fixed"
         :style="{ top: `${16 + idx * 64}px` }"
         @update:model-value="(v) => { if (!v) notify.remove(n.id) }"
@@ -539,5 +665,22 @@ function onResizeEnd() {
   background: rgba(var(--v-theme-surface), 0.70) !important;
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
+}
+
+.glass-snackbar .v-overlay__scrim { background: transparent !important; opacity: 0 !important; }
+.glass-snackbar .v-overlay__content {
+  border-radius: 16px !important;
+  background: rgba(255, 255, 255, 0.16) !important;
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.30);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.10);
+}
+.glass-snackbar .v-snackbar__wrapper,
+.glass-snackbar .v-snackbar__content { background: transparent !important; border-radius: 16px !important; }
+.glass-snackbar .v-snackbar__content { padding: 12px 20px; }
+.theme--dark .glass-snackbar .v-overlay__content {
+  background: rgba(15, 23, 42, 0.58) !important;
+  border: 1px solid rgba(255, 255, 255, 0.11);
 }
 </style>

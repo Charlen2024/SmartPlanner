@@ -74,7 +74,13 @@ public class GoalController {
             @RequestParam(defaultValue = "0") Integer priority,
             @RequestParam(required = false) Integer estimatedMinutes,
             @RequestParam(required = false) String deadline) {
-        return Result.success(goalService.createTask(userId, goalId, parentId, title, description, priority, estimatedMinutes, DateUtils.parseLocalDateTime(deadline)));
+        try {
+            return Result.success(goalService.createTask(userId, goalId, parentId, title, description, priority, estimatedMinutes, DateUtils.parseLocalDateTime(deadline)));
+        } catch (GoalService.DuplicateTaskException e) {
+            return Result.fail(409, e.getMessage());
+        } catch (IllegalArgumentException e) {
+            return Result.fail(400, e.getMessage());
+        }
     }
 
     @GetMapping("/{goalId}/tasks")
@@ -132,5 +138,16 @@ public class GoalController {
             @RequestParam(required = false) String mood) {
         goalService.saveJournal(userId, goalId, content, mood);
         return Result.success("随笔已保存");
+    }
+
+    @DeleteMapping("/journals/{journalId}")
+    public Result<String> deleteJournal(@RequestParam Long userId, @PathVariable Long journalId) {
+        goalService.deleteJournal(userId, journalId);
+        return Result.success("删除成功");
+    }
+    @GetMapping("/topics")
+    public Result<java.util.List<String>> getDistinctTopics() {
+        java.util.List<String> topics = goalService.getDistinctGoalTopics();
+        return Result.success(topics != null ? topics : java.util.List.of());
     }
 }

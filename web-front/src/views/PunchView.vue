@@ -9,6 +9,7 @@ const records = ref([])
 const streak = ref(0)
 const schedules = ref([])
 const taskMap = ref(new Map())
+const taskResources = ref({})
 
 const activeScheduleId = ref(null)
 const running = ref(false)
@@ -36,6 +37,34 @@ function fmtTime(sec) {
 function fmt(dt) {
   if (!dt) return '-'
   return String(dt).replace('T', ' ').slice(0, 16)
+}
+
+async function loadTaskResourcesForSchedules(list) {
+  const taskIds = Array.from(new Set((list ?? []).map((x) => Number(x?.taskId)).filter((x) => Number.isFinite(x) && x > 0)))
+  if (!taskIds.length) {
+    taskResources.value = {}
+    return
+  }
+  try {
+    const res = await api.post('/user/tasks/resources', { taskIds, topK: 3 })
+    const body = res?.data ?? null
+    taskResources.value = body?.code === 200 ? body?.data ?? {} : {}
+  } catch (e) {
+    taskResources.value = {}
+  }
+}
+
+function resourcesForTask(taskId) {
+  const id = Number(taskId)
+  if (!Number.isFinite(id) || id <= 0) return []
+  const map = taskResources.value ?? {}
+  return map?.[id] ?? map?.[String(id)] ?? []
+}
+
+function openUrl(url) {
+  const u = String(url || '').trim()
+  if (!u) return
+  window.open(u, '_blank')
 }
 
 function fmtDuration(sec) {
@@ -70,6 +99,7 @@ async function load() {
     records.value = r1?.data?.data ?? []
     streak.value = r2?.data?.data ?? 0
     schedules.value = r3?.data?.data ?? []
+    await loadTaskResourcesForSchedules(schedules.value)
 
     const scheduleTaskIds = (schedules.value ?? []).map((x) => x?.taskId).filter(Boolean)
     const recordTaskIds = (records.value ?? []).map((x) => x?.taskId).filter(Boolean)
@@ -194,8 +224,22 @@ onUnmounted(clearTimer)
                 v-for="(s, i) in schedules"
                 :key="s.id"
                 :title="`${i + 1}. ${s.taskTitle || ('任务 ' + (i + 1))}`"
-                :subtitle="`${fmt(s.startTime)} - ${fmt(s.endTime)}`"
               >
+                <template #subtitle>
+                  <div class="text-body-2" style="opacity:0.8">{{ fmt(s.startTime) }} - {{ fmt(s.endTime) }}</div>
+                  <div v-if="resourcesForTask(s.taskId)?.length" class="mt-1">
+                    <v-chip
+                      v-for="r in resourcesForTask(s.taskId)"
+                      :key="(r?.sourceUrl || r?.title) + String(s.taskId)"
+                      size="x-small"
+                      variant="outlined"
+                      class="mr-2 mb-1"
+                      @click.stop="openUrl(r?.sourceUrl)"
+                    >
+                      {{ (r?.platform ? r.platform + '：' : '') + (r?.title || '课程资源') }}
+                    </v-chip>
+                  </div>
+                </template>
                 <template #append>
                   <v-chip size="x-small" class="mr-2" variant="tonal" :color="Number(s.status) === 1 ? 'success' : undefined">
                     {{ Number(s.status) === 1 ? '已完成' : '未完成' }}

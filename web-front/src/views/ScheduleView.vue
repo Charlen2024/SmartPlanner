@@ -16,10 +16,9 @@ const date = ref('')
 const free = ref([])
 const schedules = ref([])
 const classes = ref([])
+const taskResources = ref({})
 const file = ref(null)
 const importResult = ref(null)
-const planNote = ref('')
-const scheduling = ref(false)
 
 const needsImport = computed(() => auth.me?.scheduleImported === false)
 const dateOptions = computed(() => {
@@ -187,6 +186,34 @@ function statusText(s) {
   return '未完成'
 }
 
+async function loadTaskResourcesForSchedules(list) {
+  const taskIds = Array.from(new Set((list ?? []).map((x) => Number(x?.taskId)).filter((x) => Number.isFinite(x) && x > 0)))
+  if (!taskIds.length) {
+    taskResources.value = {}
+    return
+  }
+  try {
+    const res = await api.post('/user/tasks/resources', { taskIds, topK: 3 })
+    const body = res?.data ?? null
+    taskResources.value = body?.code === 200 ? body?.data ?? {} : {}
+  } catch (e) {
+    taskResources.value = {}
+  }
+}
+
+function resourcesForTask(taskId) {
+  const id = Number(taskId)
+  if (!Number.isFinite(id) || id <= 0) return []
+  const map = taskResources.value ?? {}
+  return map?.[id] ?? map?.[String(id)] ?? []
+}
+
+function openUrl(url) {
+  const u = String(url || '').trim()
+  if (!u) return
+  window.open(u, '_blank')
+}
+
 async function loadFree() {
   if (!date.value) return
   loading.value = true
@@ -201,65 +228,17 @@ async function loadFree() {
   }
 }
 
-async function startPlanningJob(planDate) {
-  error.value = ''
-  try {
-    const d = planDate || date.value
-    if (!d) {
-      error.value = '请先选择日期'
-      return
-    }
-    scheduling.value = true
-    const startRes = await api.post('/user/schedule/daily-plan/jobs', { date: d, mode: 'replace' }, { timeout: 15000 })
-    const jobId = startRes?.data?.data?.jobId
-    if (!jobId) {
-      throw new Error('启动排程任务失败')
-    }
-
-    notify.info('已启动后台智能排程，可继续其他操作')
-    
-    // Polling in background without blocking
-    setTimeout(async () => {
-      try {
-        for (let i = 0; i < 180; i++) {
-          await new Promise((r) => setTimeout(r, 2000))
-          const st = await api.get(`/user/schedule/daily-plan/jobs/${jobId}`)
-          const data = st?.data?.data
-          if (data?.status === 'DONE') {
-            planNote.value = data?.result?.note ?? ''
-            schedules.value = data?.result?.schedules ?? []
-            free.value = data?.result?.freeSlots ?? free.value
-            notify.success('后台智能排程已完成')
-            await loadSchedules()
-            break
-          }
-          if (data?.status === 'FAILED') {
-            notify.error(`后台智能排程失败：${data?.error || '未知错误'}`)
-            break
-          }
-        }
-      } catch(e) {}
-    }, 1000)
-
-  } catch (e) {
-    const status = e?.response?.status
-    if (e?.code === 'ECONNABORTED') {
-      error.value = '智能排程请求超时，请稍后重试'
-    } else if (status === 401) {
-      error.value = '登录已失效，请重新登录'
-    } else if (status === 404) {
-      error.value = '接口不存在，请确认后端已更新部署'
-    } else {
-      error.value = e?.response?.data?.message || e?.message || '智能排程失败'
-    }
-    notify.error(error.value)
-  } finally {
-    scheduling.value = false
+function buildTaskGenPromptFromClasses(list) {
+  const names = []
+  for (const c of list ?? []) {
+    const title = String(c?.courseName || c?.course || c?.title || c?.name || '').trim()
+    if (!title) continue
+    if (!names.includes(title)) names.push(title)
+    if (names.length >= 12) break
   }
-}
-
-async function autoSchedule() {
-  await startPlanningJob(date.value)
+  if (!names.length) return ''
+  const lines = names.map((x, i) => `${i + 1}. ${x}`).join('\n')
+  return `我刚导入了课表。课表中的课程如下：\n${lines}\n\n请为我生成可执行的学习任务（task），任务要具体、可打卡、可在 30-60 分钟内完成。先生成任务，不要生成排程。`
 }
 
 async function loadSchedules() {
@@ -271,6 +250,7 @@ async function loadSchedules() {
     }
     const res = await api.get('/user/schedule/task-schedules', { params })
     schedules.value = res?.data?.data ?? []
+    await loadTaskResourcesForSchedules(schedules.value)
   } catch (e) {
     const status = e?.response?.status
     if (status === 401) {
@@ -279,6 +259,7 @@ async function loadSchedules() {
       error.value = e?.response?.data?.message || e?.message || '加载任务排程失败'
     }
     schedules.value = []
+    taskResources.value = {}
   }
 }
 
@@ -296,7 +277,7 @@ async function importSchedule() {
   try {
     const res = await api.post('/user/schedule/import', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
     importResult.value = res?.data?.data ?? null
-    notify.success('课表已上传，正在刷新并尝试后台排程')
+    notify.success('课表已上传，正在刷新')
     await auth.fetchMe()
     await loadClasses()
     await Promise.all([loadFree(), loadSchedules()])
@@ -319,7 +300,15 @@ async function importSchedule() {
         date.value = chosen
       }
       await Promise.all([loadFree(), loadSchedules()])
-      await startPlanningJob(chosen || date.value)
+      const prompt = buildTaskGenPromptFromClasses(classes.value)
+      if (prompt) {
+        try {
+          await api.post('/user/goals/ai', prompt, { headers: { 'Content-Type': 'text/plain' }, timeout: 15000 })
+          notify.info('已根据课表提交任务生成，生成完成后会提示；排程请到「目标」页生成')
+        } catch (e) {
+          notify.error(e?.response?.data?.message || e?.message || '提交任务生成失败')
+        }
+      }
     }
     const next = route.query.next
     if (next) {
@@ -359,7 +348,7 @@ watch(
 <template>
   
     <v-alert v-if="needsImport" type="info" variant="tonal" class="mb-4">
-      这是你首次使用，需要先导入课表，系统才能识别空闲时间并生成学习计划。
+      这是你首次使用，需要先导入课表，系统才能识别空闲时间并生成任务。排程请到「目标」页生成。
     </v-alert>
 
     <v-row class="mb-2" align="center">
@@ -409,13 +398,27 @@ watch(
             任务排程
           </v-card-title>
           <v-card-text>
-            <v-alert v-if="planNote" type="info" variant="tonal" class="mb-3">{{ planNote }}</v-alert>
+            <v-alert type="info" variant="tonal" class="mb-3">排程统一在「目标」页生成；本页仅用于查看空闲时间与已有排程。</v-alert>
             <v-alert v-if="!filteredSchedules?.length" type="info" variant="tonal">暂无任务排程</v-alert>
-            <div v-for="(s, i) in filteredSchedules" :key="s.id" class="d-flex align-center mb-2">
-              <div class="mr-3">{{ i + 1 }}. {{ s.taskTitle || `任务 ${s.taskId}` }}：{{ fmt(s.startTime) }} - {{ fmt(s.endTime) }}</div>
-              <v-chip size="small" class="mr-2" variant="tonal" :color="Number(s.status) === 1 ? 'success' : undefined">
-                {{ statusText(s.status) }}
-              </v-chip>
+            <div v-for="(s, i) in filteredSchedules" :key="s.id" class="mb-2">
+              <div class="d-flex align-center">
+                <div class="mr-3">{{ i + 1 }}. {{ s.taskTitle || `任务 ${s.taskId}` }}：{{ fmt(s.startTime) }} - {{ fmt(s.endTime) }}</div>
+                <v-chip size="small" class="mr-2" variant="tonal" :color="Number(s.status) === 1 ? 'success' : undefined">
+                  {{ statusText(s.status) }}
+                </v-chip>
+              </div>
+              <div v-if="resourcesForTask(s.taskId)?.length" class="mt-1">
+                <v-chip
+                  v-for="r in resourcesForTask(s.taskId)"
+                  :key="(r?.sourceUrl || r?.title) + String(s.taskId)"
+                  size="x-small"
+                  variant="outlined"
+                  class="mr-2 mb-1"
+                  @click.stop="openUrl(r?.sourceUrl)"
+                >
+                  {{ (r?.platform ? r.platform + '：' : '') + (r?.title || '课程资源') }}
+                </v-chip>
+              </div>
             </div>
           </v-card-text>
         </v-card>

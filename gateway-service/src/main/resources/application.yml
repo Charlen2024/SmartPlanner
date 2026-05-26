@@ -2,6 +2,9 @@ server:
   port: 8088
 
 spring:
+  autoconfigure:
+    exclude:
+      - com.alibaba.cloud.ai.autoconfigure.dashscope.DashScopeAgentAutoConfiguration
   application:
     name: gateway-service
   cloud:

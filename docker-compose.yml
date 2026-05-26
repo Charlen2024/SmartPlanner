@@ -1,15 +1,27 @@
-services:
-  # --- 基础设施 (Infrastructure) ---
+﻿services:
+  # --- 鍩虹璁炬柦 (Infrastructure) ---
   nacos:
     image: docker.m.daocloud.io/nacos/nacos-server:v2.2.3
     container_name: nacos
+    restart: unless-stopped
     environment:
       - MODE=standalone
-      - JVM_XMS=256m
-      - JVM_XMX=256m
+      - JVM_XMS=512m
+      - JVM_XMX=512m
+      - JVM_XMN=256m
+      - SPRING_DATASOURCE_PLATFORM=mysql
+      - MYSQL_SERVICE_HOST=mysql
+      - MYSQL_SERVICE_PORT=3306
+      - MYSQL_SERVICE_DB_NAME=nacos_config
+      - MYSQL_SERVICE_USER=root
+      - MYSQL_SERVICE_PASSWORD=root
+      - MYSQL_SERVICE_DB_PARAM=characterEncoding=utf8&connectTimeout=1000&socketTimeout=3000&autoReconnect=true&useUnicode=true&useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      - NACOS_AUTH_ENABLE=false
     ports:
       - "8848:8848"
       - "9848:9848"
+    depends_on:
+      - mysql
     networks:
       - vibe-net
 
@@ -26,8 +38,10 @@ services:
       - vibe-net
 
   redis:
-    image: docker.m.daocloud.io/library/redis:7.0
+    image: docker.m.daocloud.io/redis/redis-stack-server:7.2.0-v19
     container_name: redis
+    environment:
+      - REDIS_ARGS=--maxmemory 512mb --maxmemory-policy allkeys-lru --protected-mode no
     ports:
       - "6379:6379"
     networks:
@@ -67,12 +81,13 @@ services:
     networks:
       - vibe-net
 
-  # --- 微服务 (Microservices) ---
+  # --- 寰湇鍔?(Microservices) ---
   goal-service:
     build:
       context: .
       dockerfile: goal-service/Dockerfile
     container_name: goal-service
+    restart: unless-stopped
     ports:
       - "8081:8081"
     environment:
@@ -83,9 +98,10 @@ services:
       - SPRING_RABBITMQ_HOST=rabbitmq
       - SPRING_RABBITMQ_USERNAME=vibe
       - SPRING_RABBITMQ_PASSWORD=vibe123
-      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
-      - SPRING_AI_OPENAI_BASE_URL=${BASE_URL}
-      - SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL=${MODEL}
+      - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
+      - MODEL=${MODEL}
+      - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
+      - SPRING_AI_RETRY_MAX_ATTEMPTS=1
     depends_on:
       - nacos
       - mysql
@@ -99,6 +115,7 @@ services:
       context: .
       dockerfile: schedule-engine/Dockerfile
     container_name: schedule-engine
+    restart: unless-stopped
     ports:
       - "8082:8082"
     environment:
@@ -107,12 +124,15 @@ services:
       - SPRING_RABBITMQ_HOST=rabbitmq
       - SPRING_RABBITMQ_USERNAME=vibe
       - SPRING_RABBITMQ_PASSWORD=vibe123
-      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
-      - SPRING_AI_OPENAI_BASE_URL=${BASE_URL}
-      - SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL=${MODEL}
+      - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
+      - MODEL=${MODEL}
+      - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
+      - SPRING_AI_RETRY_MAX_ATTEMPTS=1
+      - SMARTPLANNER_AI_SCHEDULE_TIMEOUT_SECONDS=170
     depends_on:
       - nacos
       - mysql
+      - redis
       - rabbitmq
     networks:
       - vibe-net
@@ -122,6 +142,7 @@ services:
       context: .
       dockerfile: resource-search/Dockerfile
     container_name: resource-search
+    restart: unless-stopped
     ports:
       - "8083:8083"
     environment:
@@ -131,11 +152,13 @@ services:
       - SPRING_RABBITMQ_HOST=rabbitmq
       - SPRING_RABBITMQ_USERNAME=vibe
       - SPRING_RABBITMQ_PASSWORD=vibe123
-      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
-      - SPRING_AI_OPENAI_BASE_URL=${BASE_URL}
-      - SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL=${MODEL}
+      - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
+      - MODEL=${MODEL}
+      - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
+      - SPRING_AI_RETRY_MAX_ATTEMPTS=1
     depends_on:
       - nacos
+      - mysql
       - elasticsearch
       - rabbitmq
     networks:
@@ -146,6 +169,7 @@ services:
       context: .
       dockerfile: punch-service/Dockerfile
     container_name: punch-service
+    restart: unless-stopped
     ports:
       - "8084:8084"
     environment:
@@ -155,11 +179,13 @@ services:
       - SPRING_RABBITMQ_HOST=rabbitmq
       - SPRING_RABBITMQ_USERNAME=vibe
       - SPRING_RABBITMQ_PASSWORD=vibe123
-      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
-      - SPRING_AI_OPENAI_BASE_URL=${BASE_URL}
-      - SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL=${MODEL}
+      - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
+      - MODEL=${MODEL}
+      - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
+      - SPRING_AI_RETRY_MAX_ATTEMPTS=1
     depends_on:
       - nacos
+      - mysql
       - redis
       - rabbitmq
     networks:
@@ -170,6 +196,7 @@ services:
       context: .
       dockerfile: user-service/Dockerfile
     container_name: user-service
+    restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
@@ -177,9 +204,12 @@ services:
       - SPRING_RABBITMQ_HOST=rabbitmq
       - SPRING_RABBITMQ_USERNAME=vibe
       - SPRING_RABBITMQ_PASSWORD=vibe123
-      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
-      - SPRING_AI_OPENAI_BASE_URL=${BASE_URL}
-      - SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL=${MODEL}
+      - SPRING_REDIS_HOST=redis
+      - SPRING_REDIS_PORT=6379
+      - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
+      - MODEL=${MODEL}
+      - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
+      - SPRING_AI_RETRY_MAX_ATTEMPTS=1
       - JWT_SECRET=dev-jwt-secret-change-me-please-32bytes
       - JWT_ISSUER=http://vibe
       - AUTH_DEMO_USERNAME=demo
@@ -199,23 +229,27 @@ services:
       context: .
       dockerfile: gateway-service/Dockerfile
     container_name: gateway-service
+    restart: unless-stopped
     ports:
       - "8088:8088"
     environment:
-      # 关键：允许OPTIONS方法
+      # 鍏抽敭锛氬厑璁窸PTIONS鏂规硶
       - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDORIGINPATTERNS[0]=*
       - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[0]=GET
       - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[1]=POST
       - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[2]=PUT
       - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[3]=DELETE
-      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[4]=OPTIONS  # 重要！
-      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDHEADERS[0]=*
+      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[4]=OPTIONS  # 閲嶈锛?      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDHEADERS[0]=*
       - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWCREDENTIALS=true
       - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
       - SPRING_REDIS_HOST=redis
       - SPRING_RABBITMQ_HOST=rabbitmq
       - SPRING_RABBITMQ_USERNAME=vibe
       - SPRING_RABBITMQ_PASSWORD=vibe123
+      - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
+      - MODEL=${MODEL}
+      - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
+      - SPRING_AI_RETRY_MAX_ATTEMPTS=1
       - JWT_SECRET=dev-jwt-secret-change-me-please-32bytes
       - GATEWAY_RL_REPLENISH=5
       - GATEWAY_RL_BURST=60

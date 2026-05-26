@@ -32,6 +32,7 @@ import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.ss.usermodel.WorkbookFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.scheduling.annotation.Async;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.multipart.MultipartFile;
 
 import net.fortuna.ical4j.data.CalendarBuilder;
@@ -48,6 +49,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.nio.charset.StandardCharsets;
 import java.util.stream.Collectors;
 import java.util.concurrent.CompletableFuture;
@@ -66,8 +69,10 @@ public class ScheduleService {
     private final ObjectMapper objectMapper;
     private final PlanCandidateWorker planCandidateWorker;
 
+    @Value("${smartplanner.ai.schedule-timeout-seconds:170}")
+    private long scheduleAiTimeoutSeconds;
+
     private static final ZoneId APP_ZONE = ZoneId.of("Asia/Shanghai");
-    private static final long AI_TIMEOUT_SECONDS = 55;
     private static final int SESSION_MINUTES = 45;
     private static final int BREAK_MINUTES = 10;
     private static final int MAX_STUDY_MINUTES_PER_DAY = 240;
@@ -698,7 +703,7 @@ public class ScheduleService {
             try {
                 response = CompletableFuture
                         .supplyAsync(() -> openAiCompatClient.complete(prompt))
-                        .orTimeout(AI_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                        .orTimeout(Math.max(5, scheduleAiTimeoutSeconds), TimeUnit.SECONDS)
                         .join();
                 log.info("AI 智能排程决策: {}", response);
             } catch (Exception aiEx) {
@@ -800,9 +805,15 @@ public class ScheduleService {
     public DailyPlanCommitResponse commitDailyPlan(Long userId, DailyPlanCommitRequest request, ProgressReporter reporter) {
         LocalDate date = request != null && request.getDate() != null ? request.getDate() : LocalDate.now(APP_ZONE);
         String mode = request != null && request.getMode() != null ? request.getMode().trim().toLowerCase(Locale.ROOT) : "replace";
+        if ("merge".equals(mode)) {
+            mode = "append";
+        }
         if (!"append".equals(mode) && !"replace".equals(mode)) {
             mode = "replace";
         }
+        Long scopeGoalId = request != null ? request.getGoalId() : null;
+        List<Long> scopeTaskIds = request != null ? request.getTaskIds() : null;
+        Set<Long> scopeTaskIdSet = scopeTaskIds == null ? Set.of() : scopeTaskIds.stream().filter(Objects::nonNull).collect(Collectors.toSet());
         report(reporter, "PREPARE", 5, "正在计算空闲时间");
 
         List<FreeSlotDto> freeSlots = calculateFreeTime(userId, date.toString()).stream().map(s -> {
@@ -818,6 +829,7 @@ public class ScheduleService {
 
         report(reporter, "FETCH_TASKS", 15, "正在获取待办任务");
         List<GoalTaskDto> tasks = List.of();
+        boolean scoped = (scopeGoalId != null) || (scopeTaskIdSet != null && !scopeTaskIdSet.isEmpty());
         for (int attempt = 0; attempt < 5; attempt++) {
             try {
                 Result<List<GoalTaskDto>> taskRes = goalClient.getPendingTasks(userId);
@@ -825,7 +837,8 @@ public class ScheduleService {
             } catch (Exception ignored) {
                 tasks = List.of();
             }
-            if (tasks != null && !tasks.isEmpty()) {
+            tasks = tasks != null ? tasks : List.of();
+            if (!tasks.isEmpty()) {
                 break;
             }
             if (attempt < 4) {
@@ -838,7 +851,22 @@ public class ScheduleService {
                 }
             }
         }
-        if (tasks.isEmpty()) {
+
+        if (!tasks.isEmpty()) {
+            if (scopeTaskIdSet != null && !scopeTaskIdSet.isEmpty()) {
+                tasks = tasks.stream()
+                        .filter(t -> t != null && t.getId() != null)
+                        .filter(t -> scopeTaskIdSet.contains(t.getId()))
+                        .collect(Collectors.toList());
+            } else if (scopeGoalId != null) {
+                tasks = tasks.stream()
+                        .filter(t -> t != null && t.getId() != null)
+                        .filter(t -> Objects.equals(t.getGoalId(), scopeGoalId))
+                        .collect(Collectors.toList());
+            }
+        }
+
+        if (tasks.isEmpty() && !scoped) {
             boolean created = false;
             try {
                 Result<List<GoalDto>> goalsRes = goalClient.listGoals(userId);
@@ -884,7 +912,8 @@ public class ScheduleService {
                     } catch (Exception ignored) {
                         tasks = List.of();
                     }
-                    if (tasks != null && !tasks.isEmpty()) {
+                    tasks = tasks != null ? tasks : List.of();
+                    if (!tasks.isEmpty()) {
                         break;
                     }
                     int p = Math.min(44, 22 + (attempt + 1) / 3);
@@ -899,6 +928,12 @@ public class ScheduleService {
             }
         }
         if (tasks.isEmpty()) {
+            if (scopeGoalId != null) {
+                throw new IllegalArgumentException("所选目标暂无可排程任务（可能任务生成中或已全部完成），请更换目标或稍后再试");
+            }
+            if (scopeTaskIdSet != null && !scopeTaskIdSet.isEmpty()) {
+                throw new IllegalArgumentException("所选任务暂无可排程项（可能已排程/已完成），请更换任务或稍后再试");
+            }
             throw new IllegalArgumentException("暂无可排程任务（可能任务生成中），请先生成学习目标与任务，或稍后再试");
         }
 
@@ -912,11 +947,20 @@ public class ScheduleService {
 
         if ("replace".equals(mode)) {
             report(reporter, "CLEAR_EXISTING", 25, "正在清理当天未完成排程");
-            taskScheduleMapper.delete(new LambdaQueryWrapper<TaskSchedule>()
+            LambdaQueryWrapper<TaskSchedule> del = new LambdaQueryWrapper<TaskSchedule>()
                     .eq(TaskSchedule::getUserId, userId)
                     .ge(TaskSchedule::getStartTime, dayStart)
                     .lt(TaskSchedule::getStartTime, dayEnd)
-                    .eq(TaskSchedule::getStatus, 0));
+                    .eq(TaskSchedule::getStatus, 0);
+            List<Long> scopeIds = tasks.stream()
+                    .filter(t -> t != null && t.getId() != null)
+                    .map(GoalTaskDto::getId)
+                    .distinct()
+                    .collect(Collectors.toList());
+            if (scoped && !scopeIds.isEmpty()) {
+                del.in(TaskSchedule::getTaskId, scopeIds);
+            }
+            taskScheduleMapper.delete(del);
             existing = taskScheduleMapper.selectList(new LambdaQueryWrapper<TaskSchedule>()
                     .eq(TaskSchedule::getUserId, userId)
                     .ge(TaskSchedule::getStartTime, dayStart)
@@ -956,7 +1000,7 @@ public class ScheduleService {
             log.info("调用模型: userId={}, date={}, freeSlots={}, tasks={}", userId, date, remainingFree != null ? remainingFree.size() : 0, remainingTasks != null ? remainingTasks.size() : 0);
             String aiJson = CompletableFuture
                     .supplyAsync(() -> openAiCompatClient.complete(prompt))
-                    .orTimeout(AI_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    .orTimeout(Math.max(5, scheduleAiTimeoutSeconds), TimeUnit.SECONDS)
                     .join();
             log.info("智能排程模型返回长度: {}", aiJson != null ? aiJson.length() : 0);
             if (aiJson != null) {
@@ -1816,5 +1860,31 @@ public class ScheduleService {
         taskScheduleMapper.delete(new LambdaQueryWrapper<TaskSchedule>()
                 .eq(TaskSchedule::getUserId, userId)
                 .ge(TaskSchedule::getStartTime, LocalDateTime.now()));
+    }
+
+    public void deleteTaskSchedulesByTaskIds(Long userId, List<Long> taskIds) {
+        if (userId == null || userId <= 0) {
+            throw new IllegalArgumentException("未授权");
+        }
+        List<Long> ids = taskIds == null ? List.of() : taskIds.stream()
+                .filter(x -> x != null && x > 0)
+                .distinct()
+                .collect(Collectors.toList());
+        if (ids.isEmpty()) return;
+        taskScheduleMapper.delete(new LambdaQueryWrapper<TaskSchedule>()
+                .eq(TaskSchedule::getUserId, userId)
+                .in(TaskSchedule::getTaskId, ids));
+    }
+
+    public void deleteTaskSchedulesByDate(Long userId, String dateStr) {
+        if (userId == null || userId <= 0) throw new IllegalArgumentException("未授权");
+        if (dateStr == null || dateStr.isBlank()) throw new IllegalArgumentException("日期不能为空");
+        LocalDate date = LocalDate.parse(dateStr.trim());
+        LocalDateTime start = date.atStartOfDay();
+        LocalDateTime end = date.plusDays(1).atStartOfDay();
+        taskScheduleMapper.delete(new LambdaQueryWrapper<TaskSchedule>()
+                .eq(TaskSchedule::getUserId, userId)
+                .ge(TaskSchedule::getStartTime, start)
+                .lt(TaskSchedule::getStartTime, end));
     }
 }

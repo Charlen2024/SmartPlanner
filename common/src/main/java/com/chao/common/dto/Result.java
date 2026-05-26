@@ -5,7 +5,7 @@ import lombok.Data;
 import java.io.Serializable;
 
 @Data
-public class Result<T> implements Serializable {
+public class Result<T> implements Serializable /*保证这个result可以被序列化，直接用于文件传输*/{
     private int code;
     private String message;
     private T data;

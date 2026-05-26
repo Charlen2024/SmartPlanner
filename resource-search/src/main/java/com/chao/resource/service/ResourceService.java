@@ -28,8 +28,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.LinkedHashSet;
 import java.util.HashSet;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.springframework.scheduling.annotation.Scheduled;
+import com.chao.common.client.GoalClient;
+import com.chao.common.dto.Result;
+import com.chao.common.dto.GoalDto;
+import jakarta.annotation.PostConstruct;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -45,6 +52,18 @@ public class ResourceService {
     private final ElasticsearchOperations elasticsearchOperations;
     private final OpenAiCompatClient openAiCompatClient;
     private final ObjectMapper objectMapper;
+    private final GoalClient goalClient;
+    private final AtomicBoolean crawlerRunning = new AtomicBoolean(false);
+
+    @Value("${smartplanner.crawler.bilibili.enabled:true}")
+    private boolean bilibiliCrawlerEnabled;
+    @Value("${smartplanner.crawler.bilibili.topics:Java,Spring Boot,Python,Vue}")
+    private String bilibiliCrawlerTopics;
+    @Value("${smartplanner.crawler.bilibili.interval-ms:21600000}")
+    private long bilibiliCrawlerIntervalMs;
+    @Value("${smartplanner.crawler.bilibili.per-topic-limit:3}")
+    private int bilibiliCrawlerPerTopicLimit;
+
     @Value("${smartplanner.ai.rag-timeout-seconds:45}")
     private int ragTimeoutSeconds;
     @Value("${smartplanner.ai.advice-timeout-seconds:90}")
@@ -56,6 +75,17 @@ public class ResourceService {
     private static final Pattern TITLE_SPLIT = Pattern.compile("\\s*[-－—]\\s*");
     private static final Pattern BILIBILI_BV = Pattern.compile("(?i)/video/(BV[0-9A-Za-z]+)");
     private static final Pattern DIGITS_ONLY = Pattern.compile("^\\d+$");
+
+    @jakarta.annotation.PostConstruct
+    public void initCrawl() {
+        new Thread(() -> {
+            try {
+                Thread.sleep(3000);
+                scheduledBilibiliCrawl();
+            } catch (Exception ignored) {
+            }
+        }, "crawler-startup").start();
+    }
 
     public CourseResource createResource(String topic, String title, String platform, String url, String summary) {
         CourseResource cr = new CourseResource();
@@ -139,6 +169,24 @@ public class ResourceService {
                     .collect(Collectors.toList());
 
             out = dedupeResources(q, out, 20);
+                        // Try Bilibili real-time before Google fallback
+            if (out.isEmpty() && !q.isBlank()) {
+                try {
+                    List<ResourceClient.CourseResource> bilibiliResults = fetchBilibiliCandidates(q, q, 6);
+                    if (bilibiliResults != null && !bilibiliResults.isEmpty()) {
+                        for (ResourceClient.CourseResource r : bilibiliResults) {
+                            if (r != null && r.getUrl() != null) {
+                                out.add(r);
+                            }
+                        }
+                        // Persist crawled results
+                        for (ResourceClient.CourseResource r : bilibiliResults) {
+                            saveIfNew(q, r);
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
             if (out.isEmpty()) return defaultResources(topic);
             return out;
         } catch (Exception e) {
@@ -1322,4 +1370,163 @@ public class ResourceService {
         dto.setSummary(summary);
         return dto;
     }
+    @Scheduled(initialDelayString = "${smartplanner.crawler.bilibili.initial-delay-ms:120000}", fixedDelayString = "${smartplanner.crawler.bilibili.interval-ms:21600000}")
+    public void scheduledBilibiliCrawl() {
+        if (!bilibiliCrawlerEnabled) return;
+        if (!crawlerRunning.compareAndSet(false, true)) return;
+        try {
+            Set<String> topics = new LinkedHashSet<>();
+            // 1. Get topics from existing resource DB
+            try {
+                List<CourseResource> existing = courseResourceMapper.selectList(null);
+                if (existing != null) {
+                    for (CourseResource r : existing) {
+                        if (r.getTopic() != null && !r.getTopic().isBlank()) {
+                            topics.add(r.getTopic().trim());
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("Failed to load existing topics from DB: {}", e.getMessage());
+            }
+            // 2. Add topics from user goals (learning interests)
+            try {
+                Result<java.util.List<String>> topicsResult = goalClient.getDistinctTopics();
+                java.util.List<String> goalTopics = topicsResult != null ? topicsResult.getData() : java.util.List.of();
+                if (goalTopics != null) {
+                    for (String t : goalTopics) {
+                        if (t != null && !t.isBlank()) {
+                            topics.add(t.trim());
+                        }
+                    }
+                }
+                log.debug("Added {} goal-based topics to crawler", goalTopics != null ? goalTopics.size() : 0);
+            } catch (Exception e) {
+                log.warn("Failed to get goal topics: {}", e.getMessage());
+            }
+            // 3. Add configured seed topics
+            if (bilibiliCrawlerTopics != null && !bilibiliCrawlerTopics.isBlank()) {
+                for (String t : bilibiliCrawlerTopics.split(",")) {
+                    String trimmed = t.trim();
+                    if (!trimmed.isEmpty()) topics.add(trimmed);
+                }
+            }
+            if (topics.isEmpty()) return;
+
+            log.info("Bilibili crawler started: {} topics, limit {} per topic", topics.size(), bilibiliCrawlerPerTopicLimit);
+            int totalNew = 0;
+            for (String topic : topics) {
+                try {
+                    List<ResourceClient.CourseResource> candidates = fetchBilibiliCandidates(topic, topic, bilibiliCrawlerPerTopicLimit);
+                    for (ResourceClient.CourseResource c : candidates) {
+                        if (saveIfNew(topic, c)) totalNew++;
+                    }
+                } catch (Exception e) {
+                    log.warn("Crawl failed for topic {}: {}", topic, e.getMessage());
+                }
+            }
+            log.info("Bilibili crawler finished: {} new resources saved", totalNew);
+        } finally {
+            crawlerRunning.set(false);
+        }
+    }
+
+    private boolean saveIfNew(String topic, ResourceClient.CourseResource c) {
+        if (topic == null || c == null || c.getUrl() == null) return false;
+        // Check duplicate by URL
+        Long count = courseResourceMapper.selectCount(
+                new LambdaQueryWrapper<CourseResource>().eq(CourseResource::getSourceUrl, c.getUrl()));
+        if (count != null && count > 0) return false;
+
+        CourseResource entity = new CourseResource();
+        entity.setTopic(topic);
+        entity.setTitle(c.getTitle());
+        entity.setSourceUrl(c.getUrl());
+        entity.setPlatform(c.getPlatform());
+        entity.setContentSummary(c.getSummary());
+        entity.setCreatedAt(LocalDateTime.now());
+        courseResourceMapper.insert(entity);
+
+        // Index to ES
+        try {
+            CourseResourceDocument doc = new CourseResourceDocument();
+            doc.setId(entity.getId());
+            doc.setTopic(topic);
+            doc.setTitle(entity.getTitle());
+            doc.setPlatform(entity.getPlatform());
+            doc.setSourceUrl(entity.getSourceUrl());
+            doc.setContentSummary(entity.getContentSummary());
+            doc.setCreatedAtEpochMillis(entity.getCreatedAt() != null ? entity.getCreatedAt().atZone(java.time.ZoneId.of("Asia/Shanghai")).toInstant().toEpochMilli() : System.currentTimeMillis());
+            searchRepository.save(doc);
+        } catch (Exception e) {
+            log.warn("Failed to index resource to ES: {}", e.getMessage());
+        }
+        return true;
+    }
+
+    private String httpGetTextWithUA(String url, String userAgent, String referer, String origin) {
+        try {
+            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(8000);
+            conn.setRequestProperty("User-Agent", userAgent);
+            conn.setRequestProperty("Referer", referer);
+            if (origin != null) conn.setRequestProperty("Origin", origin);
+            conn.setRequestProperty("Accept", "application/json, text/plain, */*");
+            conn.setInstanceFollowRedirects(true);
+            if (conn.getResponseCode() >= 200 && conn.getResponseCode() < 300) {
+                byte[] bytes = conn.getInputStream().readAllBytes();
+                return new String(bytes, StandardCharsets.UTF_8);
+            }
+            return null;
+        } catch (Exception e) {
+            System.err.println("httpGetTextWithUA FAILED: " + e.getClass().getName() + " - " + e.getMessage());
+            return null;
+        }
+    }
+
+    List<ResourceClient.CourseResource> fetchBilibiliCandidates(String query, String topic, int limit) {
+        String q = query != null ? query.trim() : "";
+        if (q.isEmpty()) return List.of();
+        String apiUrl = "https://api.bilibili.com/x/web-interface/search/all/v2?keyword=" + java.net.URLEncoder.encode(q, java.nio.charset.StandardCharsets.UTF_8);
+        String json = httpGetTextWithUA(apiUrl,
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "https://www.bilibili.com/",
+                "https://www.bilibili.com");
+        if (json == null || json.isBlank()) return List.of();
+        List<ResourceClient.CourseResource> out = new ArrayList<>();
+        try {
+            JsonNode root = objectMapper.readTree(json);
+            if (root.path("code").asInt() != 0) return out;
+            JsonNode result = root.path("data").path("result");
+            if (!result.isArray()) return out;
+            outer:
+            for (JsonNode category : result) {
+                if (out.size() >= limit) break;
+                if (!"video".equals(category.path("result_type").asText())) continue;
+                JsonNode items = category.path("data");
+                if (!items.isArray()) continue;
+                for (JsonNode item : items) {
+                    if (out.size() >= limit) continue outer;
+                    String arcurl = item.path("arcurl").asText();
+                    String bvid = item.path("bvid").asText();
+                    String title = item.path("title").asText().replaceAll("<[^>]+>", "").trim();
+                    int play = item.path("play").asInt();
+                    if (title.isBlank()) continue;
+                    String url = !arcurl.isBlank() ? arcurl : (!bvid.isBlank() ? "https://www.bilibili.com/video/" + bvid : "");
+                    if (url.isBlank()) continue;
+                    ResourceClient.CourseResource r = new ResourceClient.CourseResource();
+                    r.setTitle(title);
+                    r.setPlatform("B站");
+                    r.setUrl(url);
+                    r.setSummary("播放: " + play);
+                    out.add(r);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Bilibili crawl failed: query={}, err={}", q, e.getMessage());
+        }
+        return out;
+    }
+
 }

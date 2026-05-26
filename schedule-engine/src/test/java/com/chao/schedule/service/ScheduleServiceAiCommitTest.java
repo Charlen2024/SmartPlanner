@@ -137,7 +137,7 @@ public class ScheduleServiceAiCommitTest {
                 }
         );
 
-        OpenAiCompatClient openAiCompatClient = new OpenAiCompatClient(null, objectMapper, null) {
+        OpenAiCompatClient openAiCompatClient = new OpenAiCompatClient((org.springframework.ai.chat.client.ChatClient) null) {
             @Override
             public String complete(String prompt) {
                 return """

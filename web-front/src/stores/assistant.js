@@ -1,6 +1,90 @@
 import { defineStore } from 'pinia'
 import api from '../plugins/api'
 
+const NAV_ITEMS = [
+  { title: '仪表盘', to: '/' },
+  { title: '学习计划', to: '/plan' },
+  { title: '目标', to: '/goals' },
+  { title: '随笔', to: '/journals' },
+  { title: '日程', to: '/schedule' },
+  { title: '资源', to: '/resources' },
+  { title: '打卡', to: '/punch' },
+  { title: '画像', to: '/profile' },
+  { title: '2048', to: '/games/2048' },
+]
+
+function normalizeText(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replaceAll(/\s+/g, '')
+    .replaceAll(/[，,。.\-—_!！?？:：;；'"“”‘’()[\]{}<>]/g, '')
+}
+
+function extractExplicitPath(raw) {
+  const m = String(raw || '').match(/(?:^|\s)(\/[a-z0-9\-\/]+)(?:\s|$)/i)
+  if (!m?.[1]) return null
+  const p = m[1]
+  const ok = NAV_ITEMS.some((x) => x.to === p)
+  return ok ? p : null
+}
+
+function extractNavTarget(raw) {
+  const s0 = String(raw || '').trim()
+  if (!s0) return null
+
+  const explicit = extractExplicitPath(s0)
+  if (explicit) {
+    const item = NAV_ITEMS.find((x) => x.to === explicit)
+    return item ? { to: item.to, title: item.title } : { to: explicit, title: explicit }
+  }
+
+  const s = normalizeText(s0)
+  const hasVerb = /打开|进入|跳转|导航|带我去|去/.test(s)
+  const hasHint = /页面|界面|菜单|功能|模块/.test(s)
+  if (!hasVerb && !hasHint) return null
+
+  if (s.includes('2048') || s.includes('2048游戏') || s.includes('玩2048') || s.includes('小游戏')) {
+    return { to: '/games/2048', title: '2048' }
+  }
+  if (s.includes('仪表盘') || s.includes('首页') || s.includes('主页') || s === '打开' || s === '去') {
+    return { to: '/', title: '仪表盘' }
+  }
+  if (s.includes('导入课表') || s.includes('上传课表') || s.includes('课表') || s.includes('计划') || s.includes('plan')) {
+    return { to: '/plan', title: '学习计划' }
+  }
+  if (s.includes('学习计划') || (s.includes('计划') && !s.includes('排程'))) return { to: '/plan', title: '学习计划' }
+  if (s.includes('目标')) return { to: '/goals', title: '目标' }
+  if (s.includes('任务')) return { to: '/goals', title: '目标' }
+  if (s.includes('随笔') || s.includes('日记') || s.includes('复盘')) return { to: '/journals', title: '随笔' }
+  if (s.includes('日程') || s.includes('排程') || s.includes('日历')) return { to: '/schedule', title: '日程' }
+  if (s.includes('资源') || s.includes('课程')) return { to: '/resources', title: '资源' }
+  if (s.includes('打卡')) return { to: '/punch', title: '打卡' }
+  if (s.includes('画像') || s.includes('我的')) return { to: '/profile', title: '画像' }
+
+  return null
+}
+
+function extractNavigateDirective(text) {
+  const out = []
+  const lines = String(text || '').split('\n')
+  for (const line of lines) {
+    const m = String(line || '').match(/(?:跳转|打开|进入)\s*[:：]\s*(\/[a-z0-9\-\/]+)/i)
+    const p = m?.[1]
+    if (!p) continue
+    if (!NAV_ITEMS.some((x) => x.to === p)) continue
+    if (!out.includes(p)) out.push(p)
+  }
+  return out
+}
+
+function stripNavigateDirective(text) {
+  const raw = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  // 将导航指令从行内移除，而非整行删除
+  const cleaned = raw.replace(/(?:跳转|打开|进入)\s*[:：]?\s*\/[a-z0-9\-\/]+/gi, '')
+  // 清理多余空白
+  return cleaned.replace(/\n{3,}/g, '\n\n').trim()
+}
+
 export const useAssistantStore = defineStore('assistant', {
   state: () => ({
     initialized: false,
@@ -9,19 +93,18 @@ export const useAssistantStore = defineStore('assistant', {
     y: null,
     width: 380,
     height: 520,
-    adviceLoading: false,
     adviceText: '',
-    adviceError: '',
     chatOpen: false,
     chatInput: '',
     chatLoading: false,
     chatMessages: [],
+    navRequest: null,
   }),
   actions: {
     async init() {
       if (this.initialized) return
       this.initialized = true
-      await this.refreshAdvice()
+      this.adviceText = '欢迎回来，先照顾好自己。'
     },
     setRect({ x, y, width, height }) {
       if (Number.isFinite(x)) this.x = x
@@ -49,46 +132,18 @@ export const useAssistantStore = defineStore('assistant', {
     closeChat() {
       this.chatOpen = false
     },
-    async refreshAdvice() {
-      this.adviceLoading = true
-      this.adviceError = ''
-      try {
-        const t = new Date()
-        const d = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`
-        const schedulesRes = await api.get('/user/schedule/task-schedules', { params: { from: `${d}T00:00:00`, to: `${d}T23:59:59` } })
-        const schedules = schedulesRes?.data?.data ?? []
-        const taskIds = schedules.map((x) => x?.taskId).filter(Boolean)
-        if (!taskIds.length) {
-          this.adviceText = '今天暂无排程任务'
-          return
-        }
-
-        const [adviceRes, tasksRes] = await Promise.all([
-          api.post('/user/tasks/advice', taskIds),
-          api.post('/user/tasks/by-ids', taskIds),
-        ])
-
-        const advice = adviceRes?.data?.data ?? {}
-        const tasks = tasksRes?.data?.data ?? []
-        const taskMap = new Map()
-        for (const t of tasks) {
-          if (t?.id) taskMap.set(Number(t.id), t)
-        }
-
-        const lines = []
-        for (let i = 0; i < schedules.length; i++) {
-          const s = schedules[i]
-          const tid = Number(s?.taskId)
-          const title = s?.taskTitle || taskMap.get(tid)?.title || `任务 ${i + 1}`
-          const tip = advice?.[String(tid)] || advice?.[tid] || ''
-          if (tip) lines.push(`${i + 1}. ${title}：${tip}`)
-        }
-        this.adviceText = lines.length ? lines.join('\n') : '暂无建议'
-      } catch (e) {
-        this.adviceError = e?.response?.data?.message || e?.message || '加载建议失败'
-      } finally {
-        this.adviceLoading = false
-      }
+    requestNavigate(to, title) {
+      const dest = String(to || '').trim()
+      if (!dest) return
+      this.navRequest = { to: dest, title: String(title || dest), at: Date.now() }
+    },
+    clearNavRequest() {
+      this.navRequest = null
+    },
+    setCareText(text) {
+      const t = String(text || '').trim()
+      if (!t) return
+      this.adviceText = t
     },
     async sendChat() {
       const text = String(this.chatInput ?? '').trim()
@@ -96,13 +151,72 @@ export const useAssistantStore = defineStore('assistant', {
 
       this.chatMessages.push({ role: 'user', text })
       this.chatInput = ''
+
+      const nav = extractNavTarget(text)
+      if (nav?.to) {
+        this.requestNavigate(nav.to, nav.title)
+        this.chatMessages.push({ role: 'assistant', text: `已为你打开：${nav.title}` })
+        return
+      }
+
       this.chatLoading = true
+      let aiMsg = null
       try {
-        const res = await api.post('/user/agent/chat', text, { headers: { 'Content-Type': 'text/plain' }, timeout: 60000 })
-        const answer = res?.data?.data?.answer || res?.data?.data || res?.data?.message || ''
-        this.chatMessages.push({ role: 'assistant', text: String(answer || '我暂时没想好，可以换个问法吗？') })
+        aiMsg = { role: 'assistant', text: '' }
+        this.chatMessages.push(aiMsg)
+        aiMsg = this.chatMessages[this.chatMessages.length - 1]
+
+        const token = localStorage.getItem('accessToken')
+        const ctrl = new AbortController()
+        const t = setTimeout(() => ctrl.abort(), 60000)
+        try {
+          const res = await fetch('/api/user/agent/chat/stream', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'text/plain',
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: text,
+            signal: ctrl.signal,
+          })
+
+          if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`)
+          }
+
+          const reader = res.body?.getReader?.()
+          if (!reader) {
+            const fallbackText = await res.text()
+            aiMsg.text = String(fallbackText || '服务返回为空')
+            return
+          }
+
+          const decoder = new TextDecoder('utf-8')
+          let buf = ''
+          while (true) {
+            const { value, done } = await reader.read()
+            if (done) break
+            buf += decoder.decode(value, { stream: true })
+            aiMsg.text = buf
+          }
+          aiMsg.text = (buf + decoder.decode()).trim() || '我暂时没想好，可以换个问法吗？'
+
+          const navPaths = extractNavigateDirective(aiMsg.text)
+          if (navPaths?.length) {
+            aiMsg.navs = navPaths
+              .map((p) => {
+                const item = NAV_ITEMS.find((x) => x.to === p)
+                return { to: p, title: item?.title || p }
+              })
+            aiMsg.text = stripNavigateDirective(aiMsg.text)
+          }
+        } finally {
+          clearTimeout(t)
+        }
       } catch (e) {
-        this.chatMessages.push({ role: 'assistant', text: String(e?.response?.data?.message || e?.message || '服务异常，请稍后再试') })
+        const msg = String(e?.message || '服务异常，请稍后再试')
+        if (aiMsg) aiMsg.text = msg
+        else this.chatMessages.push({ role: 'assistant', text: msg })
       } finally {
         this.chatLoading = false
       }
