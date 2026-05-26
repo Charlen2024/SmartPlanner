@@ -52,24 +52,28 @@ public class InfoController {
 
     @GetMapping("/weather")
     public Result<WeatherDto> weather(
-            @RequestParam(required = false) Double lat,
-            @RequestParam(required = false) Double lon) {
-        double latitude = lat != null ? lat : 31.2304;
-        double longitude = lon != null ? lon : 121.4737;
+            @RequestParam(required = false) String location) {
+        String loc = (location != null && !location.isBlank()) ? location.trim() : "Shenzhen";
         WeatherDto dto = new WeatherDto();
         dto.setDate(LocalDate.now().toString());
+        dto.setLocation(loc);
         try {
-            String url = "https://api.open-meteo.com/v1/forecast?latitude=" + latitude + "&longitude=" + longitude + "&current_weather=true";
-            HttpClient client = HttpClient.newHttpClient();
-            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url)).GET().build();
+            String encoded = java.net.URLEncoder.encode(loc, java.nio.charset.StandardCharsets.UTF_8);
+            String url = "https://wttr.in/" + encoded + "?format=j1";
+            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
+            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url)).timeout(java.time.Duration.ofSeconds(8)).GET().build();
             HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
             JsonNode root = objectMapper.readTree(resp.body());
-            JsonNode cw = root.get("current_weather");
-            if (cw != null && !cw.isNull()) {
-                dto.setTemperature(cw.get("temperature").isNumber() ? cw.get("temperature").asDouble() : null);
-                dto.setWindspeed(cw.get("windspeed").isNumber() ? cw.get("windspeed").asDouble() : null);
-                dto.setWeatherCode(cw.get("weathercode").isInt() ? cw.get("weathercode").asInt() : null);
-                dto.setSummary(weatherSummary(dto.getWeatherCode()));
+            JsonNode cc = root.path("current_condition");
+            if (cc.isArray() && !cc.isEmpty()) {
+                JsonNode c = cc.get(0);
+                dto.setTemperature(c.path("temp_C").isNumber() ? c.path("temp_C").asDouble() : null);
+                dto.setFeelsLike(c.path("FeelsLikeC").isNumber() ? c.path("FeelsLikeC").asDouble() : null);
+                dto.setWindspeed(c.path("windspeedKmph").isNumber() ? c.path("windspeedKmph").asDouble() : null);
+                dto.setHumidity(c.path("humidity").isNumber() ? c.path("humidity").asText() : null);
+                String desc = c.path("weatherDesc").isArray() && !c.path("weatherDesc").isEmpty()
+                        ? c.path("weatherDesc").get(0).path("value").asText() : null;
+                dto.setSummary(desc != null ? desc : "天气");
             }
         } catch (Exception e) {
             dto.setSummary("天气服务不可用");
