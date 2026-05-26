@@ -1,4 +1,4 @@
-import { defineStore } from 'pinia'
+﻿import { defineStore } from 'pinia'
 
 let nextId = 1
 
@@ -6,6 +6,7 @@ export const useNotifyStore = defineStore('notify', {
   state: () => ({
     ownerUserId: null,
     recentReminderSig: {},
+    _recentPushSig: {},
     items: [],
     reminders: [],
     signalSeq: {
@@ -28,11 +29,26 @@ export const useNotifyStore = defineStore('notify', {
       this._restoreReminders()
     },
     push(message, type = 'info', timeout = 4500) {
+      const msg = String(message ?? '').trim()
+      if (!msg) return -1
+      const sig = `t:${type}|m:${msg}`
+      const now = Date.now()
+      const last = Number(this._recentPushSig?.[sig] || 0)
+      if (last && now - last < 30000) return -1
+      this._recentPushSig = this._recentPushSig || {}
+      this._recentPushSig[sig] = now
+      if (Object.keys(this._recentPushSig).length > 100) {
+        const next = {}
+        for (const k of Object.keys(this._recentPushSig)) {
+          if (now - Number(this._recentPushSig[k]) < 5 * 60_000) next[k] = this._recentPushSig[k]
+        }
+        this._recentPushSig = next
+      }
       const id = nextId++
       this.items.push({
         id,
         open: true,
-        message: String(message ?? ''),
+        message: msg,
         type,
         timeout,
       })
