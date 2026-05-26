@@ -153,6 +153,13 @@ watch(() => assistant.chatMessages?.length, () => {
   }))
 })
 
+watch(() => assistant.chatMessages?.length, () => {
+  import('vue').then(({ nextTick }) => nextTick(() => {
+    const el = document.querySelector('.vibe-chat-scroll')
+    if (el) el.scrollTop = el.scrollHeight
+  }))
+})
+
 watch(() => assistant.navRequest, (nav) => {
   if (nav?.to && router) {
     router.push(nav.to)
@@ -405,11 +412,14 @@ function onResizeEnd() {
         rail-width="76"
         class="vibe-drawer"
     >
-      <div class="px-3 pt-3 pb-2">
+      <div v-if="!rail" class="px-3 pt-3 pb-2">
         <v-card variant="tonal" color="primary" class="pa-3 rounded-lg">
           <div class="text-subtitle-2 font-weight-semibold">SmartPlanner</div>
           <div class="text-caption">学习 · 计划 · 打卡</div>
         </v-card>
+      </div>
+      <div v-else class="d-flex justify-center pt-3 pb-1">
+        <v-icon icon="mdi-lightbulb-on-outline" color="primary" size="28" />
       </div>
 
       <v-list nav density="compact" class="mt-1">
@@ -426,16 +436,6 @@ function onResizeEnd() {
 
       <template #append>
         <div class="pa-2">
-          <v-btn
-            v-if="rail"
-            icon="mdi-bell-outline"
-            variant="text"
-            size="small"
-            class="mb-1"
-            @click="notifMenu = !notifMenu"
-          >
-            <v-badge :model-value="unreadCount > 0" :content="unreadCount" color="error" dot overlap style="position: absolute; top: 4px; right: 4px;" />
-          </v-btn>
           <v-btn block variant="text" size="small" @click="rail = !rail" :icon="rail ? 'mdi-chevron-right' : 'mdi-chevron-left'">
             <span v-if="!rail">{{ rail ? '展开' : '收起' }}</span>
           </v-btn>
@@ -517,19 +517,30 @@ function onResizeEnd() {
           <div class="text-caption mt-3 mb-2" style="opacity:0.75">向我提问</div>
           <div v-if="assistant.chatMessages?.length" class="vibe-chat-scroll mb-2" style="max-height: 220px; overflow-y: auto;">
             <div v-for="(m, i) in assistant.chatMessages" :key="i" class="mb-3">
-              <div :class="['vibe-chat-bubble', m.role === 'user' ? 'vibe-chat-user' : 'vibe-chat-ai']">{{ m.text }}</div>
+              <div :class="['vibe-chat-bubble', m.role === 'user' ? 'vibe-chat-user' : 'vibe-chat-ai']">
+                {{ m.text }}
+                <div v-if="m.navs?.length" class="mt-2 d-flex flex-wrap ga-1">
+                  <v-chip
+                    v-for="nav in m.navs"
+                    :key="nav.to"
+                    size="x-small"
+                    variant="tonal"
+                    color="primary"
+                    @click.stop="router.push(nav.to)"
+                  >跳转: {{ nav.title }}</v-chip>
+                </div>
+              </div>
             </div>
           </div>
-          <v-textarea
+          <v-text-field
               v-model="assistant.chatInput"
               :placeholder="chatHint()"
-              rows="2"
-              auto-grow
               variant="outlined"
               density="compact"
               :disabled="assistant.chatLoading"
               class="vibe-chat-input"
               hide-details
+              @keyup.enter="assistant.sendChat()"
           />
           <div class="d-flex justify-end mt-2">
             <v-btn color="primary" variant="tonal" :loading="assistant.chatLoading" @click="assistant.sendChat">发送</v-btn>
