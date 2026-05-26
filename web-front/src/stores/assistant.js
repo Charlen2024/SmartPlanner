@@ -168,7 +168,7 @@ export const useAssistantStore = defineStore('assistant', {
 
         const token = localStorage.getItem('accessToken')
         const ctrl = new AbortController()
-        const t = setTimeout(() => ctrl.abort(), 60000)
+        const t = setTimeout(() => ctrl.abort(), 120000)
         try {
           const res = await fetch('/api/user/agent/chat/stream', {
             method: 'POST',
@@ -193,13 +193,31 @@ export const useAssistantStore = defineStore('assistant', {
 
           const decoder = new TextDecoder('utf-8')
           let buf = ''
-          while (true) {
-            const { value, done } = await reader.read()
-            if (done) break
-            buf += decoder.decode(value, { stream: true })
+          let sseBuf = ''
+          const processSSE = () => {
+            const dataLines = []
+            const sseLines = sseBuf.split('\n')
+            sseBuf = sseLines.pop() || ''
+            for (const line of sseLines) {
+              if (line.startsWith('data:')) {
+                dataLines.push(line.slice(5))
+              }
+            }
+            if (dataLines.length) {
+              buf += dataLines.join('\n')
+            }
             aiMsg.text = buf
           }
-          aiMsg.text = (buf + decoder.decode()).trim() || '我暂时没想好，可以换个问法吗？'
+          while (true) {
+            const { value, done } = await reader.read()
+            if (done) {
+              processSSE()
+              break
+            }
+            sseBuf += decoder.decode(value, { stream: true })
+            processSSE()
+          }
+          aiMsg.text = buf.trim() || '我暂时没想好，可以换个问法吗？'
 
           const navPaths = extractNavigateDirective(aiMsg.text)
           if (navPaths?.length) {

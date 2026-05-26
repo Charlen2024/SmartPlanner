@@ -422,10 +422,11 @@ function onResizeEnd() {
       <v-list nav density="compact" class="mt-1">
         <v-list-item
             v-if="rail"
-            prepend-icon="mdi-lightbulb-on-outline"
+            prepend-icon="mdi-bell-outline"
             rounded="lg"
             class="vibe-menu-item"
             style="min-height: 44px;"
+            @click="notifMenu = true"
         >
           <v-list-item-title />
         </v-list-item>
@@ -433,6 +434,7 @@ function onResizeEnd() {
             v-for="m in menu"
             :key="m.to"
             :to="m.to"
+            :exact="m.to === '/'"
             :prepend-icon="m.icon"
             rounded="lg"
         >
@@ -442,9 +444,7 @@ function onResizeEnd() {
 
       <template #append>
         <div class="pa-2">
-          <v-btn block variant="text" size="small" @click="rail = !rail" :icon="rail ? 'mdi-chevron-right' : 'mdi-chevron-left'">
-            <span v-if="!rail">{{ rail ? '展开' : '收起' }}</span>
-          </v-btn>
+          <v-btn variant="text" size="small" @click="rail = !rail" :icon="rail ? 'mdi-chevron-right' : 'mdi-chevron-left'" class="mx-auto d-flex" />
         </div>
       </template>
     </v-navigation-drawer>
