@@ -3,6 +3,7 @@ package com.chao.user.controller;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.dto.Result;
+import lombok.extern.slf4j.Slf4j;
 import com.chao.common.client.PunchClient;
 import com.chao.common.client.ScheduleClient;
 import com.chao.common.dto.PunchRecordDto;
@@ -40,6 +41,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/user")
 @RequiredArgsConstructor
@@ -60,22 +62,23 @@ public class InfoController {
         try {
             String encoded = java.net.URLEncoder.encode(loc, java.nio.charset.StandardCharsets.UTF_8);
             String url = "https://wttr.in/" + encoded + "?format=j1";
-            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
-            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url)).timeout(java.time.Duration.ofSeconds(8)).GET().build();
+            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(10)).build();
+            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url)).timeout(java.time.Duration.ofSeconds(15)).GET().build();
             HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
             JsonNode root = objectMapper.readTree(resp.body());
             JsonNode cc = root.path("current_condition");
             if (cc.isArray() && !cc.isEmpty()) {
                 JsonNode c = cc.get(0);
-                dto.setTemperature(c.path("temp_C").isNumber() ? c.path("temp_C").asDouble() : null);
-                dto.setFeelsLike(c.path("FeelsLikeC").isNumber() ? c.path("FeelsLikeC").asDouble() : null);
-                dto.setWindspeed(c.path("windspeedKmph").isNumber() ? c.path("windspeedKmph").asDouble() : null);
-                dto.setHumidity(c.path("humidity").isNumber() ? c.path("humidity").asText() : null);
+                dto.setTemperature(parseDoubleNode(c, "temp_C"));
+                dto.setFeelsLike(parseDoubleNode(c, "FeelsLikeC"));
+                dto.setWindspeed(parseDoubleNode(c, "windspeedKmph"));
+                dto.setHumidity(parseStringNode(c, "humidity"));
                 String desc = c.path("weatherDesc").isArray() && !c.path("weatherDesc").isEmpty()
                         ? c.path("weatherDesc").get(0).path("value").asText() : null;
                 dto.setSummary(desc != null ? desc : "天气");
             }
         } catch (Exception e) {
+            log.warn("Weather fetch failed for location={}: {}", loc, e.toString());
             dto.setSummary("天气服务不可用");
         }
         return Result.success(dto);
@@ -385,6 +388,23 @@ public class InfoController {
         dto.setBreakMinutes(10);
         dto.setMaxDailyMinutes(maxDaily);
         return dto;
+    }
+
+    private Double parseDoubleNode(JsonNode parent, String field) {
+        JsonNode n = parent.path(field);
+        if (n.isNull() || n.isMissingNode()) return null;
+        if (n.isNumber()) return n.asDouble();
+        if (n.isTextual()) {
+            try { return Double.parseDouble(n.asText().trim()); } catch (NumberFormatException ignored) {}
+        }
+        return null;
+    }
+
+    private String parseStringNode(JsonNode parent, String field) {
+        JsonNode n = parent.path(field);
+        if (n.isNull() || n.isMissingNode()) return null;
+        if (n.isTextual()) return n.asText().trim();
+        return n.asText();
     }
 
     private String weatherSummary(Integer code) {
