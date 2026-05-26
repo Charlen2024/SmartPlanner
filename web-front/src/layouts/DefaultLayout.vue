@@ -360,20 +360,20 @@ function onResizeEnd() {
         <span v-if="userLabel" class="vibe-user">{{ userLabel }}</span>
       </v-app-bar-title>
       <v-spacer />
-      <v-btn variant="text" class="mr-2" @click="toggleTheme">
+      <v-btn  class="mr-2" @click="toggleTheme">
         {{ isDark ? '浅色' : '深色' }}
       </v-btn>
       <v-menu v-model="notifMenu" :close-on-content-click="false" location="bottom end">
         <template #activator="{ props: menuProps }">
           <v-badge :model-value="unreadCount > 0" :content="unreadCount" color="error" overlap>
-            <v-btn v-bind="menuProps" icon="mdi-bell-outline" variant="text" class="mr-2" />
+            <v-btn v-bind="menuProps" icon="mdi-bell-outline"  class="mr-2" />
           </v-badge>
         </template>
         <v-card min-width="340" max-width="420" max-height="480" class="overflow-y-auto">
           <div class="d-flex align-center pa-3 border-b">
             <span class="text-subtitle-1 font-weight-semibold">消息通知</span>
             <v-spacer />
-            <v-btn v-if="notify.reminders.length" size="small" variant="text" @click="notify.clearReminders()">清空</v-btn>
+            <v-btn v-if="notify.reminders.length" size="small"  @click="notify.clearReminders()">清空</v-btn>
           </div>
           <div v-if="!notify.reminders.length" class="pa-6 text-center text-medium-emphasis">
             <v-icon size="40" class="mb-2">mdi-bell-off-outline</v-icon>
@@ -444,7 +444,7 @@ function onResizeEnd() {
 
       <template #append>
         <div class="pa-2">
-          <v-btn variant="text" size="small" @click="rail = !rail" :icon="rail ? 'mdi-chevron-right' : 'mdi-chevron-left'" class="mx-auto d-flex" />
+          <v-btn  size="small" @click="rail = !rail" :icon="rail ? 'mdi-chevron-right' : 'mdi-chevron-left'" class="mx-auto d-flex" />
         </div>
       </template>
     </v-navigation-drawer>
@@ -462,7 +462,7 @@ function onResizeEnd() {
         v-model="n.open"
         :timeout="n.timeout"
         location="top end"
-        variant="text"
+        
         class="glass-snackbar"
         style="position: fixed"
         :style="{ top: `${16 + idx * 64}px` }"
@@ -471,7 +471,7 @@ function onResizeEnd() {
       <div class="d-flex align-center">
         <div class="mr-3">{{ n.message }}</div>
         <v-spacer />
-        <v-btn size="small" variant="text" @click="notify.close(n.id)">关闭</v-btn>
+        <v-btn size="small"  @click="notify.close(n.id)">关闭</v-btn>
       </div>
     </v-snackbar>
 
@@ -505,8 +505,8 @@ function onResizeEnd() {
             />
           </div>
           <div class="vibe-agent-actions" @pointerdown.stop>
-            <v-btn size="small" variant="text" :disabled="assistant.adviceLoading" @click.stop="assistant.refreshAdvice" v-show="!assistant.minimized">刷新</v-btn>
-            <v-btn size="small" variant="text" @click.stop="assistant.toggleMinimize">
+            <v-btn size="small"  :disabled="assistant.adviceLoading" @click.stop="assistant.refreshAdvice" v-show="!assistant.minimized">刷新</v-btn>
+            <v-btn size="small"  @click.stop="assistant.toggleMinimize">
               {{ assistant.minimized ? '展开' : '收起' }}
             </v-btn>
           </div>
@@ -515,7 +515,7 @@ function onResizeEnd() {
 
         <div v-show="!assistant.minimized" class="px-3 py-3 flex-grow-1" style="overflow-y: auto;">
           <v-alert v-if="assistant.adviceError" type="error" variant="tonal" class="mb-2" density="compact">{{ assistant.adviceError }}</v-alert>
-          <v-sheet rounded="lg" class="pa-3 mb-2" color="transparent" style="background: rgba(var(--v-theme-on-surface), 0.04) !important; border: 1px solid rgba(var(--v-theme-on-surface), 0.08);">
+          <v-sheet rounded="lg" class="pa-3 mb-2" style="background: rgba(var(--v-theme-primary), 0.08); border: 1px solid rgba(var(--v-theme-primary), 0.15); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);">
             <div class="text-caption mb-1" style="opacity:0.55; font-weight:500;">学习建议</div>
             <div class="text-body-2" style="line-height:1.6; opacity:0.9;">{{ assistant.adviceText }}</div>
           </v-sheet>
@@ -707,24 +707,28 @@ function onResizeEnd() {
 .glass-snackbar.v-snackbar {
   border-radius: 16px !important;
   overflow: visible !important;
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
 }
 .glass-snackbar .v-overlay__scrim { background: transparent !important; opacity: 0 !important; }
 .glass-snackbar .v-overlay__content,
 .glass-snackbar.v-snackbar > .v-overlay__content {
   border-radius: 16px !important;
-  background: rgba(255, 255, 255, 0.18) !important;
-  backdrop-filter: blur(30px) saturate(180%);
-  -webkit-backdrop-filter: blur(30px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.32);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+  background: rgba(255, 255, 255, 0.28) !important;
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
 }
 .glass-snackbar .v-snackbar__wrapper,
 .glass-snackbar .v-snackbar__content { background: transparent !important; border-radius: 16px !important; }
 .glass-snackbar .v-snackbar__content { padding: 12px 20px; color: inherit !important; }
 .theme--dark .glass-snackbar .v-overlay__content,
 .theme--dark .glass-snackbar.v-snackbar > .v-overlay__content {
-  background: rgba(15, 23, 42, 0.62) !important;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(15, 23, 42, 0.72) !important;
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.18);
 }
 
 /* Sidebar menu items */
