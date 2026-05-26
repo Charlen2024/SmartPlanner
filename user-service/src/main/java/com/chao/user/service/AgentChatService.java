@@ -1,4 +1,4 @@
-﻿package com.chao.user.service;
+package com.chao.user.service;
 
 import com.chao.common.client.GoalClient;
 import com.chao.common.client.PunchClient;
