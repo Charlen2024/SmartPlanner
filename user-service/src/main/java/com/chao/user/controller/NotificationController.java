@@ -151,6 +151,9 @@ public class NotificationController {
         } catch (Exception ignored) {
         }
 
+        // Fetch weather summary for care context
+        String weatherInfo = fetchWeatherBrief();
+
         boolean scheduleImported = false;
         try {
             var user = appUserService.getById(userId);
@@ -180,8 +183,9 @@ public class NotificationController {
                     + "输出要求：温和、可执行，不要Markdown，不要表情符号。";
         } else {
             nav = chooseLoginCareNav(pending);
+            String weatherLine = weatherInfo.isBlank() ? "" : ",\"weather\":\"" + weatherInfo + "\"";
             prompt = "用户刚登录。请生成一条约50字中文关怀提醒。\n"
-                    + "必须引用下面数据中的至少一个具体信息（数字或任务名或心情），否则视为失败。\n"
+                    + "必须引用下面数据中的至少一个具体信息（数字或任务名或心情或天气），否则视为失败。\n"
                     + "不要出现\"词汇积累/背单词/继续努力哦/一步步来吧\"等泛化话术，除非下一项任务本身与英语词汇相关。\n"
                     + "要有人文关怀：允许用户慢一点、先照顾自己，再给一个最小动作建议。\n"
                     + "输出要求：温和、可执行，不要Markdown，不要表情符号。\n\n"
@@ -192,9 +196,10 @@ public class NotificationController {
                     + ",\"todayPending\":" + (pending != null ? pending : 0)
                     + ",\"nextTask\":\"" + (nextTask.isBlank() ? "无" : nextTask) + "\""
                     + ",\"latestMood\":\"" + (latestMood.isBlank() ? "无" : latestMood) + "\""
+                    + weatherLine
                     + "}";
             followPrompt = "用户刚登录。请生成第二条约50字中文关怀提醒，用于跟进引导。\n"
-                    + "必须引用下面数据中的至少一个具体信息（数字或任务名或心情），否则视为失败。\n"
+                    + "必须引用下面数据中的至少一个具体信息（数字或任务名或心情或天气），否则视为失败。\n"
                     + "不要出现\"词汇积累/背单词/继续努力哦/一步步来吧\"等泛化话术。\n"
                     + "要与第一条明显不同：优先从\"喝水/呼吸/拉伸/整理桌面/先打开日程/降低标准/允许自己慢一点\"等角度出发。\n"
                     + "尽量不要重复\"今天还有/未完成/先做/项/先挑1项/10分钟\"这类句式（可用更小的动作代替）。\n"
@@ -206,6 +211,7 @@ public class NotificationController {
                     + ",\"todayPending\":" + (pending != null ? pending : 0)
                     + ",\"nextTask\":\"" + (nextTask.isBlank() ? "无" : nextTask) + "\""
                     + ",\"latestMood\":\"" + (latestMood.isBlank() ? "无" : latestMood) + "\""
+                    + weatherLine
                     + "}。倾向：给一个\"现在就能做\"的最小动作。";
         }
         try {
@@ -291,6 +297,59 @@ public class NotificationController {
         if (next != null && !next.isBlank()) sb.append("下一项=").append(next).append("；");
         if (mood != null && !mood.isBlank()) sb.append("心情=").append(mood).append("；");
         return sb.toString();
+    }
+
+    private String fetchWeatherBrief() {
+        try {
+            String url = "https://wttr.in/Shenzhen?format=j1";
+            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(10000);
+            conn.setRequestProperty("User-Agent", "SmartPlanner/1.0");
+            conn.setInstanceFollowRedirects(true);
+            byte[] bytes = conn.getInputStream().readAllBytes();
+            com.fasterxml.jackson.databind.JsonNode root = new com.fasterxml.jackson.databind.ObjectMapper().readTree(
+                    new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
+            com.fasterxml.jackson.databind.JsonNode cc = root.path("current_condition");
+            if (cc.isArray() && !cc.isEmpty()) {
+                com.fasterxml.jackson.databind.JsonNode c = cc.get(0);
+                double temp = parseDouble(c, "temp_C");
+                String desc = c.path("weatherDesc").isArray() && !c.path("weatherDesc").isEmpty()
+                        ? c.path("weatherDesc").get(0).path("value").asText().trim() : "";
+                String cn = translateWeatherBrief(desc);
+                if (temp > 0 || !cn.isBlank()) {
+                    return cn + " " + (int) temp + "°C";
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
+    private double parseDouble(com.fasterxml.jackson.databind.JsonNode parent, String field) {
+        com.fasterxml.jackson.databind.JsonNode n = parent.path(field);
+        if (n.isNull() || n.isMissingNode()) return 0;
+        if (n.isNumber()) return n.asDouble();
+        if (n.isTextual()) {
+            try { return Double.parseDouble(n.asText().trim()); } catch (NumberFormatException ignored) {}
+        }
+        return 0;
+    }
+
+    private String translateWeatherBrief(String desc) {
+        if (desc == null || desc.isBlank()) return "";
+        String d = desc.trim();
+        String lower = d.toLowerCase();
+        if (lower.contains("sunny") || lower.contains("clear")) return "晴";
+        if (lower.contains("cloudy")) return "多云";
+        if (lower.contains("overcast")) return "阴";
+        if (lower.contains("fog") || lower.contains("mist")) return "雾";
+        if (lower.contains("drizzle")) return "毛毛雨";
+        if (lower.contains("heavy rain") || lower.contains("torrential")) return "大雨";
+        if (lower.contains("rain") || lower.contains("shower")) return "有雨";
+        if (lower.contains("thunder")) return "雷暴";
+        if (lower.contains("snow") || lower.contains("blizzard")) return "雪";
+        return "";
     }
 
 }
