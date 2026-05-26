@@ -177,6 +177,7 @@ async function completeNow() {
     const fd = new FormData()
     fd.append('taskId', String(s.taskId))
     fd.append('type', String(1))
+    if (s.taskTitle) fd.append('taskTitle', String(s.taskTitle))
     if (durationSeconds != null) fd.append('durationSeconds', String(durationSeconds))
     if (startMs != null) fd.append('startedAtMs', String(startMs))
     if (endMs != null) fd.append('endedAtMs', String(endMs))

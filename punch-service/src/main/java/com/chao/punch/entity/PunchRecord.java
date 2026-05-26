@@ -26,5 +26,7 @@ public class PunchRecord {
     private LocalDateTime startedAt;
     @TableField("ended_at")
     private LocalDateTime endedAt;
+    @TableField("task_title")
+    private String taskTitle;
     private LocalDateTime createdAt;
 }

@@ -30,8 +30,9 @@ public class PunchController {
             @RequestParam(required = false) Long startedAtMs,
             @RequestParam(required = false) Long endedAtMs,
             @RequestParam(required = false) String location,
+            @RequestParam(required = false) String taskTitle,
             @RequestParam(required = false) MultipartFile evidence) {
-        PunchRecord record = punchService.submitPunch(userId, taskId, type, durationSeconds, startedAtMs, endedAtMs, location, evidence);
+        PunchRecord record = punchService.submitPunch(userId, taskId, type, durationSeconds, startedAtMs, endedAtMs, location, taskTitle, evidence);
         return Result.success("打卡已提交，recordId=" + record.getId());
     }
 

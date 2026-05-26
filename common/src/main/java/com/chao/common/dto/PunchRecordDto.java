@@ -17,5 +17,6 @@ public class PunchRecordDto {
     private Integer durationSeconds;
     private LocalDateTime startedAt;
     private LocalDateTime endedAt;
+    private String taskTitle;
     private LocalDateTime createdAt;
 }

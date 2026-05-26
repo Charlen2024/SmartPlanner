@@ -40,11 +40,13 @@ public class PunchService {
             Long startedAtMs,
             Long endedAtMs,
             String location,
+            String taskTitle,
             MultipartFile evidence) {
         PunchRecord record = new PunchRecord();
         record.setUserId(userId);
         record.setTaskId(taskId);
         record.setPunchType(type);
+        record.setTaskTitle(taskTitle);
         record.setLocationInfo(location);
         record.setDurationSeconds(durationSeconds);
         record.setStartedAt(toLocalDateTime(startedAtMs));
