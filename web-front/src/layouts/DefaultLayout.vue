@@ -418,11 +418,17 @@ function onResizeEnd() {
           <div class="text-caption">学习 · 计划 · 打卡</div>
         </v-card>
       </div>
-      <div v-else class="d-flex justify-center pt-3 pb-1">
-        <v-icon icon="mdi-lightbulb-on-outline" color="primary" size="28" />
-      </div>
 
       <v-list nav density="compact" class="mt-1">
+        <v-list-item
+            v-if="rail"
+            prepend-icon="mdi-lightbulb-on-outline"
+            rounded="lg"
+            class="vibe-menu-item"
+            style="min-height: 44px;"
+        >
+          <v-list-item-title />
+        </v-list-item>
         <v-list-item
             v-for="m in menu"
             :key="m.to"
@@ -516,9 +522,9 @@ function onResizeEnd() {
 
           <div class="text-caption mt-3 mb-2" style="opacity:0.75">向我提问</div>
           <div v-if="assistant.chatMessages?.length" class="vibe-chat-scroll mb-2" style="max-height: 220px; overflow-y: auto;">
-            <div v-for="(m, i) in assistant.chatMessages" :key="i" class="mb-3">
+            <div v-for="m in assistant.chatMessages" :key="m._key || m.text?.slice(0,8) + Math.random()" class="mb-3">
               <div :class="['vibe-chat-bubble', m.role === 'user' ? 'vibe-chat-user' : 'vibe-chat-ai']">
-                {{ m.text }}
+                <span style="white-space: pre-wrap;">{{ m.text }}</span>
                 <div v-if="m.navs?.length" class="mt-2 d-flex flex-wrap ga-1">
                   <v-chip
                     v-for="nav in m.navs"
@@ -531,6 +537,10 @@ function onResizeEnd() {
                 </div>
               </div>
             </div>
+          </div>
+          <div v-if="assistant.chatLoading" class="d-flex align-center ga-2 mb-2">
+            <v-progress-circular indeterminate size="16" width="2" />
+            <span class="text-caption" style="opacity:0.65">AI 正在思考...</span>
           </div>
           <v-text-field
               v-model="assistant.chatInput"
