@@ -5,9 +5,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { useDisplay, useTheme } from 'vuetify'
 import { useNotifyStore } from '../stores/notify'
 import { useAssistantStore } from '../stores/assistant'
-import { marked } from 'marked'
 
-marked.setOptions({ breaks: true, gfm: true })
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -205,32 +203,6 @@ function logout() {
 
 const quickPrompts = ['今天该做什么？', '总结本周进度', '给我一个学习建议']
 
-function renderMarkdown(text) {
-  if (!text) return ''
-  try {
-    // fix common LLM markdown mistakes
-    let fixed = text
-      // ###heading -> ### heading
-      .replace(/^(#{1,6})([^\s#])/gm, '$1 $2')
-      // 1.text -> 1. text
-      .replace(/^(\d+)\.(\S)/gm, '$1. $2')
-      // -text -> - text (but not --text)
-      .replace(/^(\s*)-(\S)/gm, '$1- $2')
-    // dedup paragraphs
-    const paras = fixed.split(/\n{2,}/)
-    const seen = new Set()
-    const out = []
-    for (const p of paras) {
-      const key = p.trim()
-      if (!key || seen.has(key)) continue
-      seen.add(key)
-      out.push(p)
-    }
-    return marked.parse(out.join('\n\n'))
-  } catch {
-    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;')
-  }
-}
 
 function chatHint() {
   if (assistant.chatMessages?.length) return ''
@@ -522,7 +494,7 @@ function onResizeEnd() {
             <div v-for="m in assistant.chatMessages" :key="m._key || m.text?.slice(0,8) + Math.random()" class="mb-3">
               <div :class="['vibe-chat-bubble', m.role === 'user' ? 'vibe-chat-user' : 'vibe-chat-ai']">
                 <span v-if="m.role === 'user'" style="white-space: pre-wrap;">{{ m.text }}</span>
-                  <span v-else class="vibe-md" v-html="renderMarkdown(m.text)"></span>
+                  <span v-else style="white-space: pre-wrap;">{{ m.text }}</span>
                 <div v-if="m.navs?.length" class="mt-2 d-flex flex-wrap ga-1">
                   <v-chip
                     v-for="nav in m.navs"

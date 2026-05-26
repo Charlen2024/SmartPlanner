@@ -194,7 +194,6 @@ export const useAssistantStore = defineStore('assistant', {
           const decoder = new TextDecoder('utf-8')
           let buf = ''
           let sseBuf = ''
-          let lastRender = 0
           const processSSE = () => {
             const dataLines = []
             const sseLines = sseBuf.split('\n')
