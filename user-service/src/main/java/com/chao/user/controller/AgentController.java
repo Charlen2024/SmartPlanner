@@ -38,6 +38,7 @@ public class AgentController {
         Long userId = jwt.getClaim("userId");
 
         StreamingResponseBody body = outputStream -> {
+            java.util.concurrent.atomic.AtomicReference<String> lastSent = new java.util.concurrent.atomic.AtomicReference<>("");
             agentChatService.chatStream(userId, question)
                     .doOnComplete(() -> {
                         try {
@@ -49,6 +50,11 @@ public class AgentController {
                     .doOnNext(chunk -> {
                         try {
                             if (chunk != null && !chunk.isEmpty()) {
+                                String prev = lastSent.getAndSet(chunk);
+                                if (chunk.equals(prev)) {
+                                    log.debug("skipping duplicate chunk: {}", chunk.length());
+                                    return;
+                                }
                                 outputStream.write(("data: " + chunk + "\n\n").getBytes());
                                 outputStream.flush();
                             }

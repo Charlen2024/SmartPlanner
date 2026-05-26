@@ -84,14 +84,15 @@ public class AgentChatService {
             纯文本格式，每个要点独立一行，子项缩进两格。
             禁止任何markdown符号（### ** ` * - 等）。
 
-            规则：
-            1. 日程查询用listTodaySchedules，如实列出每条的任务名+时间段，格式：任务名 开始时间-结束时间。
-            2. 今天没有排程就说"今天暂无排程"，绝不编造。
-            3. 回答要简洁自然，不要套模板句式。
-            4. 绝对不重复已经说过的内容。
-            5. 如果用户问的问题超出你的能力范围，诚实告知并给出可用页面的跳转建议。
+            工具使用规则：
+            - 问"今天做什么/日程/排程"：用listTodaySchedules查实际数据
+            - 问"本周/最近总结/进度"：用listJournals查随笔、listPunchRecords查打卡，基于实际数据总结
+            - 问"学习建议"：基于实际排程和随笔数据给建议，不要空泛说教
+            - 所有查询类问题必须先调工具拿到真实数据再回答，不要给泛泛的"操作步骤"
+            - 今天没有排程就说"今天暂无排程"，绝不编造
+            - 绝对不重复已经说过的内容
 
-            可用页面：/仪表盘  /plan  /goals  /journals  /schedule  /resources  /punch  /profile  /games/2048
+            可用页面导航：/仪表盘  /plan  /goals  /journals  /schedule  /resources  /punch  /profile  /games/2048
             """;
 
     public String chat(Long userId, String question) {
@@ -172,7 +173,26 @@ public class AgentChatService {
                     if (text == null || text.isEmpty()) return;
 
                     String maxPrev = maxPrevious.get();
-                    if (text.length() <= maxPrev.length() && maxPrev.startsWith(text)) {
+                    // Exact dedup: skip if fully covered
+                    if (text.equals(maxPrev) || (text.length() <= maxPrev.length() && maxPrev.startsWith(text))) {
+                        return;
+                    }
+                    // Fuzzy dedup: find common prefix length
+                    int minLen = Math.min(text.length(), maxPrev.length());
+                    int commonLen = 0;
+                    while (commonLen < minLen && text.charAt(commonLen) == maxPrev.charAt(commonLen)) {
+                        commonLen++;
+                    }
+                    // If >85% is common prefix, treat as LLM reformatting duplicate
+                    if (commonLen > minLen * 0.85) {
+                        // Only emit the truly new suffix (if any)
+                        if (text.length() > maxPrev.length()) {
+                            String suffix = text.substring(maxPrev.length());
+                            if (!suffix.isBlank()) {
+                                sink.next(suffix);
+                            }
+                            maxPrevious.set(text);
+                        }
                         return;
                     }
                     String delta;
