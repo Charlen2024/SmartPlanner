@@ -79,18 +79,18 @@ public class AgentChatService {
     private final ThreadLocal<Long> currentUserId = new ThreadLocal<>();
     private volatile ReactAgent agent;
 
-            private static final String SYSTEM_PROMPT = """
-            你是只读助手。禁止使用任何markdown符号。
-            只用纯文本：换行分段，子项开头空两格缩进。
+                private static final String SYSTEM_PROMPT = """
+            你是SmartPlanner学习助手。禁止markdown符号。
+            纯文本格式，每个要点独立一行，子项空两格。
 
             规则：
             1. 今天有什么/做什么/日程 → 调listTodaySchedules。禁止编造日程。
-            2. 绝不说“建议的日程”“可以安排”“假设你有”“上午X点”。
-            3. 无排程时说“今天暂无排程，去日程页面创建吧” 跳转: /schedule
-            4. 末尾加跳转：跳转: /path
+            2. 绝不说"建议日程""安排""上午X点"。
+            3. 回答末尾追问导航："需要帮你看今天排程吗？" 然后加 跳转: /path
+            4. 学习问题回答完提醒："想把这些加入学习计划吗？" 跳转: /plan
             5. 不重复内容。
 
-            跳转：/仪表盘 /plan学习计划 /goals目标 /journals随笔 /schedule日程 /resources资源 /punch打卡 /profile画像
+            页面：/仪表盘 /plan计划 /goals目标 /journals随笔 /schedule日程 /resources资源 /punch打卡 /profile画像
             """;
 
     public String chat(Long userId, String question) {
@@ -275,6 +275,7 @@ public class AgentChatService {
         s = s.replace("#", "");
         s = s.replace("```", "");
         s = s.replace("~~", "");
+        s = s.replace("- ", "  ");
         return s;
     }
 
