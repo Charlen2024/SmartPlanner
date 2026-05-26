@@ -80,17 +80,17 @@ public class AgentChatService {
     private volatile ReactAgent agent;
 
                 private static final String SYSTEM_PROMPT = """
-            你是SmartPlanner学习助手。禁止markdown符号。
-            纯文本格式，每个要点独立一行，子项空两格。
+            你是SmartPlanner学习助手。用口语化的中文回复，像朋友聊天一样自然。
+            纯文本格式，每个要点独立一行，子项缩进两格。
+            禁止任何markdown符号（### ** ` * - 等）。
 
             规则：
-            1. 今天有什么/做什么/日程 → 调listTodaySchedules。禁止编造日程。
-            2. 绝不说"建议日程""安排""上午X点"。
-            3. 回答末尾追问导航："需要帮你看今天排程吗？" 然后加 跳转: /path
-            4. 学习问题回答完提醒："想把这些加入学习计划吗？" 跳转: /plan
-            5. 不重复内容。
+            1. 日程查询用listTodaySchedules，如实返回，不编造任何日程。
+            2. "今天做什么"类问题先查排程再回答，如果今天已有排程就直接列出。
+            3. 回答要简洁自然，不要套模板句式。
+            4. 绝对不重复已经说过的内容。
 
-            页面：/仪表盘 /plan计划 /goals目标 /journals随笔 /schedule日程 /resources资源 /punch打卡 /profile画像
+            可用页面：/仪表盘  /plan  /goals  /journals  /schedule  /resources  /punch  /profile  /games/2048
             """;
 
     public String chat(Long userId, String question) {
@@ -153,6 +153,7 @@ public class AgentChatService {
         RunnableConfig config = RunnableConfig.builder().threadId("u:" + userId).build();
         long startNs = System.nanoTime();
         AtomicReference<String> previous = new AtomicReference<>("");
+        AtomicReference<String> maxPrevious = new AtomicReference<>("");
 
         Flux<Object> raw;
         try {
@@ -169,19 +170,17 @@ public class AgentChatService {
                     String text = extractStreamText(out);
                     if (text == null || text.isEmpty()) return;
 
-                    String prev = previous.get();
+                    String maxPrev = maxPrevious.get();
+                    if (text.length() <= maxPrev.length() && maxPrev.startsWith(text)) {
+                        return;
+                    }
                     String delta;
-                    if (prev != null && !prev.isEmpty() && text.startsWith(prev) && text.length() >= prev.length()) {
-                        delta = text.substring(prev.length());
-                        previous.set(text);
-                    } else if (prev != null && prev.isEmpty()) {
-                        delta = text;
-                        previous.set(text);
-                    } else if (prev != null && text.equals(prev)) {
-                        delta = "";
+                    if (text.startsWith(maxPrev) && text.length() > maxPrev.length()) {
+                        delta = text.substring(maxPrev.length());
+                        maxPrevious.set(text);
                     } else {
                         delta = text;
-                        previous.set(text);
+                        maxPrevious.set(text);
                     }
 
                     if (delta == null || delta.isEmpty()) return;
