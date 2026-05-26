@@ -1,5 +1,30 @@
 import { defineStore } from 'pinia'
+import { marked } from 'marked'
 import api from '../plugins/api'
+
+marked.setOptions({ breaks: true, gfm: true })
+
+function sanitizeHtml(html) {
+  if (!html) return ''
+  return html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<iframe[^>]*>[\s\S]*?<\/iframe>/gi, '')
+    .replace(/<object[^>]*>[\s\S]*?<\/object>/gi, '')
+    .replace(/<embed[^>]*>/gi, '')
+    .replace(/on\w+\s*=\s*"[^"]*"/gi, '')
+    .replace(/on\w+\s*=\s*'[^']*'/gi, '')
+    .replace(/on\w+\s*=\s*[^\s>]*/gi, '')
+    .replace(/javascript\s*:/gi, '')
+}
+
+function renderAiHtml(text) {
+  if (!text) return ''
+  try {
+    return sanitizeHtml(marked.parse(text))
+  } catch {
+    return text
+  }
+}
 
 const NAV_ITEMS = [
   { title: '仪表盘', to: '/' },
@@ -14,38 +39,27 @@ const NAV_ITEMS = [
 ]
 
 function normalizeText(s) {
-  return String(s || '')
-    .toLowerCase()
-    .replaceAll(/\s+/g, '')
-    .replaceAll(/[，。、\-—…！？：；"''（）【】《》()\[\]{}<>]/g, '')
+  return String(s || '').toLowerCase().replaceAll(/\s+/g, '').replaceAll(/[，。、\-—…！？：；""''（）【】《》()\[\]{}<>]/g, '')
 }
 
 function extractExplicitPath(raw) {
   const m = String(raw || '').match(/(?:^|\s)(\/[a-z0-9\-\/]+)(?:\s|$)/i)
   if (!m?.[1]) return null
-  const p = m[1]
-  const ok = NAV_ITEMS.some((x) => x.to === p)
-  return ok ? p : null
+  return NAV_ITEMS.some((x) => x.to === m[1]) ? m[1] : null
 }
 
 function extractNavTarget(raw) {
   const s0 = String(raw || '').trim()
   if (!s0) return null
   const explicit = extractExplicitPath(s0)
-  if (explicit) {
-    const item = NAV_ITEMS.find((x) => x.to === explicit)
-    return item ? { to: item.to, title: item.title } : { to: explicit, title: explicit }
-  }
+  if (explicit) { const item = NAV_ITEMS.find((x) => x.to === explicit); return item ? { to: item.to, title: item.title } : { to: explicit, title: explicit } }
   const s = normalizeText(s0)
-  const hasVerb = /打开|进入|跳转|导航|带我去|去/.test(s)
-  const hasHint = /页面|界面|菜单|功能|模块/.test(s)
-  if (!hasVerb && !hasHint) return null
-  if (s.includes('2048') || s.includes('2048游戏') || s.includes('玩2048') || s.includes('小游戏')) return { to: '/games/2048', title: '2048' }
-  if (s.includes('仪表盘') || s.includes('首页') || s.includes('主页') || s === '打开' || s === '去') return { to: '/', title: '仪表盘' }
-  if (s.includes('导入课表') || s.includes('上传课表') || s.includes('课表') || s.includes('plan')) return { to: '/plan', title: '学习计划' }
+  if (!/打开|进入|跳转|导航|带我去|去/.test(s) && !/页面|界面|菜单|功能|模块/.test(s)) return null
+  if (s.includes('2048') || s.includes('小游戏')) return { to: '/games/2048', title: '2048' }
+  if (s.includes('仪表盘') || s.includes('首页') || s.includes('主页')) return { to: '/', title: '仪表盘' }
+  if (s.includes('课表') || s.includes('plan')) return { to: '/plan', title: '学习计划' }
   if (s.includes('学习计划') || (s.includes('计划') && !s.includes('排程'))) return { to: '/plan', title: '学习计划' }
-  if (s.includes('目标')) return { to: '/goals', title: '目标' }
-  if (s.includes('任务')) return { to: '/goals', title: '目标' }
+  if (s.includes('目标') || s.includes('任务')) return { to: '/goals', title: '目标' }
   if (s.includes('随笔') || s.includes('日记') || s.includes('复盘')) return { to: '/journals', title: '随笔' }
   if (s.includes('日程') || s.includes('排程') || s.includes('日历')) return { to: '/schedule', title: '日程' }
   if (s.includes('资源') || s.includes('课程')) return { to: '/resources', title: '资源' }
@@ -56,21 +70,30 @@ function extractNavTarget(raw) {
 
 function extractNavigateDirective(text) {
   const out = []
-  const lines = String(text || '').split('\n')
-  for (const line of lines) {
+  for (const line of String(text || '').split('\n')) {
     const m = String(line || '').match(/(?:跳转|打开|进入)\s*[:：]?\s*(\/[a-z0-9\-\/]+)/i)
-    const p = m?.[1]
-    if (!p) continue
-    if (!NAV_ITEMS.some((x) => x.to === p)) continue
-    if (!out.includes(p)) out.push(p)
+    if (m?.[1] && NAV_ITEMS.some((x) => x.to === m[1]) && !out.includes(m[1])) out.push(m[1])
   }
   return out
 }
 
 function stripNavigateDirective(text) {
-  const raw = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-  const cleaned = raw.replace(/(?:跳转|打开|进入)\s*[:：]?\s*\/[a-z0-9\-\/]+/gi, '')
-  return cleaned.replace(/\n{3,}/g, '\n\n').trim()
+  return String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/(?:跳转|打开|进入)\s*[:：]?\s*\/[a-z0-9\-\/]+/gi, '').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+function dedupParagraphs(text) {
+  if (!text) return text
+  const paras = text.split(/\n\n+/)
+  const seen = new Set()
+  const result = []
+  for (const p of paras) {
+    const key = p.replace(/\s+/g, ' ').trim()
+    if (key.length < 3) { result.push(p); continue }
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(p)
+  }
+  return result.join('\n\n')
 }
 
 let _msgIdCounter = 0
@@ -78,18 +101,8 @@ function nextMsgId() { return 'm_' + (++_msgIdCounter) + '_' + Date.now() }
 
 export const useAssistantStore = defineStore('assistant', {
   state: () => ({
-    initialized: false,
-    minimized: false,
-    x: null,
-    y: null,
-    width: 380,
-    height: 520,
-    adviceText: '',
-    chatOpen: false,
-    chatInput: '',
-    chatLoading: false,
-    chatMessages: [],
-    navRequest: null,
+    initialized: false, minimized: false, x: null, y: null, width: 380, height: 520,
+    adviceText: '', chatOpen: false, chatInput: '', chatLoading: false, chatMessages: [], navRequest: null,
   }),
   actions: {
     async init() {
@@ -104,30 +117,25 @@ export const useAssistantStore = defineStore('assistant', {
       if (Number.isFinite(height)) this.height = Math.max(120, Math.min(900, height))
     },
     toggleMinimize() {
-      const oldH = this.minimized ? 48 : this.height
+      const oh = this.minimized ? 48 : this.height
       this.minimized = !this.minimized
-      const newH = this.minimized ? 48 : this.height
+      const nh = this.minimized ? 48 : this.height
       if (this.y !== null) {
-        let ny = this.y + (oldH - newH)
-        if (typeof window !== 'undefined') {
-          const maxY = Math.max(16, window.innerHeight - newH - 16)
-          ny = Math.max(16, Math.min(maxY, ny))
-        }
+        let ny = this.y + (oh - nh)
+        if (typeof window !== 'undefined') ny = Math.max(16, Math.min(window.innerHeight - nh - 16, ny))
         this.y = ny
       }
     },
     openChat() { this.chatOpen = true; this.minimized = false },
     closeChat() { this.chatOpen = false },
     requestNavigate(to, title) {
-      const dest = String(to || '').trim()
-      if (!dest) return
-      this.navRequest = { to: dest, title: String(title || dest), at: Date.now() }
+      if (!to) return
+      this.navRequest = { to: String(to), title: String(title || to), at: Date.now() }
     },
     clearNavRequest() { this.navRequest = null },
     setCareText(text) {
       const t = String(text || '').trim()
-      if (!t) return
-      this.adviceText = t
+      if (t) this.adviceText = t
     },
     async sendChat() {
       const text = String(this.chatInput ?? '').trim()
@@ -159,41 +167,40 @@ export const useAssistantStore = defineStore('assistant', {
           const reader = res.body?.getReader?.()
           if (!reader) { aiMsg.text = String(await res.text() || '服务返回为空'); return }
           const decoder = new TextDecoder('utf-8')
-          let buf = '', sseBuf = '', lastFlush = 0, lastFlushedText = ''
-          const flushText = () => {
-            if (buf === lastFlushedText) return
-            lastFlushedText = buf; aiMsg.text = buf; lastFlush = Date.now()
-          }
+          let buf = '', sseBuf = '', lastFlush = 0, lastFlushed = ''
+          const flush = () => { if (buf !== lastFlushed) { lastFlushed = buf; aiMsg.text = buf; lastFlush = Date.now() } }
           const processSSE = () => {
-            const dataLines = []
-            const sseLines = sseBuf.split('\n')
-            sseBuf = sseLines.pop() || ''
-            let inData = false, inEvent = false
-            for (const line of sseLines) {
-              if (line.startsWith('event:')) { inData = false; inEvent = true }
-              else if (line.startsWith('data:')) { if (!inEvent) dataLines.push(line.slice(5).trimStart()); inData = true; inEvent = false }
-              else if (inData && !inEvent) { dataLines.push(line) }
+            const lines = sseBuf.split('\n'); sseBuf = lines.pop() || ''
+            let data = [], inData = false, inEvent = false
+            for (const l of lines) {
+              if (l.startsWith('event:')) { inData = false; inEvent = true }
+              else if (l.startsWith('data:')) { if (!inEvent) data.push(l.slice(5).trimStart()); inData = true; inEvent = false }
+              else if (inData && !inEvent) data.push(l)
             }
-            if (dataLines.length) {
-              while (dataLines.length && dataLines[dataLines.length - 1] === '') dataLines.pop()
-              const newText = dataLines.join('\n')
-              if (newText && !buf.endsWith(newText)) buf += newText
+            if (data.length) {
+              while (data.length && data[data.length - 1] === '') data.pop()
+              const chunk = data.join('\n')
+              if (chunk && !buf.endsWith(chunk)) buf += chunk
             }
-            if (Date.now() - lastFlush > 50) flushText()
+            if (Date.now() - lastFlush > 50) flush()
           }
           while (true) {
             const { value, done } = await reader.read()
-            if (done) { processSSE(); flushText(); break }
+            if (done) { processSSE(); flush(); break }
             sseBuf += decoder.decode(value, { stream: true })
             processSSE()
           }
-          if (!aiMsg.text || !aiMsg.text.trim()) aiMsg.text = '我暂时没想好，可以换个问法吗？'
-          else aiMsg.text = aiMsg.text.trim()
+          if (aiMsg.text && aiMsg.text.trim()) {
+            aiMsg.text = dedupParagraphs(aiMsg.text.trim())
+          } else {
+            aiMsg.text = '我暂时没想好，可以换个问法吗？'
+          }
           const navPaths = extractNavigateDirective(aiMsg.text)
           if (navPaths?.length) {
-            aiMsg.navs = navPaths.map(p => { const item = NAV_ITEMS.find(x => x.to === p); return { to: p, title: item?.title || p } })
+            aiMsg.navs = navPaths.map(p => { const it = NAV_ITEMS.find(x => x.to === p); return { to: p, title: it?.title || p } })
             aiMsg.text = stripNavigateDirective(aiMsg.text)
           }
+          aiMsg.html = renderAiHtml(aiMsg.text)
         } finally { clearTimeout(t) }
       } catch (e) {
         const msg = String(e?.message || '服务异常，请稍后再试')

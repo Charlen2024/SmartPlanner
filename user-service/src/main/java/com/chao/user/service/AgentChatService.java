@@ -81,18 +81,35 @@ public class AgentChatService {
 
                 private static final String SYSTEM_PROMPT = """
             你是SmartPlanner学习助手。用口语化的中文回复，像朋友聊天一样自然。
-            纯文本格式，每个要点独立一行，子项缩进两格。
-            禁止任何markdown符号（### ** ` * - 等）。
+            使用Markdown格式让回复清晰，格式规范：
 
-            工具使用规则：
-            - 问"今天做什么/日程/排程"：用listTodaySchedules查实际数据
-            - 问"本周/最近总结/进度"：用listJournals查随笔、listPunchRecords查打卡，基于实际数据总结
+            ## 标题分段
+            - 列表项用短横线，每条一行，不堆砌成段落
+            **加粗**强调关键数字和日期
+            [页面名](/路径) 做导航链接
+
+            ——周总结输出格式——
+            ## 本周打卡
+            - 共 X 次打卡，分布在 Y 天
+            - 日期1：任务名，N次，共M分钟
+            - 日期2：...
+
+            ## 随笔回顾
+            - 日期 - 心情：一句话概括
+
+            ## 小结
+            2-3句总结，不提建议（除非用户追问）
+
+            工具使用规则（重要——每次只能调用1个工具！）：
+            - 问"今天做什么/日程/排程"：只调listTodaySchedules，按时间段列出，每个任务一行，附上可跳转的页面链接
+            - 问"本周/最近总结/进度"：第一步调listPunchRecords查打卡，第二步调listJournals查随笔，每次只调一个，数据拿齐后再总结
             - 问"学习建议"：基于实际排程和随笔数据给建议，不要空泛说教
             - 所有查询类问题必须先调工具拿到真实数据再回答，不要给泛泛的"操作步骤"
             - 今天没有排程就说"今天暂无排程"，绝不编造
             - 绝对不重复已经说过的内容
+            - 回复末尾附上相关页面链接，格式：跳转: /路径
 
-            可用页面导航：/仪表盘  /plan  /goals  /journals  /schedule  /resources  /punch  /profile  /games/2048
+            可用页面：/ /plan /goals /journals /schedule /resources /punch /profile /games/2048
             """;
 
     public String chat(Long userId, String question) {
@@ -286,16 +303,9 @@ public class AgentChatService {
     private String sanitizeStreamChunk(String chunk) {
         if (chunk == null || chunk.isEmpty()) return "";
         String s = chunk;
-        // keep markdown formatting - frontend renders it via marked.js
-        // only strip code fences that break SSE
-        s = s.replace("###", "");
-        s = s.replace("**", "");
-        s = s.replace("`", "");
-        s = s.replace("*", "");
-        s = s.replace("#", "");
+        // Only strip fenced code blocks (triple backticks) that could break SSE framing.
+        // Everything else (##, **, *, -, etc.) is preserved for frontend marked.js rendering.
         s = s.replace("```", "");
-        s = s.replace("~~", "");
-        s = s.replace("- ", "  ");
         return s;
     }
 
@@ -368,6 +378,19 @@ public class AgentChatService {
                         .stateSerializer(new SpringAIStateSerializer())
                         .build())
                 .build();
+    }
+
+    private static String formatDuration(Integer seconds) {
+        if (seconds == null || seconds <= 0) return "0秒";
+        if (seconds < 60) return seconds + "秒";
+        if (seconds < 3600) {
+            int m = seconds / 60;
+            int s = seconds % 60;
+            return s > 0 ? m + "分" + s + "秒" : m + "分钟";
+        }
+        int h = seconds / 3600;
+        int m = (seconds % 3600) / 60;
+        return m > 0 ? h + "小时" + m + "分" : h + "小时";
     }
 
     private String safeText(String s) {
@@ -683,6 +706,53 @@ public class AgentChatService {
         } catch (Exception ignored) {
         }
 
+        // Index punch records
+        try {
+            Result<java.util.List<PunchRecordDto>> pr = punchClient.listRecords(userId, null, null, null);
+            java.util.List<PunchRecordDto> records = pr != null ? pr.getData() : java.util.List.of();
+            if (records != null) {
+                // Resolve task titles
+                java.util.Map<Long, String> taskTitles = new java.util.HashMap<>();
+                try {
+                    java.util.List<Long> taskIds = records.stream()
+                            .map(PunchRecordDto::getTaskId).filter(java.util.Objects::nonNull).distinct()
+                            .collect(java.util.stream.Collectors.toList());
+                    if (!taskIds.isEmpty()) {
+                        Result<java.util.List<GoalTaskDto>> tr = goalClient.getTasksByIds(taskIds);
+                        java.util.List<GoalTaskDto> tasks = tr != null ? tr.getData() : java.util.List.of();
+                        if (tasks != null) {
+                            for (GoalTaskDto t : tasks) {
+                                if (t != null && t.getId() != null) {
+                                    taskTitles.put(t.getId(), t.getTitle() != null ? t.getTitle() : "未命名");
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+
+                for (PunchRecordDto r : records) {
+                    if (r == null || r.getId() == null) continue;
+                    String taskName = taskTitles.getOrDefault(r.getTaskId(), "任务" + r.getTaskId());
+                    String text = "打卡: " + taskName
+                            + " | 时长: " + formatDuration(r.getDurationSeconds())
+                            + " | 时间: " + (r.getCreatedAt() != null ? r.getCreatedAt().toString() : "");
+                    if (text.isBlank()) continue;
+                    java.util.Map<String, Object> meta = new java.util.HashMap<>();
+                    meta.put("type", "punch");
+                    meta.put("userId", userId);
+                    meta.put("punchId", r.getId());
+                    meta.put("taskId", r.getTaskId());
+                    meta.put("taskTitle", taskName);
+                    meta.put("createdAt", r.getCreatedAt() != null ? r.getCreatedAt().toString() : "");
+                    meta.put("durationSeconds", r.getDurationSeconds());
+                    docs.add(new Document("punch:" + userId + ":" + r.getId(), text, meta));
+                    if (docs.size() >= 500) break;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+
         try {
             Result<java.util.List<CourseResourceDto>> rr = resourceClient.listResources(null);
             java.util.List<CourseResourceDto> resources = rr != null ? rr.getData() : java.util.List.of();
@@ -877,7 +947,7 @@ public class AgentChatService {
             return out;
         }
 
-        @Tool(description = "查询当前用户的打卡记录列表。用于判断任务是否真的完成。")
+        @Tool(description = "查询当前用户的打卡记录列表。用于查看打卡历史、本周/最近打卡情况、判断任务是否完成。返回 JSON 数组，每个元素包含 id、taskId、taskTitle（任务名）、startedAt、endedAt、createdAt（打卡时间）、durationSeconds、aiAuditResult、aiAuditRemark。不传时间参数时返回最近记录。")
         public List<Map<String, Object>> listPunchRecords(
                 @ToolParam(description = "任务ID，可空", required = false) @Nullable Long taskId,
                 @ToolParam(description = "起始时间（ISO-8601），可空", required = false) @Nullable String from,
@@ -886,15 +956,37 @@ public class AgentChatService {
             Result<List<PunchRecordDto>> res = punchClient.listRecords(userId, taskId, from, to);
             List<PunchRecordDto> list = res != null ? res.getData() : List.of();
             list = list == null ? List.of() : list;
+
+            // Resolve task titles
+            Map<Long, String> titleMap = new HashMap<>();
+            try {
+                List<Long> taskIds = list.stream().map(PunchRecordDto::getTaskId).filter(Objects::nonNull).distinct().collect(java.util.stream.Collectors.toList());
+                if (!taskIds.isEmpty()) {
+                    Result<List<GoalTaskDto>> tr = goalClient.getTasksByIds(taskIds);
+                    List<GoalTaskDto> tasks = tr != null ? tr.getData() : List.of();
+                    if (tasks != null) {
+                        for (GoalTaskDto t : tasks) {
+                            if (t != null && t.getId() != null) {
+                                titleMap.put(t.getId(), t.getTitle() != null ? t.getTitle() : "未命名任务");
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+
             List<Map<String, Object>> out = new ArrayList<>();
             for (PunchRecordDto p : list) {
                 if (p == null || p.getId() == null) continue;
                 Map<String, Object> m = new HashMap<>();
                 m.put("id", p.getId());
                 m.put("taskId", p.getTaskId());
+                m.put("taskTitle", titleMap.getOrDefault(p.getTaskId(), "任务" + p.getTaskId()));
                 m.put("startedAt", p.getStartedAt());
                 m.put("endedAt", p.getEndedAt());
+                m.put("createdAt", p.getCreatedAt());
                 m.put("durationSeconds", p.getDurationSeconds());
+                m.put("durationText", formatDuration(p.getDurationSeconds()));
                 m.put("aiAuditResult", p.getAiAuditResult());
                 m.put("aiAuditRemark", p.getAiAuditRemark());
                 out.add(m);
@@ -987,8 +1079,8 @@ public class AgentChatService {
             return "添加失败";
         }
 
-        @Tool(description = "混合检索：从用户随笔 + 课程资源中检索与 query 最相关的内容。优先走向量检索（RedisStack），并在必要时用关键词检索补充。返回 JSON 数组。")
-        public List<Map<String, Object>> searchNotesAndCourses(
+        @Tool(description = "混合检索：从用户随笔、打卡记录、课程资源中检索与 query 最相关的内容。优先走向量检索（RedisStack），并在必要时用关键词检索补充。返回 JSON 数组，每个元素包含 type（journal/punch/course）、title、text、url 等。")
+        public List<Map<String, Object>> searchPersonalData(
                 @ToolParam(description = "检索关键词/问题") String query,
                 @ToolParam(description = "返回条数 1-10", required = false) @Nullable Integer topK) {
             Long userId = requireUserId();
@@ -1095,6 +1187,51 @@ public class AgentChatService {
                         meta.put("title", "随笔");
                         docs.add(new Document("journal:" + userId + ":" + j.getId(), text, meta));
                         if (docs.size() >= 200) break;
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+
+            // Index punch records
+            try {
+                Result<List<PunchRecordDto>> pr = punchClient.listRecords(userId, null, null, null);
+                List<PunchRecordDto> records = pr != null ? pr.getData() : List.of();
+                if (records != null) {
+                    Map<Long, String> taskTitles = new HashMap<>();
+                    try {
+                        List<Long> taskIds = records.stream()
+                                .map(PunchRecordDto::getTaskId).filter(Objects::nonNull).distinct()
+                                .collect(java.util.stream.Collectors.toList());
+                        if (!taskIds.isEmpty()) {
+                            Result<List<GoalTaskDto>> tr = goalClient.getTasksByIds(taskIds);
+                            List<GoalTaskDto> tasks = tr != null ? tr.getData() : List.of();
+                            if (tasks != null) {
+                                for (GoalTaskDto t : tasks) {
+                                    if (t != null && t.getId() != null) {
+                                        taskTitles.put(t.getId(), t.getTitle() != null ? t.getTitle() : "未命名");
+                                    }
+                                }
+                            }
+                        }
+                    } catch (Exception ignored) {
+                    }
+                    for (PunchRecordDto r : records) {
+                        if (r == null || r.getId() == null) continue;
+                        String taskName = taskTitles.getOrDefault(r.getTaskId(), "任务" + r.getTaskId());
+                        String text = "打卡: " + taskName
+                                + " | 时长: " + formatDuration(r.getDurationSeconds())
+                                + " | 时间: " + (r.getCreatedAt() != null ? r.getCreatedAt().toString() : "");
+                        if (text.isBlank()) continue;
+                        Map<String, Object> meta = new HashMap<>();
+                        meta.put("type", "punch");
+                        meta.put("userId", userId);
+                        meta.put("punchId", r.getId());
+                        meta.put("taskId", r.getTaskId());
+                        meta.put("taskTitle", taskName);
+                        meta.put("createdAt", r.getCreatedAt() != null ? r.getCreatedAt().toString() : "");
+                        meta.put("durationSeconds", r.getDurationSeconds());
+                        docs.add(new Document("punch:" + userId + ":" + r.getId(), text, meta));
+                        if (docs.size() >= 500) break;
                     }
                 }
             } catch (Exception ignored) {
