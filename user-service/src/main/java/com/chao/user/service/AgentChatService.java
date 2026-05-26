@@ -143,13 +143,11 @@ public class AgentChatService {
             return Flux.just(buildNavigateAnswer(navPath));
         }
 
-        currentUserId.set(userId);
         ReactAgent a;
         try {
-            a = ensureAgent();
+            a = buildAgent(() -> userId);
         } catch (Throwable e) {
             log.error("buildAgent failed in chatStream, userId={}", userId, e);
-            currentUserId.remove();
             return Flux.just(chat(userId, q));
         }
         RunnableConfig config = RunnableConfig.builder().threadId("u:" + userId).build();
@@ -167,7 +165,6 @@ public class AgentChatService {
         } catch (Throwable e) {
             return Flux.just(chat(userId, q));
         }
-        long agentStartNs = startNs;
         return raw.handle((Object out, reactor.core.publisher.SynchronousSink<String> sink) -> {
                     String text = extractStreamText(out);
                     if (text == null || text.isEmpty()) return;
@@ -194,12 +191,6 @@ public class AgentChatService {
                 })
 
                 .filter(s -> s != null && !s.isEmpty())
-                .doOnComplete(() -> {
-                    long elapsed = (System.nanoTime() - agentStartNs) / 1_000_000L;
-                    log.info("agent stream completed userId={} elapsed={}ms", userId, elapsed);
-                    currentUserId.remove();
-                })
-                .doOnError(e -> currentUserId.remove())
                 .onErrorResume(e -> Flux.just(chat(userId, q)));
     }
 
