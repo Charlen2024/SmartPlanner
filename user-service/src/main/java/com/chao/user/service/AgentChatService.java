@@ -66,7 +66,6 @@ public class AgentChatService {
     static {
         reactor.core.publisher.Hooks.enableAutomaticContextPropagation();
     }
-
     private static final Logger log = LoggerFactory.getLogger(AgentChatService.class);
     private final ChatModel chatModel;
     private final GoalClient goalClient;
@@ -160,27 +159,55 @@ public class AgentChatService {
             return Flux.just(buildNavigateAnswer(navPath));
         }
 
+        ReactAgent a;
         try {
-            String answer = chat(userId, q);
-            if (answer == null || answer.isEmpty()) {
-                return Flux.just("我暂时没想好，可以换个问法吗？");
-            }
-            int len = answer.length();
-            if (len <= 6) {
-                return Flux.just(answer);
-            }
-            int chunkSize = Math.max(1, len / 20);
-            java.util.List<String> chunks = new java.util.ArrayList<>();
-            for (int i = 0; i < len; i += chunkSize) {
-                int end = Math.min(len, i + chunkSize);
-                chunks.add(answer.substring(i, end));
-            }
-            return Flux.fromIterable(chunks)
-                    .delayElements(Duration.ofMillis(30))
-                    .timeout(Duration.ofSeconds(45), Flux.just(answer));
+            a = buildAgent(() -> userId);
+        } catch (Throwable e) {
+            log.error("buildAgent failed in chatStream, userId={}", userId, e);
+            return Flux.just(chat(userId, q));
+        }
+        RunnableConfig config = RunnableConfig.builder().threadId("u:" + userId).build();
+        long startNs = System.nanoTime();
+        AtomicReference<String> previous = new AtomicReference<>("");
+
+        Flux<Object> raw;
+        try {
+            raw = (Flux<Object>) (Flux<?>) a.stream(q, config)
+                    .contextCapture().doOnNext(out -> {
+                        long ms = (System.nanoTime() - startNs) / 1_000_000L;
+                        String type = out == null ? "null" : out.getClass().getName();
+                        log.debug("agent stream event: type={}, t={}ms", type, ms);
+                    });
         } catch (Throwable e) {
             return Flux.just(chat(userId, q));
         }
+        return raw.handle((Object out, reactor.core.publisher.SynchronousSink<String> sink) -> {
+                    String text = extractStreamText(out);
+                    if (text == null || text.isEmpty()) return;
+
+                    String prev = previous.get();
+                    String delta;
+                    if (prev != null && !prev.isEmpty() && text.startsWith(prev) && text.length() >= prev.length()) {
+                        delta = text.substring(prev.length());
+                        previous.set(text);
+                    } else if (prev != null && prev.isEmpty()) {
+                        delta = text;
+                        previous.set(text);
+                    } else if (prev != null && text.equals(prev)) {
+                        delta = "";
+                    } else {
+                        delta = text;
+                        previous.set(text);
+                    }
+
+                    if (delta == null || delta.isEmpty()) return;
+                    String cleaned = sanitizeStreamChunk(delta);
+                    if (cleaned == null || cleaned.isEmpty()) return;
+                    sink.next(cleaned);
+                })
+
+                .filter(s -> s != null && !s.isEmpty())
+                .onErrorResume(e -> Flux.just(chat(userId, q)));
     }
 
     private String buildNavigateAnswer(String path) {
