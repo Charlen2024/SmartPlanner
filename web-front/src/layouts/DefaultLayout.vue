@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { useAuthStore } from '../stores/auth'
 import { computed, nextTick, onMounted, onUnmounted, ref, useSlots, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
@@ -135,37 +135,21 @@ onMounted(() => {
   }
 })
 
-function scrollChatToBottom() {
-  import('vue').then(({ nextTick }) => {
-    nextTick(() => {
-      const el = document.querySelector('.vibe-chat-scroll')
-      if (el) el.scrollTop = el.scrollHeight
-    })
-  })
-}
-
-// Use simpler approach - just define the function
-const scrollChatToBottom2 = () => {
-  const el = document.querySelector('.vibe-chat-scroll')
-  if (el) el.scrollTop = el.scrollHeight
-}
 
 onUnmounted(() => {
   stopSse()
 })
 
-watch(() => assistant.chatMessages?.length, () => {
-  import('vue').then(({ nextTick }) => nextTick(() => {
-    const el = document.querySelector('.vibe-chat-scroll')
+// Auto-scroll: watch last message text for streaming updates + message count for new messages
+watch(() => {
+  const msgs = assistant.chatMessages
+  if (!msgs?.length) return 0
+  return msgs.length + (msgs[msgs.length - 1]?.text?.length || 0)
+}, () => {
+  nextTick(() => {
+    const el = chatScrollRef.value
     if (el) el.scrollTop = el.scrollHeight
-  }))
-})
-
-watch(() => assistant.chatMessages?.length, () => {
-  import('vue').then(({ nextTick }) => nextTick(() => {
-    const el = document.querySelector('.vibe-chat-scroll')
-    if (el) el.scrollTop = el.scrollHeight
-  }))
+  })
 })
 
 watch(() => assistant.navRequest, (nav) => {

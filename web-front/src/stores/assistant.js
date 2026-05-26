@@ -1,4 +1,4 @@
-﻿import { defineStore } from 'pinia'
+import { defineStore } from 'pinia'
 import api from '../plugins/api'
 
 const NAV_ITEMS = [
@@ -198,13 +198,20 @@ export const useAssistantStore = defineStore('assistant', {
             const dataLines = []
             const sseLines = sseBuf.split('\n')
             sseBuf = sseLines.pop() || ''
+            let inData = false
             for (const line of sseLines) {
               if (line.startsWith('data:')) {
-                dataLines.push(line.slice(5))
+                dataLines.push(line.slice(5).trimStart())
+                inData = true
+              } else if (inData && line !== '') {
+                // embedded newline from LLM output (not proper SSE encoding)
+                dataLines.push(line)
+              } else {
+                inData = false
               }
             }
             if (dataLines.length) {
-              buf += dataLines.join('')
+              buf += dataLines.join('\n')
             }
             aiMsg.text = buf
           }
