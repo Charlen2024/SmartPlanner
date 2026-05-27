@@ -1174,6 +1174,105 @@ public class AgentChatService {
             return out;
         }
 
+        @Tool(description = "查询指定城市的实时天气。返回温度、天气状况、体感温度、湿度、风速等信息。默认查询深圳。可查询中文城市名（如：北京、上海、广州）或英文城市名。")
+        public Map<String, Object> getWeather(
+                @ToolParam(description = "城市名称，中文或英文，例如：深圳、北京、Shanghai。默认深圳", required = false) String location) {
+            String loc = (location != null && !location.isBlank()) ? location.trim() : "Shenzhen";
+            Map<String, Object> out = new HashMap<>();
+            out.put("location", loc);
+            try {
+                String encoded = java.net.URLEncoder.encode(loc, "UTF-8");
+                String url = "https://wttr.in/" + encoded + "?format=j1";
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(10000);
+                conn.setRequestProperty("User-Agent", "SmartPlanner/1.0");
+                conn.setInstanceFollowRedirects(true);
+                byte[] bytes = conn.getInputStream().readAllBytes();
+                com.fasterxml.jackson.databind.JsonNode root = new com.fasterxml.jackson.databind.ObjectMapper()
+                        .readTree(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
+                com.fasterxml.jackson.databind.JsonNode cc = root.path("current_condition");
+                if (cc.isArray() && !cc.isEmpty()) {
+                    com.fasterxml.jackson.databind.JsonNode c = cc.get(0);
+                    out.put("temperature_C", parseDoubleNode(c, "temp_C"));
+                    out.put("feelsLike_C", parseDoubleNode(c, "FeelsLikeC"));
+                    out.put("humidity", parseStringNode(c, "humidity"));
+                    out.put("windSpeed_kmph", parseDoubleNode(c, "windspeedKmph"));
+                    out.put("windDirection", parseStringNode(c, "winddir16Point"));
+                    out.put("visibility_km", parseDoubleNode(c, "visibility"));
+                    out.put("pressure", parseDoubleNode(c, "pressure"));
+                    String desc = c.path("weatherDesc").isArray() && !c.path("weatherDesc").isEmpty()
+                            ? c.path("weatherDesc").get(0).path("value").asText() : "";
+                    out.put("weather", translateWeatherDesc(desc));
+                    out.put("weatherEn", desc);
+                }
+                com.fasterxml.jackson.databind.JsonNode weather = root.path("weather");
+                if (weather.isArray() && !weather.isEmpty()) {
+                    com.fasterxml.jackson.databind.JsonNode today = weather.get(0);
+                    out.put("maxTemp_C", parseDoubleNode(today, "maxtempC"));
+                    out.put("minTemp_C", parseDoubleNode(today, "mintempC"));
+                    out.put("sunHour", parseDoubleNode(today, "sunHour"));
+                }
+            } catch (Exception e) {
+                out.put("error", "天气服务暂不可用：" + e.getMessage());
+            }
+            return out;
+        }
+
+        private Double parseDoubleNode(com.fasterxml.jackson.databind.JsonNode parent, String field) {
+            com.fasterxml.jackson.databind.JsonNode n = parent.path(field);
+            if (n.isNull() || n.isMissingNode()) return null;
+            if (n.isNumber()) return n.asDouble();
+            if (n.isTextual()) {
+                try { return Double.parseDouble(n.asText().trim()); } catch (NumberFormatException ignored) {}
+            }
+            return null;
+        }
+
+        private String parseStringNode(com.fasterxml.jackson.databind.JsonNode parent, String field) {
+            com.fasterxml.jackson.databind.JsonNode n = parent.path(field);
+            if (n.isNull() || n.isMissingNode()) return null;
+            return n.asText().trim();
+        }
+
+        private String translateWeatherDesc(String desc) {
+            if (desc == null || desc.isBlank()) return "未知";
+            String d = desc.trim();
+            String lower = d.toLowerCase();
+            return switch (d) {
+                case "Sunny", "Clear" -> "晴";
+                case "Partly Cloudy", "Partly cloudy" -> "多云";
+                case "Cloudy" -> "阴";
+                case "Overcast" -> "阴";
+                case "Mist", "Fog", "Freezing fog" -> "雾";
+                case "Light drizzle", "Patchy light drizzle" -> "毛毛雨";
+                case "Light rain", "Light Rain" -> "小雨";
+                case "Moderate rain", "Moderate or heavy rain shower" -> "中雨";
+                case "Heavy rain", "Torrential rain shower" -> "大雨";
+                case "Patchy rain possible", "Patchy rain nearby" -> "可能有雨";
+                case "Thunderstorm", "Thundery outbreaks possible" -> "雷暴";
+                case "Light snow", "Patchy light snow" -> "小雪";
+                case "Moderate snow" -> "中雪";
+                case "Heavy snow" -> "大雪";
+                case "Blizzard" -> "暴风雪";
+                case "Light sleet" -> "雨夹雪";
+                default -> {
+                    if (lower.contains("sunny") || lower.contains("clear")) yield "晴";
+                    if (lower.contains("cloudy")) yield "多云";
+                    if (lower.contains("overcast")) yield "阴";
+                    if (lower.contains("fog") || lower.contains("mist")) yield "雾";
+                    if (lower.contains("drizzle")) yield "毛毛雨";
+                    if (lower.contains("heavy rain") || lower.contains("torrential")) yield "大雨";
+                    if (lower.contains("rain") || lower.contains("shower")) yield "有雨";
+                    if (lower.contains("thunder") || lower.contains("lightning")) yield "雷暴";
+                    if (lower.contains("snow") || lower.contains("blizzard")) yield "雪";
+                    if (lower.contains("sleet") || lower.contains("ice")) yield "雨夹雪";
+                    if (lower.contains("wind")) yield "大风";
+                    yield "未知";
+                }
+            };
+        }
+
         private Long requireUserId() {
             Long userId = userIdSupplier != null ? userIdSupplier.get() : null;
             if (userId == null) throw new IllegalStateException("userId missing");
