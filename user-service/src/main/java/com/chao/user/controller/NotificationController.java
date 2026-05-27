@@ -42,7 +42,9 @@ public class NotificationController {
     private final AppUserService appUserService;
 
     private final Map<Long, List<SseEmitter>> emitters = new ConcurrentHashMap<>();
-    private final Map<Long, String> lastLoginCareSessionKey = new ConcurrentHashMap<>();
+    private final Map<Long, Set<String>> lastLoginCareSessionKeys = new ConcurrentHashMap<>();
+    private final java.util.concurrent.ScheduledExecutorService heartbeatExecutor =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
 
     @GetMapping(path = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter stream(@AuthenticationPrincipal Jwt jwt, @RequestParam(required = false) Long userId) {
@@ -77,6 +79,29 @@ public class NotificationController {
                 emitters.remove(userId);
             }
         }
+    }
+
+    @jakarta.annotation.PostConstruct
+    void startHeartbeat() {
+        heartbeatExecutor.scheduleAtFixedRate(() -> {
+            for (var entry : emitters.entrySet()) {
+                Long userId = entry.getKey();
+                List<SseEmitter> list = entry.getValue();
+                if (list == null || list.isEmpty()) continue;
+                for (SseEmitter emitter : list) {
+                    try {
+                        emitter.send(SseEmitter.event().name("ping").data("heartbeat"));
+                    } catch (IOException e) {
+                        removeEmitter(userId, emitter);
+                    }
+                }
+            }
+        }, 30, 30, java.util.concurrent.TimeUnit.SECONDS);
+    }
+
+    @jakarta.annotation.PreDestroy
+    void stopHeartbeat() {
+        heartbeatExecutor.shutdown();
     }
 
     public Set<Long> activeUserIds() {
@@ -261,9 +286,13 @@ public class NotificationController {
     private boolean tryMarkLoginCareSent(Long userId, String sessionKey) {
         String k = sessionKey != null ? sessionKey.trim() : "";
         if (k.isBlank()) k = "unknown";
-        String prev = lastLoginCareSessionKey.get(userId);
-        if (k.equals(prev)) return false;
-        lastLoginCareSessionKey.put(userId, k);
+        Set<String> keys = lastLoginCareSessionKeys.computeIfAbsent(userId, id -> ConcurrentHashMap.newKeySet());
+        if (!keys.add(k)) return false; // already sent for this sessionKey
+        // bound the set to prevent slow memory leak from many JWT refreshes
+        if (keys.size() > 50) {
+            keys.clear();
+            keys.add(k);
+        }
         return true;
     }
 
