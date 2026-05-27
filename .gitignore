@@ -1,0 +1,47 @@
+# Secrets & environment
+.env
+*.pem
+*.key
+credentials.json
+secrets.yaml
+
+# Deploy scripts (may contain credentials)
+.deploy.py
+deploy.cmd
+
+# Build artifacts
+target/
+dist/
+*.class
+*.jar
+*.war
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+.factorypath
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+
+# Docker
+docker-compose.override.yml
+
+# Maven
+*.jar.original
