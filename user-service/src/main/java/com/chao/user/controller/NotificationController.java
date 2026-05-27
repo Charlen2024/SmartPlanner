@@ -185,27 +185,20 @@ public class NotificationController {
             scheduleImported = user != null && Boolean.TRUE.equals(user.getScheduleImported());
         } catch (Exception ignored) {}
         boolean isNewUser = !scheduleImported;
-        String fallback1;
-        String fallback2;
+        String fallback;
         if (isNewUser) {
-            fallback1 = "欢迎来到 SmartPlanner！请先导入课表，然后创建你的第一个学习目标，AI 会帮你智能排程。";
-            fallback2 = "小提示：点击左侧菜单的「学习计划」上传课表，「目标」页面创建学习目标后即可一键生成排程。";
+            fallback = "欢迎来到 SmartPlanner！请先导入课表，然后创建你的第一个学习目标，AI 会帮你智能排程。";
         } else {
-            fallback1 = buildLoginCareFallback(streak, pending, nextTask, latestMood, 1);
-            fallback2 = buildLoginCareFallback(streak, pending, nextTask, latestMood, 2);
+            fallback = buildLoginCareFallback(streak, pending, nextTask, latestMood, 1);
         }
 
         String nav;
         String prompt;
-        String followPrompt;
         if (isNewUser) {
             nav = "/schedule";
             prompt = "用户刚注册，还未导入课表，没有任何学习数据。请生成一条约50字中文新用户引导消息，欢迎并引导用户先上传课表、创建学习目标。\n"
                     + "输出要求：温暖、可执行，不要Markdown，不要表情符号。\n"
                     + "引导方向：告诉用户第一步上传课表，然后创建学习目标，AI会自动排程。";
-            followPrompt = "用户刚注册，还未导入课表。请生成第二条约40字中文引导提示。\n"
-                    + "必须与第一条不同：优先从\"看看左侧菜单/上传课表很简单/先设一个小目标/不用着急慢慢来\"等角度出发。\n"
-                    + "输出要求：温和、可执行，不要Markdown，不要表情符号。";
         } else {
             nav = chooseLoginCareNav(pending);
             String weatherLine = weatherInfo.isBlank() ? "" : ",\"weather\":\"" + weatherInfo + "\"";
@@ -223,29 +216,14 @@ public class NotificationController {
                     + ",\"latestMood\":\"" + (latestMood.isBlank() ? "无" : latestMood) + "\""
                     + weatherLine
                     + "}";
-            followPrompt = "用户刚登录。请生成第二条约50字中文关怀提醒，用于跟进引导。\n"
-                    + "必须引用下面数据中的至少一个具体信息（数字或任务名或心情或天气），否则视为失败。\n"
-                    + "不要出现\"词汇积累/背单词/继续努力哦/一步步来吧\"等泛化话术。\n"
-                    + "要与第一条明显不同：优先从\"喝水/呼吸/拉伸/整理桌面/先打开日程/降低标准/允许自己慢一点\"等角度出发。\n"
-                    + "尽量不要重复\"今天还有/未完成/先做/项/先挑1项/10分钟\"这类句式（可用更小的动作代替）。\n"
-                    + "输出要求：温和、可执行，不要Markdown，不要表情符号。\n\n"
-                    + "数据：{"
-                    + "\"time\":\"" + now + "\""
-                    + ",\"streak\":" + (streak != null ? streak : 0)
-                    + ",\"todayTotal\":" + (total != null ? total : 0)
-                    + ",\"todayPending\":" + (pending != null ? pending : 0)
-                    + ",\"nextTask\":\"" + (nextTask.isBlank() ? "无" : nextTask) + "\""
-                    + ",\"latestMood\":\"" + (latestMood.isBlank() ? "无" : latestMood) + "\""
-                    + weatherLine
-                    + "}。倾向：给一个\"现在就能做\"的最小动作。";
         }
         try {
-            NotificationMessage notif1 = new NotificationMessage();
-            notif1.setUserId(userId);
-            notif1.setType("AGENT_REMINDER");
-            notif1.setContent(fallback1);
-            notif1.setTs(System.currentTimeMillis());
-            notif1.setPayload(Map.of(
+            NotificationMessage notif = new NotificationMessage();
+            notif.setUserId(userId);
+            notif.setType("AGENT_REMINDER");
+            notif.setContent(fallback);
+            notif.setTs(System.currentTimeMillis());
+            notif.setPayload(Map.of(
                     "nav", nav,
                     "level", "info",
                     "data", Map.of(
@@ -255,25 +233,7 @@ public class NotificationController {
                     ),
                     "ai", Map.of("userPrompt", prompt)
             ));
-            rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, notif1);
-
-
-            NotificationMessage notif2 = new NotificationMessage();
-            notif2.setUserId(userId);
-            notif2.setType("AGENT_REMINDER");
-            notif2.setContent(fallback2);
-            notif2.setTs(System.currentTimeMillis() + 1);
-            notif2.setPayload(Map.of(
-                    "nav", nav,
-                    "level", "info",
-                    "data", Map.of(
-                            "trigger", "login_care_follow",
-                            "sessionKey", sessionKey,
-                            "dedupKey", "login_care_follow:" + userId + ":" + sessionKey
-                    ),
-                    "ai", Map.of("userPrompt", followPrompt)
-            ));
-            rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, notif2);
+            rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, notif);
         } catch (Exception ignored) {
         }
     }
