@@ -1174,10 +1174,11 @@ public class AgentChatService {
             return out;
         }
 
-        @Tool(description = "查询指定城市的实时天气。返回温度、天气状况、体感温度、湿度、风速等信息。默认查询深圳。可查询中文城市名（如：北京、上海、广州）或英文城市名。")
+        @Tool(description = "查询指定城市的实时天气。返回温度、天气状况、体感温度、湿度、风速等信息。若不指定城市，会自动使用用户在仪表盘选择的城市。可查询中文城市名（如：北京、上海、广州）或英文城市名。")
         public Map<String, Object> getWeather(
-                @ToolParam(description = "城市名称，中文或英文，例如：深圳、北京、Shanghai。默认深圳", required = false) String location) {
-            String loc = (location != null && !location.isBlank()) ? location.trim() : "Shenzhen";
+                @ToolParam(description = "城市名称，中文或英文，例如：深圳、北京、Shanghai。留空则使用用户保存的城市", required = false) String location) {
+            String loc = (location != null && !location.isBlank()) ? location.trim() : getUserSavedLocation();
+            if (loc.isBlank()) loc = "Shenzhen";
             Map<String, Object> out = new HashMap<>();
             out.put("location", loc);
             try {
@@ -1271,6 +1272,18 @@ public class AgentChatService {
                     yield "未知";
                 }
             };
+        }
+
+        private String getUserSavedLocation() {
+            try {
+                Long userId = userIdSupplier != null ? userIdSupplier.get() : null;
+                if (userId == null) return "";
+                if (redissonClient != null) {
+                    String loc = String.valueOf(redissonClient.getBucket("sp:weather:loc:" + userId).get());
+                    return loc != null && !"null".equals(loc) ? loc.trim() : "";
+                }
+            } catch (Exception ignored) {}
+            return "";
         }
 
         private Long requireUserId() {

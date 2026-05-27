@@ -14,6 +14,7 @@ import com.chao.user.dto.UserPortraitDto;
 import com.chao.user.dto.SchedulePreferenceDto;
 import com.chao.user.dto.WeatherDto;
 import com.chao.user.service.UserPortraitAiService;
+import org.redisson.api.RedissonClient;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
@@ -51,11 +52,14 @@ public class InfoController {
     private final ScheduleClient scheduleClient;
     private final UserPortraitAiService userPortraitAiService;
     private final ObjectProvider<VectorStore> vectorStoreProvider;
+    private final ObjectProvider<RedissonClient> redissonProvider;
 
     @GetMapping("/weather")
     public Result<WeatherDto> weather(
-            @RequestParam(required = false) String location) {
-        String loc = (location != null && !location.isBlank()) ? location.trim() : "Shenzhen";
+            @RequestParam(required = false) String location,
+            @AuthenticationPrincipal Jwt jwt) {
+        String loc = (location != null && !location.isBlank()) ? location.trim() : getUserWeatherLocation(jwt);
+        if (loc.isBlank()) loc = "Shenzhen";
         WeatherDto dto = new WeatherDto();
         dto.setDate(LocalDate.now().toString());
         dto.setLocation(loc);
@@ -85,6 +89,32 @@ public class InfoController {
             dto.setSummary("天气服务不可用");
         }
         return Result.success(dto);
+    }
+
+    @org.springframework.web.bind.annotation.PutMapping("/weather-location")
+    public Result<String> saveWeatherLocation(@AuthenticationPrincipal Jwt jwt, @RequestParam String location) {
+        Long userId = jwt.getClaim("userId");
+        String loc = (location != null && !location.isBlank()) ? location.trim() : "Shenzhen";
+        try {
+            RedissonClient r = redissonProvider.getIfAvailable();
+            if (r != null) {
+                r.getBucket("sp:weather:loc:" + userId).set(loc, 365, java.util.concurrent.TimeUnit.DAYS);
+            }
+        } catch (Exception ignored) {}
+        return Result.success(loc);
+    }
+
+    private String getUserWeatherLocation(Jwt jwt) {
+        try {
+            Long userId = jwt != null ? jwt.<Long>getClaim("userId") : null;
+            if (userId == null) return "";
+            RedissonClient r = redissonProvider.getIfAvailable();
+            if (r != null) {
+                String loc = String.valueOf(r.getBucket("sp:weather:loc:" + userId).get());
+                return loc != null && !"null".equals(loc) ? loc.trim() : "";
+            }
+        } catch (Exception ignored) {}
+        return "";
     }
 
     @GetMapping("/insights")
