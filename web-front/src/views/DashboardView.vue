@@ -85,6 +85,7 @@ function selectWeatherLocation(loc) {
   weatherLocation.value = loc
   localStorage.setItem('weatherLocation', loc)
   loadWeather()
+  api.put('/user/weather-location', null, { params: { location: loc } }).catch(() => {})
 }
 
 const filteredGoals = computed(() => {
