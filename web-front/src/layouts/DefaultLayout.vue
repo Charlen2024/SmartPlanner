@@ -183,6 +183,7 @@ const title = computed(() => {
     resources: '资源',
     punch: '打卡',
     profile: '画像',
+    game2048: '2048',
   }
   return map[route.name] || 'Vibe'
 })
