@@ -85,12 +85,23 @@ function dedupParagraphs(text) {
   if (!text) return text
   const paras = text.split(/\n\n+/)
   const seen = new Set()
+  const seenLines = new Set()
   const result = []
   for (const p of paras) {
     const key = p.replace(/\s+/g, ' ').trim()
     if (key.length < 3) { result.push(p); continue }
     if (seen.has(key)) continue
+
+    // 拆成单行，检查当前段落是否大部分行已在之前的段落中出现过
+    const lines = p.split(/\n/).map(l => l.replace(/\s+/g, ' ').trim()).filter(l => l.length > 3)
+    if (lines.length >= 3) {
+      const dupCount = lines.filter(l => seenLines.has(l)).length
+      // 超过 60% 的行重复 → 整段跳过（LLM 重复输出）
+      if (dupCount > lines.length * 0.6) continue
+    }
+
     seen.add(key)
+    for (const l of lines) seenLines.add(l)
     result.push(p)
   }
   return result.join('\n\n')
