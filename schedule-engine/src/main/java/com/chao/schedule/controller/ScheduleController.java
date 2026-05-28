@@ -37,14 +37,27 @@ public class ScheduleController {
     }
 
     @GetMapping("/classes")
-    public Result<List<ClassSchedule>> listClasses(@RequestParam Long userId, @RequestParam(required = false) Integer dayOfWeek) {
-        return Result.success(scheduleService.listClassSchedules(userId, dayOfWeek));
+    public Result<List<ClassSchedule>> listClasses(@RequestParam Long userId, @RequestParam(required = false) Integer dayOfWeek, @RequestParam(required = false) String date, @RequestParam(required = false) String firstWeekMonday) {
+        return Result.success(scheduleService.listClassSchedules(userId, dayOfWeek, date, firstWeekMonday));
     }
 
     @DeleteMapping("/classes")
     public Result<String> deleteClasses(@RequestParam Long userId) {
         scheduleService.deleteClassSchedules(userId);
         return Result.success("删除成功");
+    }
+
+    /**
+     * 同步 firstWeekMonday 到 schedule-engine（与 user-service 的 AppUser 保持一致）
+     */
+    @PutMapping("/first-week-monday")
+    public Result<String> updateFirstWeekMonday(@RequestParam Long userId, @RequestParam(required = false) String firstWeekMonday) {
+        if (firstWeekMonday == null || firstWeekMonday.isBlank()) {
+            scheduleService.clearFirstWeekMonday(userId);
+        } else {
+            scheduleService.saveFirstWeekMonday(userId, java.time.LocalDate.parse(firstWeekMonday));
+        }
+        return Result.success("ok");
     }
 
     /**

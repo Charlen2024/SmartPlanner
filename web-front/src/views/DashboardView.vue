@@ -87,7 +87,14 @@ const dayClasses = computed(() => {
   const dow = dayDow.value
   if (!dow) return []
   const wn = weekNumber.value
-  return (allClasses.value ?? []).filter((c) => Number(c?.dayOfWeek) === Number(dow) && matchesWeekFn(c, wn))
+  const dowClasses = (allClasses.value ?? []).filter((c) => Number(c?.dayOfWeek) === Number(dow))
+  // 按周过滤；若过滤后为空但当天原始有课，回退为不过滤（防止 firstWeekMonday 配置错误）
+  if (wn != null) {
+    const filtered = dowClasses.filter((c) => matchesWeekFn(c, wn))
+    if (filtered.length > 0 || dowClasses.length === 0) return filtered
+    return dowClasses
+  }
+  return dowClasses
 })
 
 function humanMinutes(total) {

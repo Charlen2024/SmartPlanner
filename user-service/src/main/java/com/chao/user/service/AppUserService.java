@@ -75,4 +75,14 @@ public class AppUserService {
         user.setFirstWeekMonday(firstWeekMonday);
         appUserMapper.updateById(user);
     }
+
+    @Transactional
+    public void clearFirstWeekMonday(Long userId) {
+        AppUser user = getById(userId);
+        if (user == null) {
+            return;
+        }
+        user.setFirstWeekMonday(null);
+        appUserMapper.updateById(user);
+    }
 }

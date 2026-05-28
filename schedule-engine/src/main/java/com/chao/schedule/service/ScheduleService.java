@@ -781,7 +781,7 @@ public class ScheduleService {
         return null;
     }
 
-    public List<ClassSchedule> listClassSchedules(Long userId, Integer dayOfWeek) {
+    public List<ClassSchedule> listClassSchedules(Long userId, Integer dayOfWeek, String date, String firstWeekMonday) {
         LambdaQueryWrapper<ClassSchedule> qw = new LambdaQueryWrapper<ClassSchedule>()
                 .eq(ClassSchedule::getUserId, userId)
                 .orderByAsc(ClassSchedule::getDayOfWeek)
@@ -789,11 +789,36 @@ public class ScheduleService {
         if (dayOfWeek != null) {
             qw.eq(ClassSchedule::getDayOfWeek, dayOfWeek);
         }
-        return classScheduleMapper.selectList(qw);
+        List<ClassSchedule> classes = classScheduleMapper.selectList(qw);
+
+        // 按周过滤，与 calculateFreeTime 保持一致
+        if (date != null && !date.isBlank() && firstWeekMonday != null && !firstWeekMonday.isBlank() && !classes.isEmpty()) {
+            LocalDate targetDate = LocalDate.parse(date);
+            LocalDate fwm = LocalDate.parse(firstWeekMonday);
+            long daysBetween = java.time.temporal.ChronoUnit.DAYS.between(fwm, targetDate);
+            int weekNumber = (int) Math.floor(daysBetween / 7.0) + 1;
+            classes = classes.stream().filter(c -> matchesWeek(c, weekNumber)).collect(Collectors.toList());
+        }
+        return classes;
     }
 
     public void deleteClassSchedules(Long userId) {
         classScheduleMapper.delete(new LambdaQueryWrapper<ClassSchedule>().eq(ClassSchedule::getUserId, userId));
+    }
+
+    public void saveFirstWeekMonday(Long userId, LocalDate firstWeekMonday) {
+        UserScheduleConfig cfg = new UserScheduleConfig();
+        cfg.setUserId(userId);
+        cfg.setFirstWeekMonday(firstWeekMonday);
+        userScheduleConfigMapper.insertOrUpdate(cfg);
+    }
+
+    public void clearFirstWeekMonday(Long userId) {
+        UserScheduleConfig cfg = userScheduleConfigMapper.selectById(userId);
+        if (cfg != null) {
+            cfg.setFirstWeekMonday(null);
+            userScheduleConfigMapper.updateById(cfg);
+        }
     }
 
     public List<ScheduleClient.TimeSlot> calculateFreeTime(Long userId, String dateStr) {
@@ -819,10 +844,7 @@ public class ScheduleService {
         if (firstWeekMonday != null && !firstWeekMonday.isBlank()) {
             LocalDate fwm = LocalDate.parse(firstWeekMonday);
             long daysBetween = java.time.temporal.ChronoUnit.DAYS.between(fwm, date);
-            weekNumber = (int) (daysBetween / 7) + 1;
-            if (daysBetween < 0) {
-                weekNumber = (int) Math.floor((double) daysBetween / 7.0);
-            }
+            weekNumber = (int) Math.floor(daysBetween / 7.0) + 1;
         }
 
         // 1. 获取当天的课程（先按 dayOfWeek 查，再按周过滤）
@@ -831,10 +853,15 @@ public class ScheduleService {
                 .eq(ClassSchedule::getDayOfWeek, dayOfWeek)
                 .orderByAsc(ClassSchedule::getStartTime));
 
-        // 按周过滤
+        // 按周过滤；仅当周号明显异常（<1 或 >20）且过滤后为空时，回退为不过滤，防止 firstWeekMonday 配置错误导致全天误判为空闲
         if (weekNumber != null) {
             final Integer wn = weekNumber;
-            classes = classes.stream().filter(c -> matchesWeek(c, wn)).collect(Collectors.toList());
+            List<ClassSchedule> filtered = classes.stream().filter(c -> matchesWeek(c, wn)).collect(Collectors.toList());
+            if (filtered.isEmpty() && !classes.isEmpty() && (wn < 1 || wn > 20)) {
+                log.warn("周过滤后无课程（weekNumber={}），且周号异常，回退为不过滤。请检查 firstWeekMonday 配置是否正确。", wn);
+            } else {
+                classes = filtered;
+            }
         }
 
         log.info("找到 {} 门课程（周过滤后）", classes.size());

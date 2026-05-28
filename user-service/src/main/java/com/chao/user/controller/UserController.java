@@ -794,11 +794,32 @@ public class UserController {
         Result<ScheduleImportResultDto> r = scheduleClient.importSchedule(uid, file, firstWeekMonday);
         if (r != null && r.getCode() == 200) {
             appUserService.markScheduleImported(uid);
-            if (firstWeekMonday != null && !firstWeekMonday.isBlank()) {
-                appUserService.saveFirstWeekMonday(uid, java.time.LocalDate.parse(firstWeekMonday));
+            if (firstWeekMonday != null) {
+                if (firstWeekMonday.isBlank()) {
+                    appUserService.clearFirstWeekMonday(uid);
+                } else {
+                    appUserService.saveFirstWeekMonday(uid, java.time.LocalDate.parse(firstWeekMonday));
+                }
             }
         }
         return r;
+    }
+
+    @PutMapping("/schedule/first-week-monday")
+    public Result<String> updateFirstWeekMonday(
+            @AuthenticationPrincipal Jwt jwt,
+            @RequestHeader(value = "X-User-Id", required = false) Long headerUserId,
+            @RequestParam(required = false) Long userId,
+            @RequestParam(required = false) String firstWeekMonday) {
+        Long uid = resolveUserId(jwt, headerUserId, userId);
+        if (firstWeekMonday == null || firstWeekMonday.isBlank()) {
+            appUserService.clearFirstWeekMonday(uid);
+            scheduleClient.updateFirstWeekMonday(uid, null);
+        } else {
+            appUserService.saveFirstWeekMonday(uid, java.time.LocalDate.parse(firstWeekMonday));
+            scheduleClient.updateFirstWeekMonday(uid, firstWeekMonday);
+        }
+        return Result.success("ok");
     }
 
     @PostMapping("/punch/submit")
@@ -917,8 +938,15 @@ public class UserController {
             @AuthenticationPrincipal Jwt jwt,
             @RequestHeader(value = "X-User-Id", required = false) Long headerUserId,
             @RequestParam(required = false) Long userId,
-            @RequestParam(required = false) Integer dayOfWeek) {
-        return scheduleClient.listClasses(resolveUserId(jwt, headerUserId, userId), dayOfWeek);
+            @RequestParam(required = false) Integer dayOfWeek,
+            @RequestParam(required = false) String date) {
+        Long uid = resolveUserId(jwt, headerUserId, userId);
+        String fwm = null;
+        com.chao.user.entity.AppUser u = appUserService.getById(uid);
+        if (u != null && u.getFirstWeekMonday() != null) {
+            fwm = u.getFirstWeekMonday().toString();
+        }
+        return scheduleClient.listClasses(uid, dayOfWeek, date, fwm);
     }
 
     @DeleteMapping("/schedule/classes")

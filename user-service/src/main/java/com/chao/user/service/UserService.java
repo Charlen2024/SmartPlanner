@@ -43,7 +43,7 @@ public class UserService {
 
         dto.setStreak(punchClient.getStreak(userId).getData());
 
-        dto.setClasses(scheduleClient.listClasses(userId, null).getData());
+        dto.setClasses(scheduleClient.listClasses(userId, null, null, null).getData());
 
         if (topic != null && !topic.isBlank()) {
             dto.setResources(resourceClient.searchOnlineCourses(topic).getData());
