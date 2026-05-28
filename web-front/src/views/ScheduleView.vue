@@ -119,18 +119,25 @@ function blockStyle(start, end) {
 }
 
 const dayDow = computed(() => dateDowValue(date.value))
+const dayWeekNumber = computed(() => computeWeekNumber(date.value, firstWeekMonday.value))
 const dayClasses = computed(() => {
   const dow = dayDow.value
   if (!dow) return []
-  return (classes.value ?? []).filter((c) => Number(c?.dayOfWeek) === Number(dow))
+  // 优先使用后端按日期过滤后的课程列表（与空闲时间计算一致）；null=未加载，[]=已加载但当天无课
+  const source = dayClassesFiltered.value != null ? dayClassesFiltered.value : classes.value
+  return source.filter((c) => Number(c?.dayOfWeek) === Number(dow))
 })
 
-const classDowSet = computed(() => new Set((classes.value ?? []).map((c) => Number(c?.dayOfWeek)).filter((n) => Number.isFinite(n))))
+const classDowSet = computed(() => {
+  const allClasses = classes.value ?? []
+  return new Set(allClasses.map((c) => Number(c?.dayOfWeek)).filter((n) => Number.isFinite(n)))
+})
 const dateHasClasses = computed(() => {
   const dow = dayDow.value
   if (!dow) return false
-  const set = classDowSet.value
-  return set.size > 0 && set.has(Number(dow))
+  const source = dayClassesFiltered.value != null ? dayClassesFiltered.value : classes.value
+  const dowClasses = source.filter((c) => Number(c?.dayOfWeek) === Number(dow))
+  return dowClasses.length > 0
 })
 
 function dowText(n) {
@@ -291,6 +298,7 @@ async function importSchedule() {
   if (!file.value) return
   const fd = new FormData()
   fd.append('file', file.value)
+  if (firstWeekMonday.value) fd.append('firstWeekMonday', firstWeekMonday.value)
   importResult.value = null
   error.value = ''
   try {
@@ -338,14 +346,25 @@ async function importSchedule() {
   }
 }
 
-async function loadClasses() {
-  const res = await api.get('/user/schedule/classes')
-  classes.value = res?.data?.data ?? []
+const dayClassesFiltered = ref(null)
+
+async function loadClasses(dateParam) {
+  const params = {}
+  if (dateParam) params.date = dateParam
+  const res = await api.get('/user/schedule/classes', { params })
+  const list = res?.data?.data ?? []
+  if (dateParam) {
+    dayClassesFiltered.value = list
+  } else {
+    classes.value = list
+  }
 }
 
 async function clearClasses() {
   await api.delete('/user/schedule/classes')
+  dayClassesFiltered.value = null
   await loadClasses()
+  if (date.value) await loadClasses(date.value)
 }
 
 onMounted(async () => {
@@ -353,21 +372,34 @@ onMounted(async () => {
     const t = new Date()
     date.value = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`
   }
-  await Promise.all([loadSchedules(), loadClasses()])
+  await Promise.all([loadSchedules(), loadClasses(), loadClasses(date.value)])
 })
 
 watch(
   () => date.value,
   async () => {
-    await Promise.all([loadSchedules(), loadFree()])
+    await Promise.all([loadSchedules(), loadFree(), loadClasses(date.value)])
   },
 )
 
 // ── Weekly class schedule grid ──
 
-const firstWeekMonday = computed(() => auth.me?.firstWeekMonday || localStorage.getItem('firstWeekMonday') || '')
+const firstWeekMonday = ref(auth.me?.firstWeekMonday || localStorage.getItem('firstWeekMonday') || '')
+watch(() => auth.me?.firstWeekMonday, (v) => { if (v) { firstWeekMonday.value = v; localStorage.setItem('firstWeekMonday', v) } })
+async function setFirstWeekMonday(val) {
+  firstWeekMonday.value = val
+  localStorage.setItem('firstWeekMonday', val)
+  try {
+    await api.put('/user/schedule/first-week-monday', null, { params: { firstWeekMonday: val || '' } })
+    await auth.fetchMe()
+    await loadFree()
+    if (date.value) await loadClasses(date.value)
+  } catch (e) { /* ignore */ }
+}
 const weekOffset = ref(0)
 const showAllWeeks = ref(false)
+
+const scheduleDateWeekNumber = computed(() => computeWeekNumber(date.value, firstWeekMonday.value))
 
 function computeWeekNumber(dateStr, fwmStr) {
   if (!dateStr || !fwmStr) return null
@@ -648,6 +680,19 @@ function fmtHm(dt) {
           <v-card-title>{{ needsImport ? '导入课表' : '更新课表' }}</v-card-title>
           <v-card-text>
             <v-file-input v-model="file" label="选择文件" prepend-icon="mdi-upload" variant="outlined" />
+            <div class="mt-3">
+              <label class="text-caption" style="opacity:0.7">第一周周一（用于按周过滤课表，留空则不过滤）</label>
+              <input
+                type="date"
+                :value="firstWeekMonday"
+                @input="(e) => setFirstWeekMonday(e.target.value)"
+                class="v-field__input"
+                style="width:100%;padding:8px 12px;border:1px solid rgba(var(--v-theme-on-surface),0.22);border-radius:4px"
+              />
+            </div>
+            <div v-if="firstWeekMonday && scheduleDateWeekNumber != null" class="mt-2 text-caption" style="opacity:0.8">
+              所选日期 {{ date }} 为 <b>第 {{ scheduleDateWeekNumber }} 周</b>
+            </div>
             <v-alert type="info" variant="tonal" class="mt-2">
               支持 .ics（教务系统日历导出）/.xlsx/.csv（表头：课程/星期/开始时间/结束时间/地点）
               <div class="mt-2">

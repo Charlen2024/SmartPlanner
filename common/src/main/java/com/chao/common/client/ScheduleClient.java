@@ -21,6 +21,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -33,13 +34,16 @@ public interface ScheduleClient {
     Result<ScheduleImportResultDto> importSchedule(@RequestParam("userId") Long userId, @RequestPart("file") MultipartFile file, @RequestParam(value = "firstWeekMonday", required = false) String firstWeekMonday);
 
     @GetMapping("/api/schedule/classes")
-    Result<List<ClassScheduleDto>> listClasses(@RequestParam("userId") Long userId, @RequestParam(value = "dayOfWeek", required = false) Integer dayOfWeek);
+    Result<List<ClassScheduleDto>> listClasses(@RequestParam("userId") Long userId, @RequestParam(value = "dayOfWeek", required = false) Integer dayOfWeek, @RequestParam(value = "date", required = false) String date, @RequestParam(value = "firstWeekMonday", required = false) String firstWeekMonday);
 
     @DeleteMapping("/api/schedule/classes")
     Result<String> deleteClasses(@RequestParam("userId") Long userId);
 
     @GetMapping("/api/schedule/free-time")
     Result<List<TimeSlot>> getFreeTimeSlots(@RequestParam("userId") Long userId, @RequestParam("date") String date, @RequestParam(value = "firstWeekMonday", required = false) String firstWeekMonday);
+
+    @PutMapping("/api/schedule/first-week-monday")
+    Result<String> updateFirstWeekMonday(@RequestParam("userId") Long userId, @RequestParam(value = "firstWeekMonday", required = false) String firstWeekMonday);
 
     @PostMapping("/api/schedule/auto-schedule")
     Result<String> autoSchedule(@RequestParam("userId") Long userId);

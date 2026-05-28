@@ -583,6 +583,14 @@ public class AgentChatService {
                 out.add(m);
             }
 
+            // 移除末尾带着 toolCalls 但后面没有 tool 响应的 assistant 消息
+            if (!out.isEmpty()) {
+                org.springframework.ai.chat.messages.Message last = out.get(out.size() - 1);
+                if (hasToolCalls(last)) {
+                    out.remove(out.size() - 1);
+                }
+            }
+
             return out;
         }
 
