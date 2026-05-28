@@ -65,4 +65,14 @@ public class AppUserService {
         user.setScheduleImported(true);
         appUserMapper.updateById(user);
     }
+
+    @Transactional
+    public void saveFirstWeekMonday(Long userId, java.time.LocalDate firstWeekMonday) {
+        AppUser user = getById(userId);
+        if (user == null) {
+            return;
+        }
+        user.setFirstWeekMonday(firstWeekMonday);
+        appUserMapper.updateById(user);
+    }
 }

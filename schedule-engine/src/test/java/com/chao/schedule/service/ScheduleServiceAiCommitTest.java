@@ -159,6 +159,7 @@ public class ScheduleServiceAiCommitTest {
                 classScheduleMapper,
                 taskScheduleMapper,
                 planCandidateMapper,
+                null,
                 goalClient,
                 openAiCompatClient,
                 objectMapper,

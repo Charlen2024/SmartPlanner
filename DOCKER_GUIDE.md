@@ -24,7 +24,7 @@ docker-compose up -d --build
 
 ## 3. 访问入口
 - **Nacos 控制台**: http://localhost:8848/nacos (账号/密码: nacos/nacos)
-- **RabbitMQ 管理界面**: http://localhost:15672 (账号/密码: guest/guest)
+- **RabbitMQ 管理界面**: http://localhost:15672 (账号/密码: vibe/vibe123)
 - **微服务接口**:
     - Goal Service: http://localhost:8081
     - Schedule Engine: http://localhost:8082

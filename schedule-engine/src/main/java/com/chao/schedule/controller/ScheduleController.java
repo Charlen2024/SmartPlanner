@@ -32,8 +32,8 @@ public class ScheduleController {
      * 上传课表 (iCalendar/Excel)
      */
     @PostMapping("/import")
-    public Result<ScheduleImportResultDto> importSchedule(@RequestParam Long userId, @RequestParam MultipartFile file) {
-        return Result.success(scheduleService.parseAndSaveSchedule(userId, file));
+    public Result<ScheduleImportResultDto> importSchedule(@RequestParam Long userId, @RequestParam MultipartFile file, @RequestParam(required = false) String firstWeekMonday) {
+        return Result.success(scheduleService.parseAndSaveSchedule(userId, file, firstWeekMonday));
     }
 
     @GetMapping("/classes")
@@ -51,8 +51,8 @@ public class ScheduleController {
      * 获取指定日期的空闲时段
      */
     @GetMapping("/free-time")
-    public Result<List<ScheduleClient.TimeSlot>> getFreeTimeSlots(@RequestParam Long userId, @RequestParam String date) {
-        return Result.success(scheduleService.calculateFreeTime(userId, date));
+    public Result<List<ScheduleClient.TimeSlot>> getFreeTimeSlots(@RequestParam Long userId, @RequestParam String date, @RequestParam(required = false) String firstWeekMonday) {
+        return Result.success(scheduleService.calculateFreeTime(userId, date, firstWeekMonday));
     }
 
     /**

@@ -77,12 +77,35 @@ async function loadTaskResourcesForSchedules() {
     taskResources.value = {}
     return
   }
-  const res = await api.post('/user/tasks/resources', { taskIds, topK: 3 })
+  const res = await api.post('/user/tasks/resources', { taskIds, topK: 3, refresh: true })
   const body = res?.data ?? null
   if (body?.code !== 200) {
     throw new Error(body?.message || '加载课程资源失败')
   }
   taskResources.value = body?.data ?? {}
+}
+
+async function loadTaskAdvice() {
+  const taskIds = Array.from(new Set((schedules.value ?? []).map((x) => Number(x?.taskId)).filter((x) => Number.isFinite(x) && x > 0)))
+  if (!taskIds.length) {
+    adviceMap.value = new Map()
+    return
+  }
+  try {
+    const res = await api.post('/user/tasks/advice', taskIds)
+    const body = res?.data ?? null
+    if (body?.code !== 200) {
+      throw new Error(body?.message || '加载 AI 建议失败')
+    }
+    const data = body?.data ?? {}
+    const next = new Map()
+    for (const k of Object.keys(data)) {
+      next.set(Number(k), data[k])
+    }
+    adviceMap.value = next
+  } catch (e) {
+    adviceMap.value = new Map()
+  }
 }
 
 function resourcesForTask(taskId) {
@@ -116,6 +139,7 @@ async function load() {
     await loadSchedulesRange(365, 30)
     await rebuildTaskGoalMap()
     await loadTaskResourcesForSchedules()
+    await loadTaskAdvice()
   } catch (e) {
     error.value = e?.response?.data?.message || e?.message || '加载失败'
   } finally {

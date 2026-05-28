@@ -22,6 +22,7 @@ public class UserService {
     private final ScheduleClient scheduleClient;
     private final PunchClient punchClient;
     private final ResourceClient resourceClient;
+    private final AppUserService appUserService;
 
     public DashboardDto getDashboard(Long userId, String date, String topic) {
         DashboardDto dto = new DashboardDto();
@@ -34,11 +35,15 @@ public class UserService {
         dto.setPendingTasks(goalClient.getPendingTasks(userId).getData());
 
         String dateStr = date != null ? date : LocalDate.now().toString();
-        dto.setFreeTimeSlots(scheduleClient.getFreeTimeSlots(userId, dateStr).getData());
+        com.chao.user.entity.AppUser user = appUserService.getById(userId);
+        String fwm = user != null && user.getFirstWeekMonday() != null ? user.getFirstWeekMonday().toString() : null;
+        dto.setFreeTimeSlots(scheduleClient.getFreeTimeSlots(userId, dateStr, fwm).getData());
 
         dto.setTaskSchedules(scheduleClient.listTaskSchedules(userId, null, null).getData());
 
         dto.setStreak(punchClient.getStreak(userId).getData());
+
+        dto.setClasses(scheduleClient.listClasses(userId, null).getData());
 
         if (topic != null && !topic.isBlank()) {
             dto.setResources(resourceClient.searchOnlineCourses(topic).getData());

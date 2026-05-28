@@ -1,5 +1,6 @@
 package com.chao.user.dto;
 
+import com.chao.common.dto.SchedulePreferenceDto;
 import com.chao.common.dto.UserHabitDto;
 import lombok.Data;
 

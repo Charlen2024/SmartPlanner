@@ -15,6 +15,15 @@ const auth = useAuthStore()
 const router = useRouter()
 
 const scheduleFile = ref(null)
+const firstWeekMonday = ref(
+  auth.me?.firstWeekMonday || localStorage.getItem('firstWeekMonday') || ''
+)
+watch(() => auth.me?.firstWeekMonday, (v) => {
+  if (v) {
+    firstWeekMonday.value = v
+    localStorage.setItem('firstWeekMonday', v)
+  }
+})
 const goalText = ref('学习分布式系统')
 const topic = ref('分布式')
 
@@ -32,7 +41,15 @@ const tasksPollTimer = ref(null)
 const today = computed(() => new Date().toISOString().slice(0, 10))
 const needsImport = computed(() => auth.me?.scheduleImported === false)
 const showScheduleUpload = ref(false)
-const step1Title = computed(() => (needsImport.value ? '导入课表' : '课表（可选）'))
+const step1Title = computed(() => {
+  if (needsImport.value) return '导入课表'
+  if (auth.me?.scheduleImported) return '课表（已导入）'
+  return '课表（可选）'
+})
+const wizardSubtitle = computed(() => {
+  if (needsImport.value) return '导入课表 → 识别空闲时间 → 添加新目标 → 拆解任务 → 去目标页排程 → 打卡'
+  return '课表已导入 → 识别空闲时间 → 添加新目标 → 拆解任务 → 去目标页排程 → 打卡'
+})
 
 const displayTasks = computed(() => tasks.value?.slice?.(0, 80) ?? [])
 
@@ -173,15 +190,17 @@ async function importSchedule() {
   try {
     const fd = new FormData()
     fd.append('file', Array.isArray(scheduleFile.value) ? scheduleFile.value[0] : scheduleFile.value)
+    if (firstWeekMonday.value) fd.append('firstWeekMonday', firstWeekMonday.value)
     const res = await api.post('/user/schedule/import', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
     importResult.value = res?.data?.data ?? null
     notify.success(`课表导入成功：${importResult.value?.inserted ?? 0} 条`)
     try {
       await auth.fetchMe()
     } catch (e) {}
+    safeClearWizardState()
     step.value = 2
   } catch (e) {
-    error.value = e?.response?.data?.message || '课表导入失败（请使用 .ics / .xlsx）'
+    error.value = e?.response?.data?.message || '课表导入失败（请使用 .ics / .xlsx / .csv）'
   } finally {
     busy.value = false
   }
@@ -244,6 +263,11 @@ async function initWizard() {
   } catch (e) {}
   await refreshAll()
 
+  // 新用户清除残留向导状态，从步骤1开始
+  if (needsImport.value) {
+    safeClearWizardState()
+  }
+
   const saved = safeLoadWizardState()
   const savedStep = Number(saved?.step)
   const savedGoalId = Number(saved?.currentGoalId)
@@ -296,7 +320,7 @@ onBeforeUnmount(() => {
     <v-row class="mb-4" align="center">
       <v-col cols="12" md="7">
         <div class="text-h5 font-weight-bold">学习计划向导</div>
-        <div class="text-body-2" style="opacity: 0.78">课表（一次导入即可）→ 识别空闲时间 → 添加新目标 → 拆解任务 → 去目标页排程 → 打卡</div>
+        <div class="text-body-2" style="opacity: 0.78">{{ wizardSubtitle }}</div>
       </v-col>
       <v-col cols="12" md="5" class="d-flex justify-end">
         <v-btn variant="tonal" :loading="busy" @click="refreshAll">刷新数据</v-btn>
@@ -326,57 +350,110 @@ onBeforeUnmount(() => {
       <v-stepper-window>
         <v-stepper-window-item :value="1">
           <v-card v-if="needsImport || showScheduleUpload" class="pa-4">
-            <div class="text-subtitle-1 font-weight-semibold mb-2">上传大学课表文件</div>
-            <v-file-input v-model="scheduleFile" label="选择文件" prepend-icon="mdi-upload" variant="outlined" />
-            <v-alert type="info" variant="tonal" class="mt-2">
-              支持 .ics（教务系统日历导出）/.xlsx/.csv（表头：课程/星期/开始时间/结束时间/地点）
-              <div class="mt-2">
-                <v-btn
-                  size="small"
-                  variant="tonal"
-                  color="primary"
-                  href="/schedule_template.csv"
-                  download="schedule_template.csv"
-                  target="_blank"
-                >
-                  下载 CSV 模板
-                </v-btn>
-              </div>
-            </v-alert>
-            <v-alert v-if="importResult" type="success" variant="tonal" class="mt-3">
-              已导入：{{ importResult.inserted }} / {{ importResult.total }}（跳过 {{ importResult.skipped }}）
-              <div v-for="(w, i) in importResult.warnings ?? []" :key="i" class="text-body-2">{{ w }}</div>
-            </v-alert>
-            <div class="d-flex justify-end mt-2">
-              <v-btn v-if="!needsImport" variant="text" @click="showScheduleUpload = false">暂不更换</v-btn>
-              <v-btn color="primary" :loading="busy" @click="importSchedule">导入</v-btn>
+            <div class="text-subtitle-1 font-weight-semibold mb-3">上传大学课表</div>
+
+            <v-row dense>
+              <v-col cols="12" sm="6">
+                <v-file-input
+                  v-model="scheduleFile"
+                  label="选择文件 (.csv / .xlsx / .ics)"
+                  prepend-icon="mdi-file-table-outline"
+                  variant="outlined"
+                  density="comfortable"
+                />
+              </v-col>
+              <v-col cols="12" sm="6">
+                <v-text-field
+                  v-model="firstWeekMonday"
+                  label="第一周周一日期"
+                  type="date"
+                  variant="outlined"
+                  density="comfortable"
+                  hint="必填：选学期第一周的周一，如 2026-02-23"
+                  persistent-hint
+                />
+              </v-col>
+            </v-row>
+
+            <v-expansion-panels class="mb-3">
+              <v-expansion-panel>
+                <v-expansion-panel-title>
+                  <v-icon icon="mdi-help-circle-outline" class="mr-2" size="small" />
+                  如何填写 CSV 模板
+                </v-expansion-panel-title>
+                <v-expansion-panel-text>
+                  <div class="text-body-2">
+                    <div class="font-weight-bold mb-1">表头</div>
+                    <p class="mb-2">课程名称 / 星期(1=周一) / 开始节数 / 结束节数 / 地点 / 周数</p>
+                    <div class="font-weight-bold mb-1">节数对照</div>
+                    <p class="mb-2">第1节 08:00 ~ 第5节 14:45 · 第6节 14:55 ~ 第10节 20:40（午休 12:00-14:00）</p>
+                    <div class="font-weight-bold mb-1">周数格式</div>
+                    <p class="mb-0"><code>1-16</code> = 第1-16周 · <code>1-16双</code> = 仅双周 · <code>18</code> = 仅第18周 · 留空 = 每周</p>
+                  </div>
+                </v-expansion-panel-text>
+              </v-expansion-panel>
+            </v-expansion-panels>
+
+            <div class="d-flex align-center flex-wrap" style="gap: 8px">
+              <v-btn
+                size="small"
+                variant="tonal"
+                color="primary"
+                prepend-icon="mdi-download"
+                href="/schedule_template.csv"
+                download
+                target="_blank"
+              >
+                下载 CSV 模板
+              </v-btn>
+              <v-spacer />
+              <v-btn v-if="!needsImport" variant="text" size="small" @click="showScheduleUpload = false">暂不更换</v-btn>
+              <v-btn color="primary" :loading="busy" @click="importSchedule">导入课表</v-btn>
             </div>
-          </v-card>
-          <v-card v-else class="pa-4">
-            <div class="text-subtitle-1 font-weight-semibold mb-2">课表已导入</div>
-            <v-alert type="success" variant="tonal">
-              已检测到你之前导入过课表。这里默认不再要求重复上传，直接进入“添加新目标”。
+
+            <v-alert v-if="importResult" type="success" variant="tonal" class="mt-3" density="compact">
+              已导入 {{ importResult.inserted }}/{{ importResult.total }} 门课程
+              <template v-if="importResult.warnings?.length">
+                <div v-for="(w, i) in importResult.warnings" :key="i" class="text-caption">{{ w }}</div>
+              </template>
             </v-alert>
-            <div class="d-flex justify-end mt-3">
-              <v-btn variant="tonal" @click="router.push('/schedule')">查看/管理课表</v-btn>
-              <v-btn class="ml-3" variant="tonal" @click="showScheduleUpload = true">更换课表</v-btn>
-              <v-btn class="ml-3" color="primary" @click="step = 3">开始添加目标</v-btn>
+          </v-card>
+
+          <v-card v-else class="pa-4">
+            <div class="d-flex align-center mb-3">
+              <v-icon icon="mdi-check-circle" color="success" size="28" class="mr-3" />
+              <div>
+                <div class="text-subtitle-1 font-weight-semibold">课表已导入</div>
+                <div class="text-body-2" style="opacity: 0.7">空闲时间已识别，可以开始添加目标了</div>
+              </div>
+            </div>
+            <div class="d-flex flex-wrap" style="gap: 8px">
+              <v-btn variant="tonal" size="small" prepend-icon="mdi-calendar" @click="router.push('/schedule')">查看课表</v-btn>
+              <v-btn variant="text" size="small" @click="router.push('/schedule')">更换课表</v-btn>
+              <v-spacer />
+              <v-btn color="primary" @click="step = 3">下一步：添加目标</v-btn>
             </div>
           </v-card>
         </v-stepper-window-item>
 
         <v-stepper-window-item :value="2">
           <v-card class="pa-4">
-            <div class="text-subtitle-1 font-weight-semibold mb-2">自动识别空闲时间</div>
-            <div class="text-body-2 mb-3" style="opacity: 0.78">默认识别日期：{{ today }}</div>
+            <div class="text-subtitle-1 font-weight-semibold mb-3">识别空闲时间</div>
+            <p class="text-body-2 mb-3" style="opacity: 0.7">系统会根据课表自动计算每天的可用学习时段（已自动排除午休 12:00-14:00）</p>
+            <v-alert v-if="dashboard?.freeTimeSlots?.length" type="success" variant="tonal" density="compact" class="mb-3">
+              已识别 {{ dashboard.freeTimeSlots.length }} 个空闲时段
+            </v-alert>
+            <div v-if="dashboard?.freeTimeSlots?.length" class="mb-3">
+              <v-chip v-for="(s, i) in dashboard.freeTimeSlots.slice(0, 5)" :key="i" size="small" variant="tonal" class="mr-1 mb-1">
+                {{ s.start?.slice(11, 16) }} - {{ s.end?.slice(11, 16) }}
+              </v-chip>
+              <span v-if="dashboard.freeTimeSlots.length > 5" class="text-caption" style="opacity: 0.6">+{{ dashboard.freeTimeSlots.length - 5 }} 更多</span>
+            </div>
+            <div v-else class="text-body-2 mb-3" style="opacity: 0.5">尚未识别，或当天无空闲时间</div>
             <div class="d-flex justify-end">
-              <v-btn color="primary" :loading="busy" @click="detectFreeTime">开始识别</v-btn>
+              <v-btn variant="tonal" :loading="busy" @click="detectFreeTime">刷新识别</v-btn>
+              <v-btn class="ml-3" color="primary" @click="step = 3">下一步</v-btn>
             </div>
-            <v-divider class="my-4" />
-            <div v-if="dashboard?.freeTimeSlots?.length">
-              <div v-for="(s, i) in dashboard.freeTimeSlots" :key="i">{{ s.start }} - {{ s.end }}</div>
-            </div>
-            <div v-else class="text-body-2" style="opacity: 0.7">暂无空闲时间数据</div>
           </v-card>
         </v-stepper-window-item>
 

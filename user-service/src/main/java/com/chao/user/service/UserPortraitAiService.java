@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.ai.OpenAiCompatClient;
 import com.chao.common.dto.PunchRecordDto;
 import com.chao.common.dto.TaskScheduleDto;
-import com.chao.user.dto.SchedulePreferenceDto;
+import com.chao.common.dto.SchedulePreferenceDto;
 import lombok.Data;
 import org.springframework.stereotype.Service;
 

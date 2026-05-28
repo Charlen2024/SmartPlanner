@@ -10,4 +10,5 @@ public class AuthMeResponse {
     private String username;
     private List<String> roles;
     private Boolean scheduleImported;
+    private java.time.LocalDate firstWeekMonday;
 }

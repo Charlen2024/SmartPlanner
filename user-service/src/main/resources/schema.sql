@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS app_users (
     username VARCHAR(64) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
     schedule_imported TINYINT(1) NOT NULL DEFAULT 0,
+    first_week_monday DATE DEFAULT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uk_username (username)
 );

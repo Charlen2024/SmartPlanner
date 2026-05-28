@@ -145,6 +145,25 @@ const importedDowText = computed(() => {
   return arr.map((n) => `周${dowText(n)}`).join('、')
 })
 
+const freeBarItems = computed(() => {
+  const totalMin = (timelineEndHour - timelineStartHour) * 60
+  return (free.value ?? []).map((f) => {
+    const s = timeToMinutes(f.start)
+    const e = timeToMinutes(f.end)
+    if (s == null || e == null) return null
+    const leftPct = ((s - timelineStartHour * 60) / totalMin) * 100
+    const widthPct = ((e - s) / totalMin) * 100
+    const startLabel = String(f.start).includes('T') ? String(f.start).slice(11, 16) : String(f.start).slice(0, 5)
+    const endLabel = String(f.end).includes('T') ? String(f.end).slice(11, 16) : String(f.end).slice(0, 5)
+    return {
+      ...f,
+      style: { left: `${leftPct}%`, width: `${widthPct}%` },
+      startLabel,
+      endLabel,
+    }
+  }).filter(Boolean)
+})
+
 const freeBlocks = computed(() =>
   (free.value ?? [])
     .map((f) => ({ ...f, style: blockStyle(f.start, f.end) }))
@@ -343,6 +362,141 @@ watch(
     await Promise.all([loadSchedules(), loadFree()])
   },
 )
+
+// ── Weekly class schedule grid ──
+
+const firstWeekMonday = computed(() => auth.me?.firstWeekMonday || localStorage.getItem('firstWeekMonday') || '')
+const weekOffset = ref(0)
+const showAllWeeks = ref(false)
+
+function computeWeekNumber(dateStr, fwmStr) {
+  if (!dateStr || !fwmStr) return null
+  const d = new Date(`${dateStr}T00:00:00`)
+  const fwm = new Date(`${fwmStr}T00:00:00`)
+  const diffDays = Math.floor((d - fwm) / (1000 * 60 * 60 * 24))
+  return Math.floor(diffDays / 7) + 1
+}
+
+function matchesWeekFn(c, weekNumber) {
+  if (!c) return true
+  const ws = c.weekStart, we = c.weekEnd
+  if (ws == null || we == null) return true
+  if (weekNumber == null) return true
+  if (weekNumber < ws || weekNumber > we) return false
+  const wt = c.weekType
+  if (!wt) return true
+  if (wt === 'even' || wt === '双') return weekNumber % 2 === 0
+  if (wt === 'odd' || wt === '单') return weekNumber % 2 === 1
+  return true
+}
+
+const todayWeekNumber = computed(() => {
+  const today = new Date().toISOString().slice(0, 10)
+  return computeWeekNumber(today, firstWeekMonday.value)
+})
+
+const viewWeek = computed(() => {
+  const base = todayWeekNumber.value
+  if (base == null) return null
+  return base + weekOffset.value
+})
+
+const weekGridClasses = computed(() => {
+  const list = classes.value ?? []
+  if (showAllWeeks.value) return list
+  const wn = viewWeek.value
+  if (wn == null) return list
+  return list.filter((c) => matchesWeekFn(c, wn))
+})
+
+const periodSlots = computed(() => {
+  const map = new Map()
+  for (const c of classes.value ?? []) {
+    const key = `${c.startTime}_${c.endTime}`
+    if (!map.has(key)) {
+      map.set(key, { start: c.startTime, end: c.endTime })
+    }
+  }
+  return Array.from(map.values()).sort((a, b) =>
+    String(a.start || '').localeCompare(String(b.start || '')),
+  )
+})
+
+function periodPairIndex(c) {
+  if (!c) return -1
+  const start = String(c.startTime || '')
+  const end = String(c.endTime || '')
+  return periodSlots.value.findIndex(
+    (s) => String(s.start || '') === start && String(s.end || '') === end,
+  )
+}
+
+const weekGridMap = computed(() => {
+  const map = {}
+  for (const c of weekGridClasses.value ?? []) {
+    const dow = Number(c.dayOfWeek)
+    const ppi = periodPairIndex(c)
+    if (!Number.isFinite(dow) || dow < 1 || dow > 7 || ppi < 0) continue
+    const key = `${dow}_${ppi}`
+    if (!map[key]) map[key] = []
+    map[key].push(c)
+  }
+  return map
+})
+
+const viewWeekMonday = computed(() => {
+  const fwm = firstWeekMonday.value
+  const vw = viewWeek.value
+  if (!fwm || vw == null) return ''
+  const d = new Date(`${fwm}T00:00:00`)
+  d.setDate(d.getDate() + (vw - 1) * 7)
+  return d.toISOString().slice(0, 10)
+})
+
+const weekDays = computed(() => {
+  const labels = ['一', '二', '三', '四', '五', '六', '日']
+  const monday = viewWeekMonday.value
+  if (!monday) {
+    return labels.map((label, i) => ({ dow: i + 1, label, date: '' }))
+  }
+  const d = new Date(`${monday}T00:00:00`)
+  return labels.map((label, i) => {
+    const date = new Date(d.getTime() + i * 86400000)
+    return {
+      dow: i + 1,
+      label,
+      date: `${date.getMonth() + 1}/${date.getDate()}`,
+    }
+  })
+})
+
+const weekLabel = computed(() => {
+  const vw = viewWeek.value
+  return vw != null ? `第 ${vw} 周` : ''
+})
+
+const hasWeekInfo = computed(() => {
+  return (classes.value ?? []).some(
+    (c) => c.weekStart != null || c.weekEnd != null,
+  )
+})
+
+function goPrevWeek() {
+  weekOffset.value--
+}
+function goNextWeek() {
+  weekOffset.value++
+}
+function resetWeek() {
+  weekOffset.value = 0
+}
+
+function fmtHm(dt) {
+  if (!dt) return '--:--'
+  const s = String(dt)
+  if (s.includes('T')) return s.slice(11, 16)
+  return s.slice(0, 5)
+}
 </script>
 
 <template>
@@ -383,9 +537,21 @@ watch(
           <v-card-text>
             <v-alert v-if="!free?.length" type="info" variant="tonal">当天无空闲时间（或课表未导入/未匹配到当天课程）</v-alert>
             <div v-else>
-              <div class="text-caption mb-1" style="opacity:0.75">可用空闲时段（严禁与课表冲突）</div>
-              <div v-for="(f, i) in free" :key="i" class="d-flex align-center mb-1">
-                <div>{{ fmt(f.start) }} - {{ fmt(f.end) }}</div>
+              <div class="text-caption mb-2" style="opacity:0.75">可用空闲时段（严禁与课表冲突）</div>
+              <div class="free-bar-shell">
+                <div class="free-bar-axis">
+                  <span v-for="h in (timelineEndHour - timelineStartHour + 1)" :key="h" class="free-bar-tick">{{ String(timelineStartHour + h - 1).padStart(2, '0') }}:00</span>
+                </div>
+                <div class="free-bar-track">
+                  <div
+                    v-for="(f, i) in freeBarItems"
+                    :key="i"
+                    class="free-bar-block"
+                    :style="f.style"
+                  >
+                    {{ f.startLabel }} - {{ f.endLabel }}
+                  </div>
+                </div>
               </div>
             </div>
           </v-card-text>
@@ -510,27 +676,71 @@ watch(
             课表（周视图）
           </v-card-title>
           <v-card-text>
-            <v-btn size="small" class="mb-2" @click="loadClasses">刷新</v-btn>
-            <v-btn size="small" class="mb-2 ml-2" color="error" @click="clearClasses">清空</v-btn>
+            <div class="d-flex align-center flex-wrap mb-2" style="gap:8px">
+              <v-btn size="small" @click="loadClasses">刷新</v-btn>
+              <v-btn size="small" color="error" @click="clearClasses">清空</v-btn>
+              <v-spacer v-if="hasWeekInfo && firstWeekMonday" />
+              <template v-if="hasWeekInfo && firstWeekMonday">
+                <v-btn size="small" variant="text" icon="mdi-chevron-left" @click="goPrevWeek" />
+                <v-chip size="small" variant="tonal" color="primary">{{ weekLabel }}</v-chip>
+                <v-btn size="small" variant="text" icon="mdi-chevron-right" @click="goNextWeek" />
+                <v-btn size="small" variant="text" @click="resetWeek">今天</v-btn>
+                <v-switch v-model="showAllWeeks" label="全部周" density="compact" hide-details class="ml-2" />
+              </template>
+            </div>
+
             <v-alert v-if="!classes?.length" type="info" variant="tonal" class="mt-2">暂无课表数据</v-alert>
-            <v-table v-else density="compact">
-              <thead>
-                <tr>
-                  <th>星期</th>
-                  <th>课程</th>
-                  <th>时间</th>
-                  <th>地点</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(c, i) in classes" :key="i">
-                  <td>周{{ c.dayOfWeek }}</td>
-                  <td>{{ c.courseName }}</td>
-                  <td>{{ c.startTime }} - {{ c.endTime }}</td>
-                  <td>{{ c.location || '-' }}</td>
-                </tr>
-              </tbody>
-            </v-table>
+
+            <div v-else-if="!periodSlots.length" class="mt-2">
+              <v-alert type="info" variant="tonal">暂无课表时段数据</v-alert>
+            </div>
+
+            <div v-else class="week-grid-wrapper">
+              <table class="week-grid-table">
+                <colgroup>
+                  <col class="week-grid-col-period">
+                  <col v-for="d in 7" :key="d" class="week-grid-col-day">
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th class="week-grid-th">节次</th>
+                    <th v-for="d in weekDays" :key="d.dow" class="week-grid-th">
+                      <div>周{{ d.label }}</div>
+                      <div v-if="d.date" class="week-grid-date">{{ d.date }}</div>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(slot, si) in periodSlots" :key="si">
+                    <td class="week-grid-period">
+                      <div>{{ fmtHm(slot.start) }}</div>
+                      <div class="week-grid-period-end">{{ fmtHm(slot.end) }}</div>
+                    </td>
+                    <td
+                      v-for="dow in 7"
+                      :key="dow"
+                      class="week-grid-cell"
+                      :class="{ 'week-grid-cell-filled': (weekGridMap[`${dow}_${si}`] ?? []).length }"
+                    >
+                      <div
+                        v-for="c in (weekGridMap[`${dow}_${si}`] ?? [])"
+                        :key="c.id"
+                        class="week-grid-class"
+                      >
+                        <div class="week-grid-course">{{ c.courseName }}</div>
+                        <div v-if="c.location" class="week-grid-loc">{{ c.location }}</div>
+                        <div
+                          v-if="showAllWeeks && (c.weekStart != null || c.weekEnd != null)"
+                          class="week-grid-weeks"
+                        >
+                          {{ c.weekStart }}-{{ c.weekEnd }}周{{ c.weekType ? ' ' + c.weekType : '' }}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </v-card-text>
         </v-card>
       </v-col>
@@ -624,5 +834,153 @@ watch(
   font-size: 12px;
   opacity: 0.8;
   line-height: 1.2;
+}
+
+/* ── Weekly grid table ── */
+
+.week-grid-wrapper {
+  overflow-x: auto;
+  max-height: 520px;
+  overflow-y: auto;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+}
+
+.week-grid-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.week-grid-col-period {
+  width: 72px;
+}
+
+.week-grid-col-day {
+  /* remaining width distributed equally by table-layout:fixed */;
+}
+
+.week-grid-th {
+  position: sticky;
+  top: 0;
+  background: rgba(0, 0, 0, 0.04);
+  padding: 8px 4px;
+  text-align: center;
+  font-weight: 600;
+  border-bottom: 2px solid rgba(0, 0, 0, 0.12);
+  z-index: 1;
+}
+
+.week-grid-date {
+  font-weight: 400;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.week-grid-period {
+  text-align: center;
+  padding: 6px 4px;
+  font-weight: 500;
+  background: rgba(0, 0, 0, 0.02);
+  border-right: 1px solid rgba(0, 0, 0, 0.08);
+  vertical-align: middle;
+}
+
+.week-grid-period-end {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.week-grid-cell {
+  padding: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  vertical-align: top;
+  min-height: 48px;
+}
+
+.week-grid-cell-filled {
+  background: rgba(var(--v-theme-primary), 0.04);
+}
+
+.week-grid-class {
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: rgba(var(--v-theme-primary), 0.1);
+  border-left: 3px solid rgba(var(--v-theme-primary), 0.4);
+  margin-bottom: 3px;
+}
+
+.week-grid-class:last-child {
+  margin-bottom: 0;
+}
+
+.week-grid-course {
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.2;
+  word-break: break-word;
+}
+
+.week-grid-loc {
+  margin-top: 2px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.week-grid-weeks {
+  margin-top: 2px;
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+/* ── Free time bar chart ── */
+
+.free-bar-shell {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  padding: 6px 4px;
+}
+
+.free-bar-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  padding: 0 2px;
+}
+
+.free-bar-tick {
+  font-size: 10px;
+  opacity: 0.5;
+  text-align: center;
+  flex: 1;
+}
+
+.free-bar-track {
+  position: relative;
+  height: 32px;
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.free-bar-block {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  border-radius: 4px;
+  background: rgba(var(--v-theme-success), 0.18);
+  border-left: 3px solid rgba(var(--v-theme-success), 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 4px;
+  box-sizing: border-box;
+  min-width: 52px;
 }
 </style>

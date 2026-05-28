@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import api from '../plugins/api'
+import { useAuthStore } from '../stores/auth'
 
 const loading = ref(false)
 const error = ref('')
@@ -46,6 +47,48 @@ function timeToMinutes(dt) {
   if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null
   return hh * 60 + mm
 }
+
+function dateDowValue(dateStr) {
+  if (!dateStr) return null
+  const d = new Date(`${dateStr}T00:00:00`)
+  const js = d.getDay()
+  return ((js + 6) % 7) + 1
+}
+
+const auth = useAuthStore()
+const firstWeekMonday = computed(() => auth.me?.firstWeekMonday || localStorage.getItem('firstWeekMonday') || '')
+
+function computeWeekNumber(dateStr, fwmStr) {
+  if (!dateStr || !fwmStr) return null
+  const d = new Date(`${dateStr}T00:00:00`)
+  const fwm = new Date(`${fwmStr}T00:00:00`)
+  const diffDays = Math.floor((d - fwm) / (1000 * 60 * 60 * 24))
+  return Math.floor(diffDays / 7) + 1
+}
+
+function matchesWeekFn(c, weekNumber) {
+  if (!c) return true
+  const ws = c.weekStart, we = c.weekEnd
+  if (ws == null || we == null) return true
+  if (weekNumber == null) return true
+  if (weekNumber < ws || weekNumber > we) return false
+  const wt = c.weekType
+  if (!wt) return true
+  if (wt === 'even' || wt === '双') return weekNumber % 2 === 0
+  if (wt === 'odd' || wt === '单') return weekNumber % 2 === 1
+  return true
+}
+
+const weekNumber = computed(() => computeWeekNumber(scheduleDate.value, firstWeekMonday.value))
+
+const allClasses = computed(() => dashboard.value?.classes ?? [])
+const dayDow = computed(() => dateDowValue(scheduleDate.value))
+const dayClasses = computed(() => {
+  const dow = dayDow.value
+  if (!dow) return []
+  const wn = weekNumber.value
+  return (allClasses.value ?? []).filter((c) => Number(c?.dayOfWeek) === Number(dow) && matchesWeekFn(c, wn))
+})
 
 function humanMinutes(total) {
   const m = Number(total)
@@ -226,6 +269,12 @@ const pxPerMinute = computed(() => {
     const d = clampedDurationMinutes(f?.start, f?.end)
     if (d != null) mins.push(d)
   }
+  for (const c of dayClasses.value ?? []) {
+    const start = `${scheduleDate.value}T${String(c?.startTime).slice(0, 5)}:00`
+    const end = `${scheduleDate.value}T${String(c?.endTime).slice(0, 5)}:00`
+    const d = clampedDurationMinutes(start, end)
+    if (d != null) mins.push(d)
+  }
   const minDur = mins.length ? Math.min(...mins) : null
   if (!minDur) return 1.6
   const target = (minBlockHeightPx + blockGapPx) / minDur
@@ -251,19 +300,63 @@ function blockStyle(start, end) {
   return { top: `${topPx}px`, height: `${finalHeight}px` }
 }
 
+function layoutOverlappingBlocks(blocks) {
+  if (!blocks || !blocks.length) return blocks
+  const sorted = [...blocks].sort((a, b) => (a._start || '').localeCompare(b._start || ''))
+  const groups = []
+  let cur = [sorted[0]]
+  let curEnd = sorted[0]._end || ''
+  for (let i = 1; i < sorted.length; i++) {
+    const s = sorted[i]._start || ''
+    if (s < curEnd) {
+      cur.push(sorted[i])
+      if ((sorted[i]._end || '') > curEnd) curEnd = sorted[i]._end || ''
+    } else {
+      groups.push(cur)
+      cur = [sorted[i]]
+      curEnd = sorted[i]._end || ''
+    }
+  }
+  groups.push(cur)
+  const margin = 1.5
+  for (const g of groups) {
+    if (g.length <= 1) continue
+    const n = g.length
+    const pct = (100 - margin * (n + 1)) / n
+    g.forEach((b, col) => {
+      b.style = { ...b.style, left: `${margin + col * (pct + margin)}%`, width: `${pct}%` }
+    })
+  }
+  return blocks
+}
+
 const freeBlocks = computed(() =>
-  (freeTimeSlots.value ?? []).map((f) => ({ ...f, style: blockStyle(f?.start, f?.end) })).filter((f) => f.style),
+  (freeTimeSlots.value ?? []).map((f) => ({ ...f, _start: f.start, _end: f.end, style: blockStyle(f?.start, f?.end) })).filter((f) => f.style),
 )
 
-const scheduleBlocks = computed(() =>
-  (displayTaskSchedules.value ?? [])
+const scheduleBlocks = computed(() => {
+  const blocks = (displayTaskSchedules.value ?? [])
     .map((s, idx) => ({
       ...s,
       _idx: idx + 1,
+      _start: s?.startTime,
+      _end: s?.endTime,
       style: blockStyle(s?.startTime, s?.endTime),
     }))
-    .filter((s) => s.style),
-)
+    .filter((s) => s.style)
+  return layoutOverlappingBlocks(blocks)
+})
+
+const classBlocks = computed(() => {
+  const blocks = (dayClasses.value ?? [])
+    .map((c) => {
+      const start = `${scheduleDate.value}T${String(c.startTime).slice(0, 5)}:00`
+      const end = `${scheduleDate.value}T${String(c.endTime).slice(0, 5)}:00`
+      return { ...c, _start: start, _end: end, style: blockStyle(start, end) }
+    })
+    .filter((c) => c.style)
+  return layoutOverlappingBlocks(blocks)
+})
 
 function tempText() {
   const t = weather.value?.temperature
@@ -399,9 +492,9 @@ onMounted(load)
             </v-chip-group>
           </div>
 
-          <v-alert v-if="!(displayTaskSchedules?.length)" type="info" variant="tonal" class="mb-2">该日暂无任务排程</v-alert>
+          <v-alert v-if="!(displayTaskSchedules?.length) && !(dayClasses?.length)" type="info" variant="tonal" class="mb-2">该日暂无日程</v-alert>
 
-          <div v-else class="dash-timeline-shell mb-2">
+          <div v-if="(displayTaskSchedules?.length) || (dayClasses?.length)" class="dash-timeline-shell mb-2">
             <div class="dash-timeline-axis" :style="{ height: timelineHeightPx + 'px' }">
               <div
                 v-for="h in (timelineEndHour - timelineStartHour + 1)"
@@ -421,6 +514,16 @@ onMounted(load)
               />
 
               <div v-for="(b, i) in freeBlocks" :key="'free-' + i" class="dash-timeline-free" :style="b.style" />
+
+              <div
+                v-for="(b, i) in classBlocks"
+                :key="'class-' + (b.id ?? i)"
+                class="dash-timeline-block dash-timeline-class"
+                :style="b.style"
+              >
+                <div class="dash-timeline-title">{{ b.courseName }}</div>
+                <div class="dash-timeline-sub">{{ String(b.startTime).slice(0, 5) }} - {{ String(b.endTime).slice(0, 5) }} {{ b.location || '' }}</div>
+              </div>
 
               <div
                 v-for="b in scheduleBlocks"
@@ -548,27 +651,37 @@ onMounted(load)
 
 .dash-timeline-free {
   position: absolute;
-  left: 0;
-  right: 0;
-  border-radius: 10px;
+  left: 4px;
+  right: 4px;
+  border-radius: 8px;
   background: rgba(var(--v-theme-primary), 0.06);
-  outline: 1px dashed rgba(var(--v-theme-primary), 0.25);
+  border: 1px dashed rgba(var(--v-theme-primary), 0.18);
+  z-index: 0;
 }
 
 .dash-timeline-block {
   position: absolute;
   left: 10px;
   right: 10px;
-  border-radius: 12px;
-  padding: 8px 10px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  padding: 6px 10px;
+  box-shadow: 0 2px 8px rgba(var(--v-theme-on-surface), 0.06);
   overflow: hidden;
   box-sizing: border-box;
+  z-index: 1;
+  border-left: 4px solid;
+}
+
+.dash-timeline-class {
+  background: rgba(var(--v-theme-secondary), 0.1);
+  border-color: rgba(var(--v-theme-secondary), 0.25);
+  border-left-color: rgb(var(--v-theme-secondary));
 }
 
 .dash-timeline-task {
-  background: rgba(var(--v-theme-primary), 0.12);
-  border: 1px solid rgba(var(--v-theme-primary), 0.25);
+  background: rgba(var(--v-theme-primary), 0.1);
+  border-color: rgba(var(--v-theme-primary), 0.22);
+  border-left-color: rgb(var(--v-theme-primary));
 }
 
 .dash-timeline-title {

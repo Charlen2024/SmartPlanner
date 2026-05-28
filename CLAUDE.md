@@ -57,7 +57,7 @@ All external requests enter through **gateway-service** (:8088) which routes `/a
 | `user-service` | 8080 | `vibe_user` | Auth (JWT), SSE notifications, Agent chat, aggregation facade |
 | `goal-service` | 8081 | `vibe_goal` | Goals, tasks, journals, AI task breakdown |
 | `schedule-engine` | 8082 | `vibe_schedule` | Class import, free-time calc, daily plan scheduling |
-| `resource-search` | 8083 | `vibe_resource` | ES search, RedisStack vector search, RAG, web crawling |
+| `resource-search` | 8083 | `vibe_resource` | ES multi-field search, LLM advice/RAG, web crawling, fallback chain |
 | `punch-service` | 8084 | `vibe_punch` | Punch records, habit tracking |
 
 ### Communication Patterns

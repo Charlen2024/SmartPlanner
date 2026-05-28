@@ -30,7 +30,7 @@ import java.util.List;
 @FeignClient(name = "schedule-engine")
 public interface ScheduleClient {
     @PostMapping(value = "/api/schedule/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    Result<ScheduleImportResultDto> importSchedule(@RequestParam("userId") Long userId, @RequestPart("file") MultipartFile file);
+    Result<ScheduleImportResultDto> importSchedule(@RequestParam("userId") Long userId, @RequestPart("file") MultipartFile file, @RequestParam(value = "firstWeekMonday", required = false) String firstWeekMonday);
 
     @GetMapping("/api/schedule/classes")
     Result<List<ClassScheduleDto>> listClasses(@RequestParam("userId") Long userId, @RequestParam(value = "dayOfWeek", required = false) Integer dayOfWeek);
@@ -39,7 +39,7 @@ public interface ScheduleClient {
     Result<String> deleteClasses(@RequestParam("userId") Long userId);
 
     @GetMapping("/api/schedule/free-time")
-    Result<List<TimeSlot>> getFreeTimeSlots(@RequestParam("userId") Long userId, @RequestParam("date") String date);
+    Result<List<TimeSlot>> getFreeTimeSlots(@RequestParam("userId") Long userId, @RequestParam("date") String date, @RequestParam(value = "firstWeekMonday", required = false) String firstWeekMonday);
 
     @PostMapping("/api/schedule/auto-schedule")
     Result<String> autoSchedule(@RequestParam("userId") Long userId);
