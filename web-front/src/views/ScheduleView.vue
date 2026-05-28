@@ -254,19 +254,6 @@ async function loadFree() {
   }
 }
 
-function buildTaskGenPromptFromClasses(list) {
-  const names = []
-  for (const c of list ?? []) {
-    const title = String(c?.courseName || c?.course || c?.title || c?.name || '').trim()
-    if (!title) continue
-    if (!names.includes(title)) names.push(title)
-    if (names.length >= 12) break
-  }
-  if (!names.length) return ''
-  const lines = names.map((x, i) => `${i + 1}. ${x}`).join('\n')
-  return `我刚导入了课表。课表中的课程如下：\n${lines}\n\n请为我生成可执行的学习任务（task），任务要具体、可打卡、可在 30-60 分钟内完成。先生成任务，不要生成排程。`
-}
-
 async function loadSchedules() {
   try {
     const params = {}
@@ -327,15 +314,6 @@ async function importSchedule() {
         date.value = chosen
       }
       await Promise.all([loadFree(), loadSchedules()])
-      const prompt = buildTaskGenPromptFromClasses(classes.value)
-      if (prompt) {
-        try {
-          await api.post('/user/goals/ai', prompt, { headers: { 'Content-Type': 'text/plain' }, timeout: 15000 })
-          notify.info('已根据课表提交任务生成，生成完成后会提示；排程请到「目标」页生成')
-        } catch (e) {
-          notify.error(e?.response?.data?.message || e?.message || '提交任务生成失败')
-        }
-      }
     }
     const next = route.query.next
     if (next) {
@@ -398,8 +376,6 @@ async function setFirstWeekMonday(val) {
 }
 const weekOffset = ref(0)
 const showAllWeeks = ref(false)
-
-const scheduleDateWeekNumber = computed(() => computeWeekNumber(date.value, firstWeekMonday.value))
 
 function computeWeekNumber(dateStr, fwmStr) {
   if (!dateStr || !fwmStr) return null
@@ -679,38 +655,86 @@ function fmtHm(dt) {
         <v-card>
           <v-card-title>{{ needsImport ? '导入课表' : '更新课表' }}</v-card-title>
           <v-card-text>
-            <v-file-input v-model="file" label="选择文件" prepend-icon="mdi-upload" variant="outlined" />
-            <div class="mt-3">
-              <label class="text-caption" style="opacity:0.7">第一周周一（用于按周过滤课表，留空则不过滤）</label>
+            <!-- 文件上传区域 -->
+            <div
+              class="upload-zone mb-4"
+              :class="{ 'upload-zone--has-file': file }"
+              @click="$refs.scheduleFileInput?.click()"
+              @dragover.prevent
+              @drop.prevent="file = $event.dataTransfer?.files?.[0]"
+            >
               <input
-                type="date"
-                :value="firstWeekMonday"
-                @input="(e) => setFirstWeekMonday(e.target.value)"
-                class="v-field__input"
-                style="width:100%;padding:8px 12px;border:1px solid rgba(var(--v-theme-on-surface),0.22);border-radius:4px"
+                ref="scheduleFileInput"
+                type="file"
+                accept=".csv,.xlsx,.ics"
+                style="display:none"
+                @change="file = $event.target.files?.[0]"
               />
+              <v-icon
+                :icon="file ? 'mdi-file-check-outline' : 'mdi-cloud-upload-outline'"
+                size="36"
+                :color="file ? 'success' : undefined"
+                class="mb-2"
+              />
+              <div v-if="!file" class="text-body-2 font-weight-medium">点击或拖拽文件到此处</div>
+              <div v-else class="text-body-2 font-weight-medium text-success">{{ file?.name }}</div>
+              <div class="text-caption mt-1" style="opacity:0.5">支持 .ics / .xlsx / .csv</div>
             </div>
-            <div v-if="firstWeekMonday && scheduleDateWeekNumber != null" class="mt-2 text-caption" style="opacity:0.8">
-              所选日期 {{ date }} 为 <b>第 {{ scheduleDateWeekNumber }} 周</b>
-            </div>
-            <v-alert type="info" variant="tonal" class="mt-2">
-              支持 .ics（教务系统日历导出）/.xlsx/.csv（表头：课程/星期/开始时间/结束时间/地点）
-              <div class="mt-2">
-                <v-btn
-                  size="small"
-                  variant="tonal"
-                  color="primary"
-                  href="/schedule_template.csv"
-                  download="schedule_template.csv"
-                  target="_blank"
-                >
-                  下载 CSV 模板
-                </v-btn>
+
+            <!-- 日期选择 + 周数 -->
+            <v-row dense class="mb-3">
+              <v-col cols="12" sm="6">
+                <v-text-field
+                  :model-value="firstWeekMonday"
+                  @update:model-value="setFirstWeekMonday"
+                  label="第一周周一"
+                  type="date"
+                  variant="outlined"
+                  density="comfortable"
+                  hint="选学期第一个周一"
+                  persistent-hint
+                />
+              </v-col>
+              <v-col cols="12" sm="6" class="d-flex align-center">
+                <v-alert v-if="todayWeekNumber != null" type="info" variant="tonal" density="compact" class="mb-0 w-100">
+                  当前日期 {{ new Date().toISOString().slice(0, 10) }} 为 <strong>第 {{ todayWeekNumber }} 周</strong>
+                </v-alert>
+                <div v-else class="text-caption" style="opacity:0.4">填写第一周周一后自动计算</div>
+              </v-col>
+            </v-row>
+
+            <!-- 格式说明 -->
+            <div class="format-hints mb-3">
+              <div class="text-caption mb-1" style="opacity:0.5">
+                CSV 表头：课程名称 / 星期(1=周一) / 开始节数 / 结束节数 / 地点 / 周数
               </div>
-            </v-alert>
-            <div class="d-flex justify-end">
-              <v-btn color="primary" @click="importSchedule">{{ needsImport ? '导入' : '更新' }}</v-btn>
+              <div class="text-caption" style="opacity:0.5">
+                节次：第1节 08:00 ~ 第5节 14:45 · 第6节 14:55 ~ 第10节 20:40 ｜
+                周数例：<code>1-16</code> <code>1-16双</code>
+              </div>
             </div>
+
+            <div class="d-flex align-center" style="gap:8px">
+              <v-btn
+                size="small"
+                variant="tonal"
+                prepend-icon="mdi-download"
+                href="/schedule_template.csv"
+                download
+                target="_blank"
+              >下载模板</v-btn>
+              <v-spacer />
+              <v-btn color="primary" size="large" :loading="busy" :disabled="!file" @click="importSchedule">
+                {{ needsImport ? '导入' : '更新' }}
+              </v-btn>
+            </div>
+
+            <v-alert v-if="importResult" type="success" variant="tonal" class="mt-3" density="compact">
+              已导入 {{ importResult.inserted }}/{{ importResult.total }} 门课程
+              <template v-if="importResult.warnings?.length">
+                <div v-for="(w, i) in importResult.warnings" :key="i" class="text-caption">{{ w }}</div>
+              </template>
+            </v-alert>
           </v-card-text>
         </v-card>
       </v-col>
@@ -795,6 +819,30 @@ function fmtHm(dt) {
 </template>
 
 <style scoped>
+.upload-zone {
+  border: 2px dashed rgba(var(--v-theme-on-surface), 0.18);
+  border-radius: 12px;
+  padding: 28px 16px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+.upload-zone:hover {
+  border-color: rgba(var(--v-theme-primary), 0.5);
+  background: rgba(var(--v-theme-primary), 0.04);
+}
+.upload-zone--has-file {
+  border-style: solid;
+  border-color: rgba(var(--v-theme-success), 0.4);
+  background: rgba(var(--v-theme-success), 0.04);
+}
+
+.format-hints {
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(var(--v-theme-on-surface), 0.03);
+}
+
 .timeline-shell {
   display: grid;
   grid-template-columns: 72px 1fr;
