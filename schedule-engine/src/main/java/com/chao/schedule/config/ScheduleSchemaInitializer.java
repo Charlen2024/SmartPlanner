@@ -33,5 +33,25 @@ public class ScheduleSchemaInitializer implements ApplicationRunner {
             jdbcTemplate.execute("ALTER TABLE plan_candidates ADD COLUMN suggested_schedules_json MEDIUMTEXT");
         } catch (Exception ignored) {
         }
+
+        try {
+            jdbcTemplate.execute("ALTER TABLE class_schedule ADD COLUMN week_start INT");
+        } catch (Exception ignored) {
+        }
+        try {
+            jdbcTemplate.execute("ALTER TABLE class_schedule ADD COLUMN week_end INT");
+        } catch (Exception ignored) {
+        }
+        try {
+            jdbcTemplate.execute("ALTER TABLE class_schedule ADD COLUMN week_type VARCHAR(10)");
+        } catch (Exception ignored) {
+        }
+
+        jdbcTemplate.execute("""
+            CREATE TABLE IF NOT EXISTS user_schedule_config (
+                user_id BIGINT PRIMARY KEY,
+                first_week_monday DATE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """);
     }
 }

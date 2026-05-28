@@ -9,5 +9,6 @@ import java.util.List;
 public class GeneratePlanCandidateRequest {
     private LocalDate date;
     private List<FreeSlotDto> freeSlots;
+    private SchedulePreferenceDto preference;
 }
 

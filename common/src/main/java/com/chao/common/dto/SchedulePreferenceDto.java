@@ -1,4 +1,4 @@
-package com.chao.user.dto;
+package com.chao.common.dto;
 
 import lombok.Data;
 
@@ -7,5 +7,5 @@ public class SchedulePreferenceDto {
     private Integer focusMinutes;
     private Integer breakMinutes;
     private Integer maxDailyMinutes;
+    private Float procrastinationIndex;
 }
-

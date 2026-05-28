@@ -74,6 +74,7 @@ public class AuthController {
         resp.setRoles(jwt.getClaimAsStringList("roles"));
         AppUser u = appUserService.getById(resp.getUserId());
         resp.setScheduleImported(u != null ? Boolean.TRUE.equals(u.getScheduleImported()) : null);
+        resp.setFirstWeekMonday(u != null ? u.getFirstWeekMonday() : null);
         return Result.success(resp);
     }
 }

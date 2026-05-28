@@ -62,6 +62,7 @@ public class DailyPlanJobService {
             commit.setGoalId(request.getGoalId());
             commit.setTaskIds(request.getTaskIds());
             commit.setDays(request.getDays());
+            commit.setPreference(request.getPreference());
         }
         executor.execute(() -> run(jobId, userId, commit));
 

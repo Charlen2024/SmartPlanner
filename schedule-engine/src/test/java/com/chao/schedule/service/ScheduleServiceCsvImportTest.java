@@ -84,6 +84,7 @@ public class ScheduleServiceCsvImportTest {
                 planCandidateMapper,
                 null,
                 null,
+                null,
                 objectMapper,
                 null
         );
@@ -95,7 +96,7 @@ public class ScheduleServiceCsvImportTest {
                 """;
         MultipartFile file = new SimpleMultipartFile("schedule.csv", csv.getBytes(StandardCharsets.UTF_8));
 
-        ScheduleImportResultDto result = scheduleService.parseAndSaveSchedule(1L, file);
+        ScheduleImportResultDto result = scheduleService.parseAndSaveSchedule(1L, file, null);
         Assertions.assertEquals("csv", result.getFormat());
         Assertions.assertEquals(2, result.getInserted());
 
@@ -111,6 +112,102 @@ public class ScheduleServiceCsvImportTest {
         Assertions.assertEquals(1, freeSlots.size());
         Assertions.assertEquals(LocalDateTime.of(monday, LocalTime.of(10, 0)), freeSlots.get(0).getStart());
         Assertions.assertEquals(LocalDateTime.of(monday, LocalTime.of(22, 0)), freeSlots.get(0).getEnd());
+    }
+
+    @Test
+    void csvImportWithWeeksAndPeriods_shouldParseWeekRanges() {
+        ObjectMapper objectMapper = new ObjectMapper();
+        List<ClassSchedule> inserted = new ArrayList<>();
+        final List<ClassSchedule>[] selectListReturn = new List[]{List.of()};
+
+        ClassScheduleMapper classScheduleMapper = (ClassScheduleMapper) Proxy.newProxyInstance(
+                ClassScheduleMapper.class.getClassLoader(),
+                new Class[]{ClassScheduleMapper.class},
+                (proxy, method, args) -> {
+                    String name = method.getName();
+                    if ("delete".equals(name)) return 1;
+                    if ("insert".equals(name)) {
+                        if (args != null && args.length > 0 && args[0] instanceof ClassSchedule c) {
+                            inserted.add(c);
+                            return 1;
+                        }
+                        return 1;
+                    }
+                    if ("selectList".equals(name)) return selectListReturn[0];
+                    if ("selectCount".equals(name)) return 0L;
+                    Class<?> rt = method.getReturnType();
+                    if (rt == boolean.class) return false;
+                    if (rt == int.class) return 0;
+                    if (rt == long.class) return 0L;
+                    return null;
+                }
+        );
+        TaskScheduleMapper taskScheduleMapper = (TaskScheduleMapper) Proxy.newProxyInstance(
+                TaskScheduleMapper.class.getClassLoader(),
+                new Class[]{TaskScheduleMapper.class},
+                (proxy, method, args) -> {
+                    Class<?> rt = method.getReturnType();
+                    if (rt == boolean.class) return false;
+                    if (rt == int.class) return 0;
+                    if (rt == long.class) return 0L;
+                    return null;
+                }
+        );
+        PlanCandidateMapper planCandidateMapper = (PlanCandidateMapper) Proxy.newProxyInstance(
+                PlanCandidateMapper.class.getClassLoader(),
+                new Class[]{PlanCandidateMapper.class},
+                (proxy, method, args) -> {
+                    Class<?> rt = method.getReturnType();
+                    if (rt == boolean.class) return false;
+                    if (rt == int.class) return 0;
+                    if (rt == long.class) return 0L;
+                    return null;
+                }
+        );
+
+        ScheduleService scheduleService = new ScheduleService(
+                classScheduleMapper, taskScheduleMapper, planCandidateMapper,
+                null, null, null, objectMapper, null
+        );
+
+        String csv = """
+                课程名称,星期,开始节数,结束节数,地点,周数
+                WEB前端技术,1,1,2,一教机房502,12-14
+                大学英语4,5,3,4,电教机房203,1-16双
+                数据库原理课程设计,5,1,2,电教机房406,17
+                大学体育4,3,5,6,,2-17
+                """;
+        MultipartFile file = new SimpleMultipartFile("schedule.csv", csv.getBytes(StandardCharsets.UTF_8));
+
+        ScheduleImportResultDto result = scheduleService.parseAndSaveSchedule(1L, file, null);
+        Assertions.assertEquals("csv", result.getFormat());
+        Assertions.assertEquals(4, result.getInserted(), "all 4 rows should be imported");
+        Assertions.assertEquals(0, result.getSkipped(), "no rows should be skipped");
+
+        // Verify week range: "12-14"
+        ClassSchedule c1 = inserted.stream().filter(c -> "WEB前端技术".equals(c.getCourseName())).findFirst().orElseThrow();
+        Assertions.assertEquals(12, c1.getWeekStart());
+        Assertions.assertEquals(14, c1.getWeekEnd());
+        Assertions.assertNull(c1.getWeekType());
+
+        // Verify even week: "1-16双"
+        ClassSchedule c2 = inserted.stream().filter(c -> "大学英语4".equals(c.getCourseName())).findFirst().orElseThrow();
+        Assertions.assertEquals(1, c2.getWeekStart());
+        Assertions.assertEquals(16, c2.getWeekEnd());
+        Assertions.assertEquals("even", c2.getWeekType());
+
+        // Verify single week: "17"
+        ClassSchedule c3 = inserted.stream().filter(c -> "数据库原理课程设计".equals(c.getCourseName())).findFirst().orElseThrow();
+        Assertions.assertEquals(17, c3.getWeekStart());
+        Assertions.assertEquals(17, c3.getWeekEnd());
+        Assertions.assertNull(c3.getWeekType());
+
+        // Verify range with empty location: "2-17"
+        ClassSchedule c4 = inserted.stream().filter(c -> "大学体育4".equals(c.getCourseName())).findFirst().orElseThrow();
+        Assertions.assertEquals(2, c4.getWeekStart());
+        Assertions.assertEquals(17, c4.getWeekEnd());
+        Assertions.assertNull(c4.getWeekType());
+        Assertions.assertNull(c4.getLocation());
     }
 
     private static ClassSchedule buildClass(Long userId, int dow, LocalTime start, LocalTime end, String name) {

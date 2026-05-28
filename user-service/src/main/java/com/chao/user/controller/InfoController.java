@@ -11,7 +11,7 @@ import com.chao.common.dto.TaskScheduleDto;
 import com.chao.common.dto.UserHabitDto;
 import com.chao.user.dto.UserInsightDto;
 import com.chao.user.dto.UserPortraitDto;
-import com.chao.user.dto.SchedulePreferenceDto;
+import com.chao.common.dto.SchedulePreferenceDto;
 import com.chao.user.dto.WeatherDto;
 import com.chao.user.service.UserPortraitAiService;
 import org.redisson.api.RedissonClient;

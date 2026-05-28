@@ -14,14 +14,17 @@ import com.chao.common.dto.GeneratePlanCandidateRequest;
 import com.chao.common.dto.PlanCandidateDto;
 import com.chao.common.dto.TaskScheduleDto;
 import com.chao.common.dto.Result;
+import com.chao.common.dto.SchedulePreferenceDto;
 import com.chao.common.client.ScheduleClient;
 import com.chao.common.dto.ScheduleImportResultDto;
 import com.chao.schedule.entity.ClassSchedule;
 import com.chao.schedule.entity.PlanCandidate;
 import com.chao.schedule.entity.TaskSchedule;
+import com.chao.schedule.entity.UserScheduleConfig;
 import com.chao.schedule.mapper.ClassScheduleMapper;
 import com.chao.schedule.mapper.PlanCandidateMapper;
 import com.chao.schedule.mapper.TaskScheduleMapper;
+import com.chao.schedule.mapper.UserScheduleConfigMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.ss.usermodel.Cell;
@@ -64,6 +67,7 @@ public class ScheduleService {
     private final ClassScheduleMapper classScheduleMapper;
     private final TaskScheduleMapper taskScheduleMapper;
     private final PlanCandidateMapper planCandidateMapper;
+    private final UserScheduleConfigMapper userScheduleConfigMapper;
     private final GoalClient goalClient;
     private final OpenAiCompatClient openAiCompatClient;
     private final ObjectMapper objectMapper;
@@ -76,6 +80,55 @@ public class ScheduleService {
     private static final int SESSION_MINUTES = 45;
     private static final int BREAK_MINUTES = 10;
     private static final int MAX_STUDY_MINUTES_PER_DAY = 240;
+    private static final int SESSION_MINUTES_SHORT = 25;
+    private static final int MAX_STUDY_MINUTES_CONSERVATIVE = 180;
+
+    private static SchedulePreferenceDto resolvePreference(SchedulePreferenceDto pref) {
+        if (pref == null) {
+            pref = new SchedulePreferenceDto();
+        }
+        if (pref.getFocusMinutes() == null || pref.getFocusMinutes() <= 0) {
+            pref.setFocusMinutes(SESSION_MINUTES);
+        }
+        if (pref.getBreakMinutes() == null || pref.getBreakMinutes() <= 0) {
+            pref.setBreakMinutes(BREAK_MINUTES);
+        }
+        if (pref.getMaxDailyMinutes() == null || pref.getMaxDailyMinutes() <= 0) {
+            pref.setMaxDailyMinutes(MAX_STUDY_MINUTES_PER_DAY);
+        }
+        if (pref.getProcrastinationIndex() == null) {
+            pref.setProcrastinationIndex(0.3f);
+        }
+        return pref;
+    }
+
+    // 节数 → 时间映射（默认中国大学作息）
+    private static final LocalTime[] PERIOD_START = {
+        null, // index 0 unused
+        LocalTime.of(8, 0),   // 第1节
+        LocalTime.of(8, 55),  // 第2节
+        LocalTime.of(10, 0),  // 第3节
+        LocalTime.of(10, 55), // 第4节
+        LocalTime.of(14, 0),  // 第5节
+        LocalTime.of(14, 55), // 第6节
+        LocalTime.of(16, 0),  // 第7节
+        LocalTime.of(16, 55), // 第8节
+        LocalTime.of(19, 0),  // 第9节
+        LocalTime.of(19, 55), // 第10节
+    };
+    private static final LocalTime[] PERIOD_END = {
+        null, // index 0 unused
+        LocalTime.of(8, 45),  // 第1节
+        LocalTime.of(9, 40),  // 第2节
+        LocalTime.of(10, 45), // 第3节
+        LocalTime.of(11, 40), // 第4节
+        LocalTime.of(14, 45), // 第5节
+        LocalTime.of(15, 40), // 第6节
+        LocalTime.of(16, 45), // 第7节
+        LocalTime.of(17, 40), // 第8节
+        LocalTime.of(19, 45), // 第9节
+        LocalTime.of(20, 40), // 第10节
+    };
 
     private static final int CANDIDATE_STATUS_READY = 0;
     private static final int CANDIDATE_STATUS_ACCEPTED = 1;
@@ -86,7 +139,9 @@ public class ScheduleService {
         你是一个学习计划排程助手。你将收到：
         1) 用户某天的空闲时间段列表（freeSlots）
         2) 用户待办学习任务列表（tasks）
-        你的目标是给出“候选排程建议”（candidateSchedules），并且在你认为用户给出的 freeSlots 不合理/可优化时，给出 suggestedFreeSlots 以及基于 suggestedFreeSlots 的 suggestedSchedules。
+        3) 用户画像（userProfile）：包含 procrastinationIndex（拖延指数 0-1，越高越拖延）、
+           focusMinutes（建议单次专注时长）、breakMinutes（休息间隔）、maxDailyMinutes（当日学习上限）
+        你的目标是给出"候选排程建议"（candidateSchedules），并且在你认为用户给出的 freeSlots 不合理/可优化时，给出 suggestedFreeSlots 以及基于 suggestedFreeSlots 的 suggestedSchedules。
 
         输出必须是严格 JSON（不要 Markdown、不要额外文字），格式：
         {
@@ -96,17 +151,22 @@ public class ScheduleService {
           "suggestedSchedules": [{"taskId":123,"startTime":"YYYY-MM-DDTHH:mm:ss","endTime":"YYYY-MM-DDTHH:mm:ss"}]
         }
 
-        约束：
-        - candidateSchedules 的时间必须落在给定 freeSlots 内
-        - 如果你输出了 suggestedFreeSlots，则 suggestedSchedules 的时间必须落在 suggestedFreeSlots 内
-        - 两组 schedules 内部都不要重叠
+        排程策略（根据用户画像动态调整）：
+        - 单次学习 = focusMinutes 分钟 + breakMinutes 分钟休息，当日总时长 ≤ maxDailyMinutes
+        - procrastinationIndex > 0.6：用户容易拖延，安排应保守——减少任务数、多留缓冲、优先安排短任务建立成就感
+        - procrastinationIndex < 0.3：用户自律性强，可适度紧凑安排
         - 优先安排 priority 更高的任务；estimatedMinutes 越大越适合放到更长的空闲段
         - 每天最多 3 个深度任务（estimatedMinutes>=60 的视为深度任务）
         """;
 
     private static final String DAILY_PLAN_SYSTEM_PROMPT = """
         你是一个学习计划排程助手。请把任务分散安排到 freeSlots 中，严禁与课表冲突（必须完全落在 freeSlots 内）。
-        请避免精疲力尽：采用 45 分钟学习 + 10 分钟休息的节奏，当天学习总时长不超过 240 分钟。
+        请根据用户画像（userProfile）调整排程策略：
+        - 采用 focusMinutes 分钟学习 + breakMinutes 分钟休息的节奏
+        - 当天学习总时长不超过 maxDailyMinutes 分钟
+        - procrastinationIndex（拖延指数）> 0.6：该用户容易拖延，任务安排应偏保守，减少任务数量、
+          多留缓冲时间，优先安排短任务帮助建立成就感
+        - procrastinationIndex < 0.3：用户自律性强，可适度紧凑安排
 
         输出必须是严格 JSON（不要 Markdown、不要额外文字），格式：
         {"note":"说明","candidateSchedules":[{"taskId":123,"taskTitle":"任务标题","startTime":"YYYY-MM-DDTHH:mm:ss","endTime":"YYYY-MM-DDTHH:mm:ss"}]}
@@ -116,9 +176,9 @@ public class ScheduleService {
         - taskTitle 必须与该 taskId 对应的 title 完全一致
         """;
 
-    public ScheduleImportResultDto parseAndSaveSchedule(Long userId, MultipartFile file) {
+    public ScheduleImportResultDto parseAndSaveSchedule(Long userId, MultipartFile file, String firstWeekMonday) {
         String fileName = file != null ? file.getOriginalFilename() : null;
-        log.info("用户 {} 上传课表: {}", userId, fileName);
+        log.info("用户 {} 上传课表: {} firstWeekMonday={}", userId, fileName, firstWeekMonday);
 
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("课表文件为空");
@@ -131,6 +191,14 @@ public class ScheduleService {
         }
 
         classScheduleMapper.delete(new LambdaQueryWrapper<ClassSchedule>().eq(ClassSchedule::getUserId, userId));
+
+        // 持久化 firstWeekMonday
+        if (firstWeekMonday != null && !firstWeekMonday.isBlank()) {
+            UserScheduleConfig cfg = new UserScheduleConfig();
+            cfg.setUserId(userId);
+            cfg.setFirstWeekMonday(java.time.LocalDate.parse(firstWeekMonday));
+            userScheduleConfigMapper.insertOrUpdate(cfg);
+        }
 
         ScheduleImportResultDto result = new ScheduleImportResultDto();
         result.setFileName(fileName);
@@ -251,8 +319,15 @@ public class ScheduleService {
             }
 
             Map<String, Integer> idx = resolveHeaderIndex(header);
-            if (!idx.containsKey("course") || !idx.containsKey("dow") || !idx.containsKey("start") || !idx.containsKey("end")) {
-                throw new IllegalArgumentException("表头至少需要：课程名/星期/开始时间/结束时间");
+            boolean hasPeriod = idx.containsKey("startPeriod") && idx.containsKey("endPeriod");
+            boolean hasTime = idx.containsKey("start") && idx.containsKey("end");
+            boolean hasWeeks = idx.containsKey("weeks");
+
+            if (!idx.containsKey("course") || !idx.containsKey("dow")) {
+                throw new IllegalArgumentException("表头至少需要：课程名,星期");
+            }
+            if (!hasPeriod && !hasTime) {
+                throw new IllegalArgumentException("表头需要：开始节数+结束节数 或 开始时间+结束时间");
             }
 
             for (int r = header.getRowNum() + 1; r <= sheet.getLastRowNum(); r++) {
@@ -262,26 +337,43 @@ public class ScheduleService {
                 }
                 String course = getCellString(row.getCell(idx.get("course")));
                 String dowStr = getCellString(row.getCell(idx.get("dow")));
-                String startStr = getCellString(row.getCell(idx.get("start")));
-                String endStr = getCellString(row.getCell(idx.get("end")));
                 String location = idx.containsKey("loc") ? getCellString(row.getCell(idx.get("loc"))) : null;
+                String weekStr = hasWeeks ? getCellString(row.getCell(idx.get("weeks"))) : null;
 
-                boolean empty = (course == null || course.isBlank()) && (dowStr == null || dowStr.isBlank()) && (startStr == null || startStr.isBlank()) && (endStr == null || endStr.isBlank());
+                boolean empty = (course == null || course.isBlank()) && (dowStr == null || dowStr.isBlank());
                 if (empty) {
                     continue;
                 }
                 total++;
                 try {
                     Integer dow = parseDayOfWeek(dowStr);
-                    LocalTime start = parseTime(row.getCell(idx.get("start")), startStr);
-                    LocalTime end = parseTime(row.getCell(idx.get("end")), endStr);
-                    if (course == null || course.isBlank() || dow == null || start == null || end == null) {
+                    if (course == null || course.isBlank() || dow == null) {
                         skipped++;
                         continue;
                     }
-                    if (!end.isAfter(start)) {
+
+                    LocalTime start;
+                    LocalTime end;
+                    if (hasPeriod) {
+                        String startPeriodStr = getCellString(row.getCell(idx.get("startPeriod")));
+                        String endPeriodStr = getCellString(row.getCell(idx.get("endPeriod")));
+                        Integer sp = parseIntSafe(startPeriodStr);
+                        Integer ep = parseIntSafe(endPeriodStr);
+                        if (sp == null || ep == null) {
+                            skipped++;
+                            continue;
+                        }
+                        start = periodToStartTime(sp);
+                        end = periodToEndTime(ep);
+                    } else {
+                        String startStr = getCellString(row.getCell(idx.get("start")));
+                        String endStr = getCellString(row.getCell(idx.get("end")));
+                        start = parseTime(row.getCell(idx.get("start")), startStr);
+                        end = parseTime(row.getCell(idx.get("end")), endStr);
+                    }
+
+                    if (start == null || end == null || !end.isAfter(start)) {
                         skipped++;
-                        result.getWarnings().add("第 " + (r + 1) + " 行结束时间不晚于开始时间，已跳过");
                         continue;
                     }
 
@@ -292,6 +384,16 @@ public class ScheduleService {
                     schedule.setStartTime(start);
                     schedule.setEndTime(end);
                     schedule.setLocation(location != null && !location.isBlank() ? location.trim() : null);
+
+                    if (weekStr != null && !weekStr.isBlank()) {
+                        WeekRange wr = parseWeekRange(weekStr);
+                        if (wr != null) {
+                            schedule.setWeekStart(wr.start);
+                            schedule.setWeekEnd(wr.end);
+                            schedule.setWeekType(wr.weekType);
+                        }
+                    }
+
                     classScheduleMapper.insert(schedule);
                     inserted++;
                 } catch (Exception rowEx) {
@@ -334,8 +436,15 @@ public class ScheduleService {
             }
 
             Map<String, Integer> idx = resolveHeaderIndex(header);
-            if (!idx.containsKey("course") || !idx.containsKey("dow") || !idx.containsKey("start") || !idx.containsKey("end")) {
-                throw new IllegalArgumentException("CSV 表头至少需要：课程,星期,开始时间,结束时间");
+            boolean hasPeriod = idx.containsKey("startPeriod") && idx.containsKey("endPeriod");
+            boolean hasTime = idx.containsKey("start") && idx.containsKey("end");
+            boolean hasWeeks = idx.containsKey("weeks");
+
+            if (!idx.containsKey("course") || !idx.containsKey("dow")) {
+                throw new IllegalArgumentException("CSV 表头至少需要：课程名称,星期");
+            }
+            if (!hasPeriod && !hasTime) {
+                throw new IllegalArgumentException("CSV 表头需要：开始节数+结束节数 或 开始时间+结束时间");
             }
 
             for (int i = 1; i < lines.length; i++) {
@@ -346,26 +455,36 @@ public class ScheduleService {
                 try {
                     String course = getArray(cols, idx.get("course"));
                     String dowStr = getArray(cols, idx.get("dow"));
-                    String startStr = getArray(cols, idx.get("start"));
-                    String endStr = getArray(cols, idx.get("end"));
                     String location = idx.containsKey("loc") ? getArray(cols, idx.get("loc")) : null;
-
-                    // 添加调试日志
-                    log.debug("解析行 {}: 课程={}, 星期={}, 开始={}, 结束={}",
-                            i, course, dowStr, startStr, endStr);
+                    String weekStr = hasWeeks ? getArray(cols, idx.get("weeks")) : null;
 
                     Integer dow = parseDayOfWeek(dowStr);
-                    LocalTime start = parseTime(null, startStr);
-                    LocalTime end = parseTime(null, endStr);
-
-                    if (course == null || course.isBlank() || dow == null || start == null || end == null) {
-                        log.warn("跳过行 {}: 必要字段缺失 - course={}, dow={}, start={}, end={}",
-                                i, course, dow, start, end);
+                    if (course == null || course.isBlank() || dow == null) {
                         skipped++;
                         continue;
                     }
-                    if (!end.isAfter(start)) {
-                        log.warn("跳过行 {}: 结束时间不晚于开始时间 - start={}, end={}", i, start, end);
+
+                    LocalTime start;
+                    LocalTime end;
+                    if (hasPeriod) {
+                        String startPeriodStr = getArray(cols, idx.get("startPeriod"));
+                        String endPeriodStr = getArray(cols, idx.get("endPeriod"));
+                        Integer sp = parseIntSafe(startPeriodStr);
+                        Integer ep = parseIntSafe(endPeriodStr);
+                        if (sp == null || ep == null) {
+                            skipped++;
+                            continue;
+                        }
+                        start = periodToStartTime(sp);
+                        end = periodToEndTime(ep);
+                    } else {
+                        String startStr = getArray(cols, idx.get("start"));
+                        String endStr = getArray(cols, idx.get("end"));
+                        start = parseTime(null, startStr);
+                        end = parseTime(null, endStr);
+                    }
+
+                    if (start == null || end == null || !end.isAfter(start)) {
                         skipped++;
                         continue;
                     }
@@ -377,10 +496,18 @@ public class ScheduleService {
                     schedule.setStartTime(start);
                     schedule.setEndTime(end);
                     schedule.setLocation(location != null && !location.isBlank() ? location.trim() : null);
+
+                    if (weekStr != null && !weekStr.isBlank()) {
+                        WeekRange wr = parseWeekRange(weekStr);
+                        if (wr != null) {
+                            schedule.setWeekStart(wr.start);
+                            schedule.setWeekEnd(wr.end);
+                            schedule.setWeekType(wr.weekType);
+                        }
+                    }
+
                     classScheduleMapper.insert(schedule);
                     inserted++;
-
-                    log.info("成功导入课程: {}", schedule);
                 } catch (Exception ex) {
                     log.error("解析第 {} 行失败: {}", i, ex.getMessage(), ex);
                     skipped++;
@@ -400,6 +527,15 @@ public class ScheduleService {
         }
     }
 
+    private Integer parseIntSafe(String s) {
+        if (s == null || s.isBlank()) return null;
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     private Map<String, Integer> resolveHeaderIndex(String[] header) {
         Map<String, Integer> m = new HashMap<>();
         for (int c = 0; c < header.length; c++) {
@@ -411,6 +547,12 @@ public class ScheduleService {
                 m.put("course", c);
             } else if (s.contains("星期") || s.contains("周几") || s.contains("dayofweek") || s.contains("dow")) {
                 m.put("dow", c);
+            } else if (s.contains("开始节数") || s.contains("startperiod")) {
+                m.put("startPeriod", c);
+            } else if (s.contains("结束节数") || s.contains("endperiod")) {
+                m.put("endPeriod", c);
+            } else if (s.contains("周数") || s.contains("weeks")) {
+                m.put("weeks", c);
             } else if (s.contains("开始") || s.contains("start")) {
                 m.put("start", c);
             } else if (s.contains("结束") || s.contains("end")) {
@@ -443,6 +585,12 @@ public class ScheduleService {
                 m.put("course", c);
             } else if (s.contains("星期") || s.contains("周几") || s.contains("dayofweek") || s.contains("dow")) {
                 m.put("dow", c);
+            } else if (s.contains("开始节数") || s.contains("startperiod")) {
+                m.put("startPeriod", c);
+            } else if (s.contains("结束节数") || s.contains("endperiod")) {
+                m.put("endPeriod", c);
+            } else if (s.contains("周数") || s.contains("weeks")) {
+                m.put("weeks", c);
             } else if (s.contains("开始") || s.contains("start")) {
                 m.put("start", c);
             } else if (s.contains("结束") || s.contains("end")) {
@@ -470,6 +618,89 @@ public class ScheduleService {
         }
         if (cell.getCellType() == CellType.BOOLEAN) {
             return String.valueOf(cell.getBooleanCellValue());
+        }
+        return null;
+    }
+
+    /**
+     * 解析周数格式：
+     *   "X月Y日" → start=X, end=Y
+     *   "X-Y双" → start=X, end=Y, weekType=even
+     *   "X-Y单" → start=X, end=Y, weekType=odd
+     *   "X"     → start=X, end=X
+     *   "X月Y日双" → start=X, end=Y, weekType=even
+     */
+    private WeekRange parseWeekRange(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String s = raw.trim();
+        boolean even = false;
+        boolean odd = false;
+        if (s.contains("双")) { even = true; s = s.replace("双", ""); }
+        else if (s.contains("单")) { odd = true; s = s.replace("单", ""); }
+        else if (s.contains("偶")) { even = true; s = s.replace("偶", ""); }
+        else if (s.contains("奇")) { odd = true; s = s.replace("奇", ""); }
+
+        // 尝试 "X月Y日" 格式
+        java.util.regex.Matcher m1 = java.util.regex.Pattern.compile("(\\d+)\\s*月\\s*(\\d+)\\s*日?").matcher(s);
+        if (m1.find()) {
+            WeekRange r = new WeekRange();
+            r.start = Integer.parseInt(m1.group(1));
+            r.end = Integer.parseInt(m1.group(2));
+            r.weekType = even ? "even" : (odd ? "odd" : null);
+            return r;
+        }
+        // 尝试 "X-Y" 格式
+        java.util.regex.Matcher m2 = java.util.regex.Pattern.compile("(\\d+)\\s*-\\s*(\\d+)").matcher(s);
+        if (m2.find()) {
+            WeekRange r = new WeekRange();
+            r.start = Integer.parseInt(m2.group(1));
+            r.end = Integer.parseInt(m2.group(2));
+            r.weekType = even ? "even" : (odd ? "odd" : null);
+            return r;
+        }
+        // 单个数字
+        try {
+            int n = Integer.parseInt(s.replaceAll("[^0-9]", ""));
+            WeekRange r = new WeekRange();
+            r.start = n;
+            r.end = n;
+            return r;
+        } catch (NumberFormatException ignored) {
+        }
+        log.warn("无法解析周数: {}", raw);
+        return null;
+    }
+
+    @lombok.Data
+    private static class WeekRange {
+        int start;
+        int end;
+        String weekType; // null=every, "odd", "even"
+    }
+
+    private boolean matchesWeek(ClassSchedule cs, int weekNumber) {
+        Integer ws = cs.getWeekStart();
+        Integer we = cs.getWeekEnd();
+        // 无周范围 = 每周都上
+        if (ws == null || we == null) return true;
+        if (weekNumber < ws || weekNumber > we) return false;
+        String wt = cs.getWeekType();
+        if (wt == null) return true;
+        if ("even".equalsIgnoreCase(wt)) return weekNumber % 2 == 0;
+        if ("odd".equalsIgnoreCase(wt)) return weekNumber % 2 == 1;
+        return true;
+    }
+
+    private LocalTime periodToStartTime(int period) {
+        if (period >= 1 && period < PERIOD_START.length && PERIOD_START[period] != null) {
+            return PERIOD_START[period];
+        }
+        return null;
+    }
+
+    private LocalTime periodToEndTime(int period) {
+        if (period >= 1 && period < PERIOD_END.length && PERIOD_END[period] != null) {
+            return PERIOD_END[period];
         }
         return null;
     }
@@ -566,18 +797,47 @@ public class ScheduleService {
     }
 
     public List<ScheduleClient.TimeSlot> calculateFreeTime(Long userId, String dateStr) {
+        String fwm = null;
+        try {
+            UserScheduleConfig cfg = userScheduleConfigMapper.selectById(userId);
+            if (cfg != null && cfg.getFirstWeekMonday() != null) {
+                fwm = cfg.getFirstWeekMonday().toString();
+            }
+        } catch (Exception ignored) {
+        }
+        return calculateFreeTime(userId, dateStr, fwm);
+    }
+
+    public List<ScheduleClient.TimeSlot> calculateFreeTime(Long userId, String dateStr, String firstWeekMonday) {
         LocalDate date = LocalDate.parse(dateStr);
         int dayOfWeek = date.getDayOfWeek().getValue();
 
-        log.info("计算用户 {} 在 {} (星期{}) 的空闲时间", userId, date, dayOfWeek);
+        log.info("计算用户 {} 在 {} (星期{}) 的空闲时间, firstWeekMonday={}", userId, date, dayOfWeek, firstWeekMonday);
 
-        // 1. 获取当天的课程
+        // 计算该日期所属周数
+        Integer weekNumber = null;
+        if (firstWeekMonday != null && !firstWeekMonday.isBlank()) {
+            LocalDate fwm = LocalDate.parse(firstWeekMonday);
+            long daysBetween = java.time.temporal.ChronoUnit.DAYS.between(fwm, date);
+            weekNumber = (int) (daysBetween / 7) + 1;
+            if (daysBetween < 0) {
+                weekNumber = (int) Math.floor((double) daysBetween / 7.0);
+            }
+        }
+
+        // 1. 获取当天的课程（先按 dayOfWeek 查，再按周过滤）
         List<ClassSchedule> classes = classScheduleMapper.selectList(new LambdaQueryWrapper<ClassSchedule>()
                 .eq(ClassSchedule::getUserId, userId)
                 .eq(ClassSchedule::getDayOfWeek, dayOfWeek)
                 .orderByAsc(ClassSchedule::getStartTime));
 
-        log.info("找到 {} 门课程", classes.size());
+        // 按周过滤
+        if (weekNumber != null) {
+            final Integer wn = weekNumber;
+            classes = classes.stream().filter(c -> matchesWeek(c, wn)).collect(Collectors.toList());
+        }
+
+        log.info("找到 {} 门课程（周过滤后）", classes.size());
 
         // 2. 计算空闲时间 (假设学习时间为 08:00 - 22:00)
         LocalTime studyStart = LocalTime.of(8, 0);
@@ -596,6 +856,12 @@ public class ScheduleService {
             }
             return freeSlots;
         }
+
+        // 午休 12:00-13:00 作为固定占用块
+        ClassSchedule lunch = new ClassSchedule();
+        lunch.setStartTime(LocalTime.of(12, 0));
+        lunch.setEndTime(LocalTime.of(13, 0));
+        classes.add(lunch);
 
         // 按开始时间排序
         classes.sort((a, b) -> a.getStartTime().compareTo(b.getStartTime()));
@@ -639,7 +905,13 @@ public class ScheduleService {
             }
         }
 
-        log.info("计算出 {} 个空闲时段", freeSlots.size());
+        // 过滤短于 30 分钟的空闲时段
+        freeSlots.removeIf(slot -> {
+            long minutes = java.time.Duration.between(slot.getStart(), slot.getEnd()).toMinutes();
+            return minutes < 30;
+        });
+
+        log.info("计算出 {} 个空闲时段（已过滤 <30分钟）", freeSlots.size());
         for (ScheduleClient.TimeSlot slot : freeSlots) {
             log.debug("空闲时段: {} - {}", slot.getStart(), slot.getEnd());
         }
@@ -726,7 +998,7 @@ public class ScheduleService {
                 s.setStatus(0); // 未开始
                 taskScheduleMapper.insert(s);
                 
-                // 更新任务状态为“进行中” (1)
+                // 更新任务状态为"进行中" (1)
                 goalClient.updateTaskStatus(s.getTaskId(), 1);
             }
         } catch (Exception e) {
@@ -777,7 +1049,7 @@ public class ScheduleService {
         entity.setCreatedAt(LocalDateTime.now(APP_ZONE));
         planCandidateMapper.insert(entity);
 
-        planCandidateWorker.generate(entity.getId(), userId, date, normalizedSlots, tasks);
+        planCandidateWorker.generate(entity.getId(), userId, date, normalizedSlots, tasks, resolvePreference(request != null ? request.getPreference() : null));
 
         PlanCandidateDto dto = new PlanCandidateDto();
         dto.setId(entity.getId());
@@ -804,7 +1076,12 @@ public class ScheduleService {
 
     public DailyPlanCommitResponse commitDailyPlan(Long userId, DailyPlanCommitRequest request, ProgressReporter reporter) {
         LocalDate date = request != null && request.getDate() != null ? request.getDate() : LocalDate.now(APP_ZONE);
+        SchedulePreferenceDto pref = resolvePreference(request != null ? request.getPreference() : null);
         String mode = request != null && request.getMode() != null ? request.getMode().trim().toLowerCase(Locale.ROOT) : "replace";
+        int sessionMin = pref.getFocusMinutes();
+        int breakMin = pref.getBreakMinutes();
+        int maxDaily = pref.getMaxDailyMinutes();
+        float proIndex = pref.getProcrastinationIndex();
         if ("merge".equals(mode)) {
             mode = "append";
         }
@@ -996,7 +1273,7 @@ public class ScheduleService {
         CommitAiResponse ai;
         try {
             report(reporter, "CALL_AI", 45, "正在调用模型进行智能排程");
-            String prompt = buildDailyPlanPrompt(date, remainingFree, remainingTasks);
+            String prompt = buildDailyPlanPrompt(date, remainingFree, remainingTasks, pref);
             log.info("调用模型: userId={}, date={}, freeSlots={}, tasks={}", userId, date, remainingFree != null ? remainingFree.size() : 0, remainingTasks != null ? remainingTasks.size() : 0);
             String aiJson = CompletableFuture
                     .supplyAsync(() -> openAiCompatClient.complete(prompt))
@@ -1013,15 +1290,15 @@ public class ScheduleService {
             log.warn("智能排程调用失败: {}", e.getMessage());
             ai = new CommitAiResponse();
             ai.note = "已生成当日计划（规则）";
-            ai.candidateSchedules = planCandidateWorker.generateRuleBasedSchedules(remainingFree, remainingTasks);
+            ai.candidateSchedules = planCandidateWorker.generateRuleBasedSchedules(remainingFree, remainingTasks, pref);
         }
 
         List<TaskScheduleDto> candidate = ai.candidateSchedules != null ? ai.candidateSchedules : List.of();
         candidate = candidate.stream().filter(s -> s != null && s.getTaskId() != null && s.getStartTime() != null && s.getEndTime() != null).collect(Collectors.toList());
         candidate = normalizeTaskIds(candidate, remainingTasks, reporter);
         candidate = filterOverlaps(candidate);
-        candidate = enforceMinGap(candidate, BREAK_MINUTES);
-        candidate = clampDailyMinutes(candidate, MAX_STUDY_MINUTES_PER_DAY);
+        candidate = enforceMinGap(candidate, breakMin);
+        candidate = clampDailyMinutes(candidate, maxDaily);
 
         if (candidate.isEmpty()) {
             throw new IllegalArgumentException("当前空闲时间段不足以安排任务，请增加时间段后重试");
@@ -1520,7 +1797,7 @@ public class ScheduleService {
                 .collect(Collectors.toList());
     }
 
-    private String buildDailyPlanPrompt(LocalDate date, List<FreeSlotDto> freeSlots, List<GoalTaskDto> tasks) {
+    private String buildDailyPlanPrompt(LocalDate date, List<FreeSlotDto> freeSlots, List<GoalTaskDto> tasks, SchedulePreferenceDto pref) {
         String freeJson = writeJson(freeSlots);
         List<Map<String, Object>> simpleTasks = tasks.stream().map(t -> {
             Map<String, Object> m = new HashMap<>();
@@ -1531,7 +1808,14 @@ public class ScheduleService {
             return m;
         }).collect(Collectors.toList());
         String taskJson = writeJson(simpleTasks);
-        return DAILY_PLAN_SYSTEM_PROMPT + "\nplanDate: " + date + "\nfreeSlots: " + freeJson + "\ntasks: " + taskJson;
+        SchedulePreferenceDto p = resolvePreference(pref);
+        String profileJson = writeJson(Map.of(
+            "focusMinutes", p.getFocusMinutes(),
+            "breakMinutes", p.getBreakMinutes(),
+            "maxDailyMinutes", p.getMaxDailyMinutes(),
+            "procrastinationIndex", p.getProcrastinationIndex()
+        ));
+        return DAILY_PLAN_SYSTEM_PROMPT + "\nplanDate: " + date + "\nuserProfile: " + profileJson + "\nfreeSlots: " + freeJson + "\ntasks: " + taskJson;
     }
 
     private CommitAiResponse parseCommitAiResponse(String aiJson) {
@@ -1636,7 +1920,7 @@ public class ScheduleService {
                 .collect(Collectors.toList());
     }
 
-    private String buildPlanPrompt(LocalDate date, List<FreeSlotDto> freeSlots, List<GoalTaskDto> tasks) {
+    private String buildPlanPrompt(LocalDate date, List<FreeSlotDto> freeSlots, List<GoalTaskDto> tasks, SchedulePreferenceDto pref) {
         String freeJson = writeJson(freeSlots);
         List<Map<String, Object>> simpleTasks = tasks.stream().map(t -> {
             Map<String, Object> m = new HashMap<>();
@@ -1647,7 +1931,14 @@ public class ScheduleService {
             return m;
         }).collect(Collectors.toList());
         String taskJson = writeJson(simpleTasks);
-        return PLAN_SYSTEM_PROMPT + "\nplanDate: " + date + "\nfreeSlots: " + freeJson + "\ntasks: " + taskJson;
+        SchedulePreferenceDto p = resolvePreference(pref);
+        String profileJson = writeJson(Map.of(
+            "focusMinutes", p.getFocusMinutes(),
+            "breakMinutes", p.getBreakMinutes(),
+            "maxDailyMinutes", p.getMaxDailyMinutes(),
+            "procrastinationIndex", p.getProcrastinationIndex()
+        ));
+        return PLAN_SYSTEM_PROMPT + "\nplanDate: " + date + "\nuserProfile: " + profileJson + "\nfreeSlots: " + freeJson + "\ntasks: " + taskJson;
     }
 
     private CandidateAiResponse parseCandidateAiResponse(String aiJson) {
@@ -1716,10 +2007,18 @@ public class ScheduleService {
         return out;
     }
 
-    private List<TaskScheduleDto> ruleBasedCandidateSchedules(List<FreeSlotDto> freeSlots, List<GoalTaskDto> tasks) {
+    private List<TaskScheduleDto> ruleBasedCandidateSchedules(List<FreeSlotDto> freeSlots, List<GoalTaskDto> tasks, SchedulePreferenceDto pref) {
         if (freeSlots == null || freeSlots.isEmpty() || tasks == null || tasks.isEmpty()) {
             return List.of();
         }
+        SchedulePreferenceDto p = resolvePreference(pref);
+        int sessionMin = p.getFocusMinutes();
+        int breakMin = p.getBreakMinutes();
+        int maxDaily = p.getMaxDailyMinutes();
+        float proIndex = p.getProcrastinationIndex();
+        int deepLimit = proIndex > 0.6f ? 1 : 3;
+        int minSlotMinutes = proIndex > 0.6f ? 20 : 15;
+
         List<GoalTaskDto> sortedTasks = tasks.stream()
                 .filter(t -> t != null && t.getId() != null)
                 .sorted((a, b) -> {
@@ -1740,37 +2039,43 @@ public class ScheduleService {
         List<TaskScheduleDto> out = new ArrayList<>();
         int taskIdx = 0;
         int deepCount = 0;
+        int dayMinutes = 0;
         LocalDate current = slots.get(0).getStart().toLocalDate();
 
         for (FreeSlotDto slot : slots) {
             if (!slot.getStart().toLocalDate().equals(current)) {
                 current = slot.getStart().toLocalDate();
                 deepCount = 0;
+                dayMinutes = 0;
             }
             LocalDateTime cursor = slot.getStart();
             while (taskIdx < sortedTasks.size() && cursor.isBefore(slot.getEnd())) {
+                if (dayMinutes >= maxDaily) break;
                 GoalTaskDto t = sortedTasks.get(taskIdx);
                 int minutes = t.getEstimatedMinutes() == null || t.getEstimatedMinutes() <= 0 ? 30 : t.getEstimatedMinutes();
                 boolean isDeep = minutes >= 60;
-                if (isDeep && deepCount >= 3) {
+                if (isDeep && deepCount >= deepLimit) {
                     taskIdx++;
                     continue;
                 }
                 long remaining = java.time.Duration.between(cursor, slot.getEnd()).toMinutes();
-                if (remaining < 15) {
+                if (remaining < minSlotMinutes) {
                     break;
                 }
-                int useMinutes = (int) Math.min(Math.max(15, minutes), remaining);
+                int useMinutes = (int) Math.min(Math.min(sessionMin, minutes), remaining);
+                useMinutes = (int) Math.min(useMinutes, maxDaily - dayMinutes);
+                if (useMinutes < minSlotMinutes) break;
                 TaskScheduleDto s = new TaskScheduleDto();
                 s.setTaskId(t.getId());
                 s.setStartTime(cursor);
                 s.setEndTime(cursor.plusMinutes(useMinutes));
                 s.setStatus(0);
                 out.add(s);
+                dayMinutes += useMinutes;
                 if (isDeep && useMinutes >= 60) {
                     deepCount++;
                 }
-                cursor = s.getEndTime();
+                cursor = s.getEndTime().plusMinutes(breakMin);
                 taskIdx++;
             }
             if (taskIdx >= sortedTasks.size()) {

@@ -2,6 +2,7 @@ package com.chao.user.dto;
 
 import com.chao.common.client.ResourceClient;
 import com.chao.common.client.ScheduleClient;
+import com.chao.common.dto.ClassScheduleDto;
 import com.chao.common.dto.GoalDto;
 import com.chao.common.dto.GoalTaskDto;
 import com.chao.common.dto.TaskScheduleDto;
@@ -18,5 +19,6 @@ public class DashboardDto {
     private List<TaskScheduleDto> taskSchedules;
     private Long streak;
     private List<ResourceClient.CourseResource> resources;
+    private List<ClassScheduleDto> classes;
 }
 

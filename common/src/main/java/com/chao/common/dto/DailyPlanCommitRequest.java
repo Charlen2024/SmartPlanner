@@ -12,4 +12,5 @@ public class DailyPlanCommitRequest {
     private Long goalId;
     private List<Long> taskIds;
     private Integer days;
+    private SchedulePreferenceDto preference;
 }

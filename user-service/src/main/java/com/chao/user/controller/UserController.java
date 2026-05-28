@@ -53,6 +53,31 @@ public class UserController {
     private static final String COURSES_INDEXED_KEY = "sp:rag:indexed:courses";
     private static final String TASK_ADVICE_KEY_PREFIX = "sp:task:advice:v1:";
 
+    private SchedulePreferenceDto buildSchedulePreference(Long userId) {
+        try {
+            Result<UserHabitDto> r = punchClient.getHabits(userId);
+            UserHabitDto habits = r != null ? r.getData() : null;
+            if (habits == null) return null;
+            Float pro = habits.getProcrastinationIndex() != null ? habits.getProcrastinationIndex() : 0.3f;
+            Integer focusAvg = habits.getFocusDurationAvg() != null ? habits.getFocusDurationAvg() : 45;
+            int focus = focusAvg < 40 ? 30 : (focusAvg < 70 ? 45 : 60);
+            int maxDaily = 240;
+            try {
+                Result<Long> sr = punchClient.getStreak(userId);
+                Long streak = sr != null ? sr.getData() : null;
+                if (streak == null || streak < 3) maxDaily = 180;
+            } catch (Exception ignored) {}
+            SchedulePreferenceDto pref = new SchedulePreferenceDto();
+            pref.setFocusMinutes(focus);
+            pref.setBreakMinutes(10);
+            pref.setMaxDailyMinutes(maxDaily);
+            pref.setProcrastinationIndex(pro);
+            return pref;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     @GetMapping("/dashboard")
     public Result<DashboardDto> dashboard(
             @AuthenticationPrincipal Jwt jwt,
@@ -443,11 +468,13 @@ public class UserController {
         }
 
         List<CourseResourceDto> rec = recommendCourseResources(userId, task, topK);
-        try {
-            String json = objectMapper.writeValueAsString(rec != null ? rec : List.of());
-            bucket.set(json);
-            bucket.expire(Duration.ofDays(14));
-        } catch (Exception ignored) {
+        if (rec != null && !rec.isEmpty() && !allAreDefaultFallback(rec)) {
+            try {
+                String json = objectMapper.writeValueAsString(rec);
+                bucket.set(json);
+                bucket.expire(Duration.ofDays(2));
+            } catch (Exception ignored) {
+            }
         }
         return rec != null ? rec : List.of();
     }
@@ -455,9 +482,10 @@ public class UserController {
     private List<CourseResourceDto> recommendCourseResources(Long userId, GoalTaskDto task, int topK) {
         String title = task != null && task.getTitle() != null ? task.getTitle().trim() : "";
         String desc = task != null && task.getDescription() != null ? task.getDescription().trim() : "";
-        String query = title;
+        String query = stripTaskPrefix(title);
         if (!desc.isBlank() && !desc.equalsIgnoreCase(title)) {
-            query = title + " " + desc;
+            String cleanDesc = stripTaskPrefix(desc);
+            query = query + " " + cleanDesc;
         }
         query = query.trim();
         if (query.isBlank()) return List.of();
@@ -598,6 +626,43 @@ public class UserController {
         return x.substring(0, 160);
     }
 
+    private static final java.util.Set<String> TASK_TITLE_PREFIXES = java.util.Set.of(
+        "阅读：", "阅读:", "总结：", "总结:", "练习：", "练习:",
+        "复习：", "复习:", "完成：", "完成:", "学习：", "学习:",
+        "观看：", "观看:", "撰写：", "撰写:", "整理：", "整理:"
+    );
+
+    private String stripTaskPrefix(String text) {
+        if (text == null) return "";
+        for (String prefix : TASK_TITLE_PREFIXES) {
+            if (text.startsWith(prefix)) {
+                return text.substring(prefix.length()).trim();
+            }
+        }
+        return text;
+    }
+
+    private boolean allAreDefaultFallback(List<CourseResourceDto> resources) {
+        if (resources == null || resources.isEmpty()) return true;
+        for (CourseResourceDto r : resources) {
+            if (r == null) continue;
+            String url = r.getSourceUrl() != null ? r.getSourceUrl() : "";
+            if (!isFallbackUrl(url)) return false;
+        }
+        return true;
+    }
+
+    private boolean isFallbackUrl(String url) {
+        if (url == null || url.isBlank()) return false;
+        return url.startsWith("https://www.google.com/search?q=")
+            || url.startsWith("https://github.com/search?q=")
+            || url.startsWith("https://search.bilibili.com/all?keyword=")
+            || url.startsWith("https://www.zhihu.com/search?q=")
+            || url.startsWith("https://www.coursera.org/search?query=")
+            || url.startsWith("https://www.edx.org/search?q=")
+            || url.startsWith("https://medium.com/search?q=");
+    }
+
     @GetMapping("/journals")
     public Result<List<UserJournalDto>> journals(
             @AuthenticationPrincipal Jwt jwt,
@@ -633,7 +698,13 @@ public class UserController {
             @RequestHeader(value = "X-User-Id", required = false) Long headerUserId,
             @RequestParam(required = false) Long userId,
             @RequestParam String date) {
-        return scheduleClient.getFreeTimeSlots(resolveUserId(jwt, headerUserId, userId), date);
+        Long uid = resolveUserId(jwt, headerUserId, userId);
+        String fwm = null;
+        com.chao.user.entity.AppUser u = appUserService.getById(uid);
+        if (u != null && u.getFirstWeekMonday() != null) {
+            fwm = u.getFirstWeekMonday().toString();
+        }
+        return scheduleClient.getFreeTimeSlots(uid, date, fwm);
     }
 
     @PostMapping("/schedule/auto")
@@ -650,7 +721,11 @@ public class UserController {
             @RequestHeader(value = "X-User-Id", required = false) Long headerUserId,
             @RequestParam(required = false) Long userId,
             @RequestBody GeneratePlanCandidateRequest request) {
-        return scheduleClient.generatePlanCandidate(resolveUserId(jwt, headerUserId, userId), request);
+        Long uid = resolveUserId(jwt, headerUserId, userId);
+        if (request != null && request.getPreference() == null) {
+            request.setPreference(buildSchedulePreference(uid));
+        }
+        return scheduleClient.generatePlanCandidate(uid, request);
     }
 
     @PostMapping("/schedule/plan-candidates/{candidateId}/decision")
@@ -679,7 +754,11 @@ public class UserController {
             @RequestHeader(value = "X-User-Id", required = false) Long headerUserId,
             @RequestParam(required = false) Long userId,
             @RequestBody DailyPlanCommitRequest request) {
-        return scheduleClient.commitDailyPlan(resolveUserId(jwt, headerUserId, userId), request);
+        Long uid = resolveUserId(jwt, headerUserId, userId);
+        if (request != null && request.getPreference() == null) {
+            request.setPreference(buildSchedulePreference(uid));
+        }
+        return scheduleClient.commitDailyPlan(uid, request);
     }
 
     @PostMapping("/schedule/daily-plan/jobs")
@@ -688,7 +767,11 @@ public class UserController {
             @RequestHeader(value = "X-User-Id", required = false) Long headerUserId,
             @RequestParam(required = false) Long userId,
             @RequestBody DailyPlanJobStartRequest request) {
-        return scheduleClient.startDailyPlanJob(resolveUserId(jwt, headerUserId, userId), request);
+        Long uid = resolveUserId(jwt, headerUserId, userId);
+        if (request != null && request.getPreference() == null) {
+            request.setPreference(buildSchedulePreference(uid));
+        }
+        return scheduleClient.startDailyPlanJob(uid, request);
     }
 
     @GetMapping("/schedule/daily-plan/jobs/{jobId}")
@@ -705,11 +788,15 @@ public class UserController {
             @AuthenticationPrincipal Jwt jwt,
             @RequestHeader(value = "X-User-Id", required = false) Long headerUserId,
             @RequestParam(required = false) Long userId,
-            @RequestParam MultipartFile file) {
+            @RequestParam MultipartFile file,
+            @RequestParam(required = false) String firstWeekMonday) {
         Long uid = resolveUserId(jwt, headerUserId, userId);
-        Result<ScheduleImportResultDto> r = scheduleClient.importSchedule(uid, file);
+        Result<ScheduleImportResultDto> r = scheduleClient.importSchedule(uid, file, firstWeekMonday);
         if (r != null && r.getCode() == 200) {
             appUserService.markScheduleImported(uid);
+            if (firstWeekMonday != null && !firstWeekMonday.isBlank()) {
+                appUserService.saveFirstWeekMonday(uid, java.time.LocalDate.parse(firstWeekMonday));
+            }
         }
         return r;
     }

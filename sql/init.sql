@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS app_users (
     username VARCHAR(64) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
     schedule_imported TINYINT(1) NOT NULL DEFAULT 0,
+    first_week_monday DATE DEFAULT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uk_username (username)
 );
@@ -86,6 +87,9 @@ CREATE TABLE IF NOT EXISTS class_schedule (
     end_time TIME,
     location VARCHAR(200),
     semester VARCHAR(50),
+    week_start INT DEFAULT NULL,
+    week_end INT DEFAULT NULL,
+    week_type VARCHAR(10) DEFAULT NULL,
     INDEX idx_user_id (user_id)
 );
 

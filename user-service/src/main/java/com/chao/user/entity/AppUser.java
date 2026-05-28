@@ -15,5 +15,6 @@ public class AppUser {
     private String username;
     private String passwordHash;
     private Boolean scheduleImported;
+    private java.time.LocalDate firstWeekMonday;
     private LocalDateTime createdAt;
 }

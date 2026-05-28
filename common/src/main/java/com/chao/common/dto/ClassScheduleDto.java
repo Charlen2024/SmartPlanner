@@ -14,5 +14,8 @@ public class ClassScheduleDto {
     private LocalTime endTime;
     private String location;
     private String semester;
+    private Integer weekStart;
+    private Integer weekEnd;
+    private String weekType;
 }
 
