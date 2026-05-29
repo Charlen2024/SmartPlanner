@@ -109,9 +109,11 @@ public class ScheduleServiceCsvImportTest {
         ));
 
         List<ScheduleClient.TimeSlot> freeSlots = scheduleService.calculateFreeTime(1L, monday.toString());
-        Assertions.assertEquals(1, freeSlots.size());
+        Assertions.assertEquals(2, freeSlots.size());
         Assertions.assertEquals(LocalDateTime.of(monday, LocalTime.of(10, 0)), freeSlots.get(0).getStart());
-        Assertions.assertEquals(LocalDateTime.of(monday, LocalTime.of(22, 0)), freeSlots.get(0).getEnd());
+        Assertions.assertEquals(LocalDateTime.of(monday, LocalTime.of(12, 0)), freeSlots.get(0).getEnd());
+        Assertions.assertEquals(LocalDateTime.of(monday, LocalTime.of(13, 0)), freeSlots.get(1).getStart());
+        Assertions.assertEquals(LocalDateTime.of(monday, LocalTime.of(22, 0)), freeSlots.get(1).getEnd());
     }
 
     @Test

@@ -425,6 +425,8 @@ public class ScheduleService {
             if (text.startsWith("\uFEFF")) {
                 text = text.substring(1);
             }
+            // \u89C4\u8303\u5316\u5168\u89D2\u9017\u53F7\uFF08\u4E2D\u6587\u8F93\u5165\u6CD5\u5E38\u89C1\u95EE\u9898\uFF09
+            text = text.replace('\uFF0C', ',');
             String[] lines = text.split("\\r?\\n");
             if (lines.length <= 1) {
                 throw new IllegalArgumentException("CSV 内容为空");
@@ -632,7 +634,7 @@ public class ScheduleService {
      */
     private WeekRange parseWeekRange(String raw) {
         if (raw == null || raw.isBlank()) return null;
-        String s = raw.trim();
+        String s = normalizeFullWidth(raw).trim();
         boolean even = false;
         boolean odd = false;
         if (s.contains("双")) { even = true; s = s.replace("双", ""); }
@@ -705,11 +707,32 @@ public class ScheduleService {
         return null;
     }
 
+    /** Normalize full-width ASCII variants commonly found in Chinese documents. */
+    private String normalizeFullWidth(String s) {
+        if (s == null) return null;
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c >= '０' && c <= '９') {
+                sb.append((char) ('0' + (c - '０')));
+            } else if (c == '－') {
+                sb.append('-');
+            } else if (c == '，') {
+                sb.append(',');
+            } else if (c == '：') {
+                sb.append(':');
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
     private Integer parseDayOfWeek(String s) {
         if (s == null) {
             return null;
         }
-        String v = s.trim();
+        String v = normalizeFullWidth(s).trim();
         if (v.isEmpty()) {
             return null;
         }
@@ -762,14 +785,14 @@ public class ScheduleService {
         if (fallback == null) {
             return null;
         }
-        String s = fallback.trim();
+        String s = normalizeFullWidth(fallback).trim();
         if (s.isEmpty()) {
             return null;
         }
         if (s.contains("-")) {
             s = s.split("-")[0].trim();
         }
-        if (s.length() == 4 && s.charAt(1) == ':' ) {
+        if (s.length() == 4 && s.charAt(1) == ':') {
             s = "0" + s;
         }
         if (s.length() == 5) {

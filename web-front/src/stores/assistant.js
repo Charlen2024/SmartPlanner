@@ -20,7 +20,11 @@ function sanitizeHtml(html) {
 function renderAiHtml(text) {
   if (!text) return ''
   try {
-    return sanitizeHtml(marked.parse(text))
+    // 修复 LLM 输出的 markdown 格式问题：##Heading → ## Heading，-item → - item
+    let fixed = text
+      .replace(/^(#{1,6})([^\s#])/gm, '$1 $2')
+      .replace(/^(\s*)([-*])([^\s])/gm, '$1$2 $3')
+    return sanitizeHtml(marked.parse(fixed))
   } catch {
     return text
   }
@@ -83,27 +87,55 @@ function stripNavigateDirective(text) {
 
 function dedupParagraphs(text) {
   if (!text) return text
-  const paras = text.split(/\n\n+/)
+
+  // 规范化：合并 3 个以上的连续换行为 2 个，避免 LLM 多余空行导致段落边界不一致
+  const normalized = text.replace(/\n{3,}/g, '\n\n')
+  const paras = normalized.split(/\n\n+/)
   const seen = new Set()
   const seenLines = new Set()
+  const seenLongLines = []
+  const seenSections = new Set()
   const result = []
+
   for (const p of paras) {
     const key = p.replace(/\s+/g, ' ').trim()
     if (key.length < 3) { result.push(p); continue }
     if (seen.has(key)) continue
 
-    // 拆成单行，检查当前段落是否大部分行已在之前的段落中出现过
     const lines = p.split(/\n/).map(l => l.replace(/\s+/g, ' ').trim()).filter(l => l.length > 3)
-    if (lines.length >= 3) {
-      const dupCount = lines.filter(l => seenLines.has(l)).length
-      // 超过 60% 的行重复 → 整段跳过（LLM 重复输出）
-      if (dupCount > lines.length * 0.6) continue
+
+    // 检测重复的 markdown 标题段（## 本周打卡 / ## 随笔回顾 / ## 小结 等）
+    const headingMatch = key.match(/^##\s+(.+)/)
+    if (headingMatch) {
+      const h = headingMatch[1]
+      if (seenSections.has(h)) continue
+      seenSections.add(h)
     }
 
+    let isDup = false
+
+    if (lines.length >= 3) {
+      const dupCount = lines.filter(l => seenLines.has(l)).length
+      if (dupCount > lines.length * 0.6) isDup = true
+    } else if (lines.length === 1 && lines[0].length > 50) {
+      // 长单行段落：模糊匹配已见过的长行，防止 LLM 用不同换行位置重复输出同一内容
+      for (const prev of seenLongLines) {
+        const shorter = prev.length < lines[0].length ? prev : lines[0]
+        const longer = prev.length < lines[0].length ? lines[0] : prev
+        if (longer.includes(shorter)) { isDup = true; break }
+      }
+    }
+
+    if (isDup) continue
+
     seen.add(key)
-    for (const l of lines) seenLines.add(l)
+    for (const l of lines) {
+      seenLines.add(l)
+      if (l.length > 50) seenLongLines.push(l)
+    }
     result.push(p)
   }
+
   return result.join('\n\n')
 }
 

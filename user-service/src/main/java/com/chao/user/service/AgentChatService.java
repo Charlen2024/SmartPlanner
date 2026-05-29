@@ -21,6 +21,7 @@ import com.alibaba.cloud.ai.graph.agent.hook.messages.MessagesModelHook;
 import com.alibaba.cloud.ai.graph.agent.hook.messages.UpdatePolicy;
 import com.alibaba.cloud.ai.graph.checkpoint.savers.redis.RedisSaver;
 import com.alibaba.cloud.ai.graph.serializer.std.SpringAIStateSerializer;
+import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import lombok.RequiredArgsConstructor;
 import org.redisson.api.RBucket;
@@ -56,7 +57,7 @@ import java.util.Objects;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
-import java.lang.reflect.Method;
+
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -313,35 +314,24 @@ public class AgentChatService {
     private String extractStreamText(Object out) {
         if (out == null) return "";
         if (out instanceof StreamingOutput<?> so) {
-            String chunk = so.chunk();
-            return chunk != null ? chunk : "";
+            OutputType type = so.getOutputType();
+            // 只输出 LLM 流式回答的增量文本，过滤掉：
+            // - AGENT_MODEL_FINISHED（包含完整回答，会与流式块重复）
+            // - AGENT_TOOL_* / AGENT_HOOK_* / GRAPH_NODE_*（内部事件，不应暴露给用户）
+            if (type == OutputType.AGENT_MODEL_STREAMING) {
+                String chunk = so.chunk();
+                return chunk != null ? chunk : "";
+            }
+            // 兼容旧版构造器未设置 OutputType 的情况：仅当 chunk() 非空时放行
+            // （有 tool calls 的 AssistantMessage 其 chunk() 返回 null，天然被过滤）
+            if (type == null) {
+                String chunk = so.chunk();
+                return chunk != null ? chunk : "";
+            }
+            return "";
         }
-        if (out instanceof CharSequence cs) {
-            return cs.toString();
-        }
-
-        String s = invokeNoArgStringMethod(out, "chunk");
-        if (s != null) return s;
-        s = invokeNoArgStringMethod(out, "getText");
-        if (s != null) return s;
-        s = invokeNoArgStringMethod(out, "text");
-        if (s != null) return s;
-        s = invokeNoArgStringMethod(out, "getContent");
-        if (s != null) return s;
-        s = invokeNoArgStringMethod(out, "content");
-        if (s != null) return s;
+        // 非 StreamingOutput 事件不提取文本（避免 CharSequence/Message 等内部对象泄露）
         return "";
-    }
-
-    private String invokeNoArgStringMethod(Object target, String methodName) {
-        try {
-            Method m = target.getClass().getMethod(methodName);
-            if (m.getReturnType() != String.class) return null;
-            Object v = m.invoke(target);
-            return v != null ? (String) v : "";
-        } catch (Throwable ignored) {
-            return null;
-        }
     }
 
     private ReactAgent ensureAgent() {

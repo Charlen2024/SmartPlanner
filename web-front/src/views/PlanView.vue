@@ -196,11 +196,24 @@ async function importSchedule() {
   importResult.value = null
   try {
     const fd = new FormData()
-    fd.append('file', Array.isArray(scheduleFile.value) ? scheduleFile.value[0] : scheduleFile.value)
+    const file = scheduleFile.value?.[0] ?? scheduleFile.value
+    fd.append('file', file)
     if (firstWeekMonday.value) fd.append('firstWeekMonday', firstWeekMonday.value)
     const res = await api.post('/user/schedule/import', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
     importResult.value = res?.data?.data ?? null
-    notify.success(`课表导入成功：${importResult.value?.inserted ?? 0} 条`)
+    const code = res?.data?.code
+    if (code !== 200) {
+      error.value = res?.data?.message || '课表导入失败'
+      return
+    }
+    const inserted = importResult.value?.inserted ?? 0
+    if (inserted === 0) {
+      const warnings = importResult.value?.warnings
+      const detail = warnings?.length ? `（${warnings.join('；')}）` : ''
+      notify.error(`课表未导入任何课程${detail}`, 8000)
+      return
+    }
+    notify.success(`课表导入成功：${inserted} 条`)
     try {
       await auth.fetchMe()
     } catch (e) {}
