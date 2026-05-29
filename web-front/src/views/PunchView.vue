@@ -19,6 +19,7 @@ const startedAt = ref(null)
 const pausedAt = ref(null)
 const timer = ref(null)
 const completing = ref(false)
+const submitting = ref(false)
 
 const activeSchedule = computed(() => (schedules.value ?? []).find((s) => Number(s.id) === Number(activeScheduleId.value)) || null)
 const progressPercent = computed(() => {
@@ -167,10 +168,12 @@ async function completeNow() {
   completing.value = true
   const s = activeSchedule.value
   try {
-    loading.value = true
+    submitting.value = true
     error.value = ''
-    await api.patch(`/user/schedule/task-schedules/${s.id}/status`, null, { params: { status: 1 } })
-    await api.patch(`/user/tasks/${s.taskId}/status`, null, { params: { status: 1 } })
+    const [r1, r2] = await Promise.all([
+      api.patch(`/user/schedule/task-schedules/${s.id}/status`, null, { params: { status: 1 } }),
+      api.patch(`/user/tasks/${s.taskId}/status`, null, { params: { status: 1 } }),
+    ])
     const durationSeconds = totalSec.value ? Math.max(0, totalSec.value - remainingSec.value) : null
     const startMs = startedAt.value || (durationSeconds != null ? Date.now() - durationSeconds * 1000 : null)
     const endMs = Date.now()
@@ -191,7 +194,7 @@ async function completeNow() {
   } catch (e) {
     error.value = e?.response?.data?.message || e?.message || '完成失败'
   } finally {
-    loading.value = false
+    submitting.value = false
     completing.value = false
   }
 }
@@ -245,7 +248,7 @@ onUnmounted(clearTimer)
                   <v-chip size="x-small" class="mr-2" variant="tonal" :color="Number(s.status) === 1 ? 'success' : undefined">
                     {{ Number(s.status) === 1 ? '已完成' : '未完成' }}
                   </v-chip>
-                  <v-btn v-if="Number(s.status) !== 1" size="small" variant="tonal" :loading="loading" @click="startSchedule(s)">
+                  <v-btn v-if="Number(s.status) !== 1" size="small" variant="tonal" @click="startSchedule(s)">
                     计时
                   </v-btn>
                 </template>
@@ -300,7 +303,7 @@ onUnmounted(clearTimer)
                 <v-btn variant="tonal" class="mr-2" :disabled="!activeSchedule" @click="togglePause">
                   {{ running ? '暂停' : '继续' }}
                 </v-btn>
-                <v-btn color="success" variant="tonal" :loading="loading" :disabled="!activeSchedule" @click="completeNow">
+                <v-btn color="success" variant="tonal" :loading="submitting" :disabled="!activeSchedule" @click="completeNow">
                   完成并打卡
                 </v-btn>
               </div>

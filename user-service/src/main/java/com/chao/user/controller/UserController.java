@@ -1,5 +1,6 @@
 package com.chao.user.controller;
 
+import lombok.extern.slf4j.Slf4j;
 import com.chao.common.client.GoalClient;
 import com.chao.common.client.PunchClient;
 import com.chao.common.client.ResourceClient;
@@ -16,9 +17,14 @@ import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.cloud.client.loadbalancer.LoadBalanced;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.*;
+import org.springframework.http.client.MultipartBodyBuilder;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.RestTemplate;
 import org.springframework.web.multipart.MultipartFile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -34,6 +40,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/user")
 @RequiredArgsConstructor
@@ -48,6 +55,7 @@ public class UserController {
     private final RedissonClient redissonClient;
     private final ObjectProvider<VectorStore> vectorStoreProvider;
     private final ObjectMapper objectMapper;
+    private final RestTemplate restTemplate;
 
     private static final String TASK_RESOURCES_KEY_PREFIX = "sp:task:resources:v2:";
     private static final String COURSES_INDEXED_KEY = "sp:rag:indexed:courses";
@@ -791,7 +799,29 @@ public class UserController {
             @RequestParam MultipartFile file,
             @RequestParam(required = false) String firstWeekMonday) {
         Long uid = resolveUserId(jwt, headerUserId, userId);
-        Result<ScheduleImportResultDto> r = scheduleClient.importSchedule(uid, file, firstWeekMonday);
+
+        Result<ScheduleImportResultDto> r;
+        try {
+            // Build multipart request using RestTemplate (bypasses Feign multipart encoding issues)
+            MultipartBodyBuilder builder = new MultipartBodyBuilder();
+            builder.part("userId", uid);
+            builder.part("file", file.getResource());
+            if (firstWeekMonday != null && !firstWeekMonday.isBlank()) {
+                builder.part("firstWeekMonday", firstWeekMonday);
+            }
+
+            ParameterizedTypeReference<Result<ScheduleImportResultDto>> typeRef =
+                    new ParameterizedTypeReference<>() {};
+            ResponseEntity<Result<ScheduleImportResultDto>> entity = restTemplate.exchange(
+                    "http://schedule-engine/api/schedule/import",
+                    HttpMethod.POST,
+                    new HttpEntity<>(builder.build()),
+                    typeRef);
+            r = entity.getBody();
+        } catch (Exception e) {
+            log.error("课表导入请求失败", e);
+            return Result.fail(500, "课表导入失败，请稍后重试");
+        }
         if (r != null && r.getCode() == 200) {
             appUserService.markScheduleImported(uid);
             if (firstWeekMonday != null) {

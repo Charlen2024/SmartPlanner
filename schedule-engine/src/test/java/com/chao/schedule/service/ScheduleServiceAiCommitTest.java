@@ -146,7 +146,7 @@ public class ScheduleServiceAiCommitTest {
                           "candidateSchedules": [
                             {"taskId": 101, "startTime": "2026-04-13T10:00:00", "endTime": "2026-04-13T10:45:00"},
                             {"taskId": 102, "startTime": "2026-04-13T10:55:00", "endTime": "2026-04-13T11:40:00"},
-                            {"taskId": 103, "startTime": "2026-04-13T11:50:00", "endTime": "2026-04-13T12:20:00"}
+                            {"taskId": 103, "startTime": "2026-04-13T13:00:00", "endTime": "2026-04-13T13:30:00"}
                           ]
                         }
                         """;
