@@ -28,6 +28,7 @@
   mysql:
     image: docker.m.daocloud.io/library/mysql:8.0
     container_name: mysql
+    restart: unless-stopped
     environment:
       - MYSQL_ROOT_PASSWORD=root
     ports:
@@ -40,6 +41,7 @@
   redis:
     image: docker.m.daocloud.io/redis/redis-stack-server:7.2.0-v19
     container_name: redis
+    restart: unless-stopped
     environment:
       - REDIS_ARGS=--maxmemory 512mb --maxmemory-policy allkeys-lru --protected-mode no
     ports:
@@ -50,6 +52,7 @@
   rabbitmq:
     image: docker.m.daocloud.io/library/rabbitmq:3.12-management
     container_name: rabbitmq
+    restart: unless-stopped
     environment:
       - RABBITMQ_DEFAULT_USER=vibe
       - RABBITMQ_DEFAULT_PASS=vibe123
@@ -62,6 +65,7 @@
   elasticsearch:
     image: docker.m.daocloud.io/library/elasticsearch:8.10.2
     container_name: elasticsearch
+    restart: unless-stopped
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -74,6 +78,7 @@
   seata-server:
     image: docker.m.daocloud.io/seataio/seata-server:1.7.1
     container_name: seata-server
+    restart: unless-stopped
     ports:
       - "8091:8091"
     depends_on:
@@ -266,6 +271,7 @@
       context: .
       dockerfile: web-front/Dockerfile
     container_name: web-front
+    restart: unless-stopped
     ports:
       - "80:80"
     depends_on:
