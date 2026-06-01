@@ -45,3 +45,7 @@ docker-compose.override.yml
 
 # Maven
 *.jar.original
+.m2repo/
+
+# Debug logs
+.dbg/
