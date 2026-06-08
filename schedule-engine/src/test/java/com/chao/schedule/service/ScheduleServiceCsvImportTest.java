@@ -86,6 +86,7 @@ public class ScheduleServiceCsvImportTest {
                 null,
                 null,
                 objectMapper,
+                null,
                 null
         );
 
@@ -169,7 +170,7 @@ public class ScheduleServiceCsvImportTest {
 
         ScheduleService scheduleService = new ScheduleService(
                 classScheduleMapper, taskScheduleMapper, planCandidateMapper,
-                null, null, null, objectMapper, null
+                null, null, null, objectMapper, null, null
         );
 
         String csv = """

@@ -69,4 +69,13 @@ public class ResourceController {
     public Result<ResourceAdviceJobStatusResponse> adviceJobStatus(@RequestParam Long userId, @PathVariable String jobId) {
         return Result.success(resourceAdviceJobService.status(userId, jobId));
     }
+
+    /**
+     * 目标驱动即时爬取：用户提交 Goal 后自动触发该主题的爬虫。
+     */
+    @PostMapping("/crawl")
+    public Result<String> crawlTopic(@RequestParam String topic) {
+        resourceService.crawlTopicAsync(topic);
+        return Result.success("ok");
+    }
 }

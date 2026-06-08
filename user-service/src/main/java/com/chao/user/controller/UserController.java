@@ -10,6 +10,7 @@ import com.chao.user.dto.DashboardDto;
 import com.chao.user.service.UserService;
 import com.chao.user.service.TaskAdviceAiService;
 import com.chao.user.util.JwtUtils;
+import com.chao.user.util.VectorStoreUtils;
 import lombok.RequiredArgsConstructor;
 import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
@@ -604,7 +605,7 @@ public class UserController {
                 if (docs.size() >= limit) break;
             }
             if (!docs.isEmpty()) {
-                addDocsInBatches(vectorStore, docs, 20);
+                VectorStoreUtils.addDocsInBatches(vectorStore, docs, 20);
             }
             if (docs.isEmpty()) {
                 b.set("0");
@@ -616,15 +617,6 @@ public class UserController {
             return true;
         } catch (Exception e) {
             return false;
-        }
-    }
-
-    private void addDocsInBatches(VectorStore vectorStore, List<Document> docs, int batchSize) {
-        if (vectorStore == null || docs == null || docs.isEmpty()) return;
-        int size = Math.max(1, Math.min(batchSize, 25));
-        for (int i = 0; i < docs.size(); i += size) {
-            List<Document> part = docs.subList(i, Math.min(docs.size(), i + size));
-            vectorStore.add(part);
         }
     }
 

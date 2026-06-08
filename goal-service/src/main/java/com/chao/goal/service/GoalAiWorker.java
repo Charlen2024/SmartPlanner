@@ -124,6 +124,12 @@ public class GoalAiWorker {
             } catch (Exception e) {
                 log.warn("资源检索/写入失败: {}", e.getMessage());
             }
+            // 目标驱动即时爬取：为新目标主题抓取 B 站资源
+            try {
+                resourceClient.crawlTopic(goalDescription);
+            } catch (Exception e) {
+                log.warn("即时爬取触发失败: {}", e.getMessage());
+            }
             
             NotificationMessage notif = new NotificationMessage();
             notif.setUserId(userId);

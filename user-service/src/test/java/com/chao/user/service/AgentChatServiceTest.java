@@ -33,6 +33,7 @@ public class AgentChatServiceTest {
     @Test
     void ensureUserRagIndexed_shouldNotIndexCourseDocuments() {
         List<Document> capturedDocs = new ArrayList<>();
+        List<String> deletedFilters = new ArrayList<>();
 
         // --- mock VectorStore ---
         VectorStore vs = (VectorStore) Proxy.newProxyInstance(
@@ -43,6 +44,10 @@ public class AgentChatServiceTest {
                         @SuppressWarnings("unchecked")
                         List<Document> docs = (List<Document>) args[0];
                         capturedDocs.addAll(docs);
+                    }
+                    if ("delete".equals(method.getName()) && args != null && args.length > 0
+                            && args[0] instanceof org.springframework.ai.vectorstore.filter.Filter.Expression expr) {
+                        deletedFilters.add(expr.toString());
                     }
                     return nullDefault(method.getReturnType());
                 }
@@ -165,7 +170,8 @@ public class AgentChatServiceTest {
                 redisson,
                 vsProvider,
                 appUserMapper,
-                objectMapper
+                objectMapper,
+                null  // WeatherClient
         );
 
         service.ensureUserRagIndexed(42L);
@@ -183,6 +189,10 @@ public class AgentChatServiceTest {
         assertTrue(types.contains("task"), "should contain task docs: " + types);
         assertTrue(types.contains("journal"), "should contain journal docs: " + types);
         assertTrue(types.contains("punch"), "should contain punch docs: " + types);
+
+        // Assert: delete was called to clean zombie docs before re-indexing
+        assertFalse(deletedFilters.isEmpty(), "should call delete to clean old docs before indexing");
+        assertTrue(deletedFilters.get(0).contains("userId"), "delete filter should reference userId: " + deletedFilters.get(0));
     }
 
     @Test
@@ -258,7 +268,8 @@ public class AgentChatServiceTest {
                 redisson,
                 vsProvider,
                 appUserMapper,
-                objectMapper
+                objectMapper,
+                null  // WeatherClient
         );
 
         // Should return early without error

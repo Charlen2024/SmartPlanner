@@ -593,7 +593,7 @@ function fmtHm(dt) {
                     class="free-bar-block"
                     :style="f.style"
                   >
-                    {{ f.startLabel }} - {{ f.endLabel }}
+                    <span class="free-bar-label">{{ f.startLabel }} - {{ f.endLabel }}</span>
                   </div>
                 </div>
               </div>
@@ -1080,7 +1080,7 @@ function fmtHm(dt) {
   height: 32px;
   background: rgba(0, 0, 0, 0.03);
   border-radius: 6px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .free-bar-block {
@@ -1093,13 +1093,38 @@ function fmtHm(dt) {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
-  font-weight: 500;
+  font-size: 10px;
+  font-weight: 600;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  padding: 0 4px;
+  overflow: visible;
+  padding: 0 2px;
   box-sizing: border-box;
-  min-width: 52px;
+  min-width: 0;
+  z-index: 1;
+  color: transparent;
+}
+.free-bar-block:hover {
+  z-index: 2;
+}
+
+.free-bar-label {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(100% + 4px);
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  line-height: 1.4;
+}
+.free-bar-block:hover .free-bar-label {
+  opacity: 1;
 }
 </style>

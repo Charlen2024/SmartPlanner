@@ -163,6 +163,7 @@ public class ScheduleServiceAiCommitTest {
                 goalClient,
                 openAiCompatClient,
                 objectMapper,
+                null,
                 planCandidateWorker
         );
 

@@ -51,6 +51,9 @@ public interface ResourceClient {
             @RequestParam("userId") Long userId,
             @PathVariable("jobId") String jobId);
 
+    @PostMapping("/api/resources/crawl")
+    Result<String> crawlTopic(@RequestParam("topic") String topic);
+
     @Data
     class CourseResource {
         private String title;

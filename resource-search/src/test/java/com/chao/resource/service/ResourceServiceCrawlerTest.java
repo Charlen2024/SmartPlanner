@@ -91,8 +91,10 @@ public class ResourceServiceCrawlerTest {
                         ElasticsearchOperations.class,
                         com.chao.common.ai.OpenAiCompatClient.class,
                         ObjectMapper.class,
-                        com.chao.common.client.GoalClient.class);
+                        com.chao.common.client.GoalClient.class,
+                        org.springframework.web.client.RestTemplate.class,
+                        java.util.concurrent.Executor.class);
         ctor.setAccessible(true);
-        return ctor.newInstance(null, null, null, null, objectMapper, null);
+        return ctor.newInstance(null, null, null, null, objectMapper, null, null, null);
     }
 }

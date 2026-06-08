@@ -63,7 +63,7 @@ public class ScheduleServiceFridayFreeTimeTest {
 
         ScheduleService scheduleService = new ScheduleService(
                 classScheduleMapper, taskScheduleMapper, planCandidateMapper,
-                userScheduleConfigMapper, null, null, objectMapper, null
+                userScheduleConfigMapper, null, null, objectMapper, null, null
         );
 
         // Import CSV without firstWeekMonday (so we skip UserScheduleConfig insert/update logic)
@@ -146,7 +146,7 @@ public class ScheduleServiceFridayFreeTimeTest {
 
         ScheduleService scheduleService = new ScheduleService(
                 classScheduleMapper, taskScheduleMapper, planCandidateMapper,
-                userScheduleConfigMapper, null, null, objectMapper, null
+                userScheduleConfigMapper, null, null, objectMapper, null, null
         );
 
         // Full CSV data
@@ -277,7 +277,7 @@ public class ScheduleServiceFridayFreeTimeTest {
 
         ScheduleService scheduleService = new ScheduleService(
                 classScheduleMapper, taskScheduleMapper, planCandidateMapper,
-                userScheduleConfigMapper, null, null, objectMapper, null
+                userScheduleConfigMapper, null, null, objectMapper, null, null
         );
 
         // Import the Friday-specific rows

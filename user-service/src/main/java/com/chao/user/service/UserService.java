@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 @Service
 @RequiredArgsConstructor
@@ -25,32 +26,50 @@ public class UserService {
     private final AppUserService appUserService;
 
     public DashboardDto getDashboard(Long userId, String date, String topic) {
-        DashboardDto dto = new DashboardDto();
-
-        List<GoalDto> goals = goalClient.listGoals(userId).getData();
-        dto.setGoals(goals);
-
-        dto.setGoalProgress(buildGoalProgress(userId, goals));
-
-        dto.setPendingTasks(goalClient.getPendingTasks(userId).getData());
-
         String dateStr = date != null ? date : LocalDate.now().toString();
-        com.chao.user.entity.AppUser user = appUserService.getById(userId);
+
+        // 三类独立调用并行发起
+        CompletableFuture<List<GoalDto>> goalsFut = CompletableFuture.supplyAsync(() ->
+                safe(() -> goalClient.listGoals(userId).getData()));
+        CompletableFuture<List<GoalTaskDto>> pendingFut = CompletableFuture.supplyAsync(() ->
+                safe(() -> goalClient.getPendingTasks(userId).getData()));
+        CompletableFuture<com.chao.user.entity.AppUser> userFut = CompletableFuture.supplyAsync(() ->
+                safe(() -> appUserService.getById(userId)));
+
+        // 依赖 goals 完成
+        List<GoalDto> goals = goalsFut.join();
+        List<GoalProgressDto> progress = buildGoalProgress(userId, goals);
+
+        // 依赖 user 完成 → 再查 freeTimeSlots
+        com.chao.user.entity.AppUser user = userFut.join();
         String fwm = user != null && user.getFirstWeekMonday() != null ? user.getFirstWeekMonday().toString() : null;
-        dto.setFreeTimeSlots(scheduleClient.getFreeTimeSlots(userId, dateStr, fwm).getData());
+        CompletableFuture<?> freeTimeFut = CompletableFuture.supplyAsync(() ->
+                safe(() -> scheduleClient.getFreeTimeSlots(userId, dateStr, fwm).getData()));
 
-        dto.setTaskSchedules(scheduleClient.listTaskSchedules(userId, null, null).getData());
+        // 其余独立调用并行
+        CompletableFuture<?> schedulesFut = CompletableFuture.supplyAsync(() ->
+                safe(() -> scheduleClient.listTaskSchedules(userId, null, null).getData()));
+        CompletableFuture<?> streakFut = CompletableFuture.supplyAsync(() ->
+                safe(() -> punchClient.getStreak(userId).getData()));
+        CompletableFuture<?> classesFut = CompletableFuture.supplyAsync(() ->
+                safe(() -> scheduleClient.listClasses(userId, null, null, null).getData()));
+        CompletableFuture<?> resourcesFut = CompletableFuture.supplyAsync(() -> {
+            if (topic != null && !topic.isBlank()) {
+                return safe(() -> resourceClient.searchOnlineCourses(topic).getData());
+            }
+            return List.of();
+        });
 
-        dto.setStreak(punchClient.getStreak(userId).getData());
-
-        dto.setClasses(scheduleClient.listClasses(userId, null, null, null).getData());
-
-        if (topic != null && !topic.isBlank()) {
-            dto.setResources(resourceClient.searchOnlineCourses(topic).getData());
-        } else {
-            dto.setResources(java.util.List.of());
-        }
-
+        // 组装
+        DashboardDto dto = new DashboardDto();
+        dto.setGoals(goals);
+        dto.setGoalProgress(progress);
+        dto.setPendingTasks(safeJoin(pendingFut));
+        dto.setFreeTimeSlots(safeJoin(freeTimeFut));
+        dto.setTaskSchedules(safeJoin(schedulesFut));
+        dto.setStreak(safeJoin(streakFut));
+        dto.setClasses(safeJoin(classesFut));
+        dto.setResources(safeJoin(resourcesFut));
         return dto;
     }
 
@@ -63,7 +82,7 @@ public class UserService {
             if (g == null || g.getId() == null) {
                 continue;
             }
-            List<GoalTaskDto> tasks = goalClient.listTasks(g.getId(), userId).getData();
+            List<GoalTaskDto> tasks = safe(() -> goalClient.listTasks(g.getId(), userId).getData());
             int total = tasks != null ? tasks.size() : 0;
             int done = 0;
             if (tasks != null) {
@@ -82,5 +101,27 @@ public class UserService {
             list.add(p);
         }
         return list;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T safeJoin(CompletableFuture<?> fut) {
+        try {
+            return (T) fut.join();
+        } catch (Exception e) {
+            return (T) List.of();
+        }
+    }
+
+    @FunctionalInterface
+    private interface SafeSupplier<T> {
+        T get() throws Exception;
+    }
+
+    private static <T> T safe(SafeSupplier<T> supplier) {
+        try {
+            return supplier.get();
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

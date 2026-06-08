@@ -16,13 +16,18 @@ import org.springframework.data.elasticsearch.client.elc.NativeQuery;
 import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
 import org.springframework.data.elasticsearch.core.SearchHit;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +36,7 @@ import java.util.Set;
 import java.util.LinkedHashSet;
 import java.util.HashSet;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.springframework.scheduling.annotation.Scheduled;
 import com.chao.common.client.GoalClient;
@@ -53,7 +59,18 @@ public class ResourceService {
     private final OpenAiCompatClient openAiCompatClient;
     private final ObjectMapper objectMapper;
     private final GoalClient goalClient;
+    private final RestTemplate externalRestTemplate;
+    private final Executor aiTaskExecutor;
     private final AtomicBoolean crawlerRunning = new AtomicBoolean(false);
+    private volatile boolean crawlerPaused = false;
+
+    // --- crawler statistics ---
+    private volatile long lastRunTime;
+    private volatile int lastRunTopicsCount;
+    private volatile int lastRunNewCount;
+    private volatile long totalCrawled;
+    private volatile int consecutiveFailures;
+    private volatile int consecutiveZeroNew;
 
     @Value("${smartplanner.crawler.bilibili.enabled:true}")
     private boolean bilibiliCrawlerEnabled;
@@ -63,6 +80,8 @@ public class ResourceService {
     private long bilibiliCrawlerIntervalMs;
     @Value("${smartplanner.crawler.bilibili.per-topic-limit:3}")
     private int bilibiliCrawlerPerTopicLimit;
+    @Value("${smartplanner.crawler.bilibili.topic-delay-ms:800}")
+    private long bilibiliCrawlerTopicDelayMs;
 
     @Value("${smartplanner.ai.rag-timeout-seconds:45}")
     private int ragTimeoutSeconds;
@@ -76,15 +95,36 @@ public class ResourceService {
     private static final Pattern BILIBILI_BV = Pattern.compile("(?i)/video/(BV[0-9A-Za-z]+)");
     private static final Pattern DIGITS_ONLY = Pattern.compile("^\\d+$");
 
+    // --- crawler getters for actuator endpoint ---
+    public boolean isCrawlerRunning() { return crawlerRunning.get(); }
+    public boolean isCrawlerPaused() { return crawlerPaused; }
+    public long getLastRunTime() { return lastRunTime; }
+    public int getLastRunTopicsCount() { return lastRunTopicsCount; }
+    public int getLastRunNewCount() { return lastRunNewCount; }
+    public long getTotalCrawled() { return totalCrawled; }
+    public int getConsecutiveFailures() { return consecutiveFailures; }
+    public int getConsecutiveZeroNew() { return consecutiveZeroNew; }
+    public boolean isBilibiliCrawlerEnabled() { return bilibiliCrawlerEnabled; }
+    public long getBilibiliCrawlerIntervalMs() { return bilibiliCrawlerIntervalMs; }
+    public long getBilibiliCrawlerTopicDelayMs() { return bilibiliCrawlerTopicDelayMs; }
+    public int getBilibiliCrawlerPerTopicLimit() { return bilibiliCrawlerPerTopicLimit; }
+    public void pauseCrawler() { this.crawlerPaused = true; }
+    public void resumeCrawler() { this.crawlerPaused = false; }
+
     @jakarta.annotation.PostConstruct
     public void initCrawl() {
-        new Thread(() -> {
+        Runnable task = () -> {
             try {
                 Thread.sleep(3000);
                 scheduledBilibiliCrawl();
             } catch (Exception ignored) {
             }
-        }, "crawler-startup").start();
+        };
+        if (aiTaskExecutor != null) {
+            CompletableFuture.runAsync(task, aiTaskExecutor);
+        } else {
+            CompletableFuture.runAsync(task);
+        }
     }
 
     public CourseResource createResource(String topic, String title, String platform, String url, String summary) {
@@ -1374,7 +1414,7 @@ public class ResourceService {
     }
     @Scheduled(initialDelayString = "${smartplanner.crawler.bilibili.initial-delay-ms:120000}", fixedDelayString = "${smartplanner.crawler.bilibili.interval-ms:21600000}")
     public void scheduledBilibiliCrawl() {
-        if (!bilibiliCrawlerEnabled) return;
+        if (!bilibiliCrawlerEnabled || crawlerPaused) return;
         if (!crawlerRunning.compareAndSet(false, true)) return;
         try {
             Set<String> topics = new LinkedHashSet<>();
@@ -1413,10 +1453,18 @@ public class ResourceService {
                     if (!trimmed.isEmpty()) topics.add(trimmed);
                 }
             }
-            if (topics.isEmpty()) return;
+            if (topics.isEmpty()) {
+                lastRunTime = System.currentTimeMillis();
+                lastRunTopicsCount = 0;
+                lastRunNewCount = 0;
+                return;
+            }
 
             log.info("Bilibili crawler started: {} topics, limit {} per topic", topics.size(), bilibiliCrawlerPerTopicLimit);
+            lastRunTopicsCount = topics.size();
             int totalNew = 0;
+            int failedTopics = 0;
+            int i = 0;
             for (String topic : topics) {
                 try {
                     List<ResourceClient.CourseResource> candidates = fetchBilibiliCandidates(topic, topic, bilibiliCrawlerPerTopicLimit);
@@ -1424,12 +1472,71 @@ public class ResourceService {
                         if (saveIfNew(topic, c)) totalNew++;
                     }
                 } catch (Exception e) {
+                    failedTopics++;
                     log.warn("Crawl failed for topic {}: {}", topic, e.getMessage());
                 }
+                // Rate limiting between topics
+                if (++i < topics.size() && bilibiliCrawlerTopicDelayMs > 0) {
+                    try { Thread.sleep(bilibiliCrawlerTopicDelayMs); } catch (InterruptedException ignored) {}
+                }
+            }
+            lastRunTime = System.currentTimeMillis();
+            lastRunNewCount = totalNew;
+            totalCrawled += totalNew;
+            // Per-topic failures that result in zero new = real failure, not just "nothing new"
+            boolean allTopicsFailed = (topics.size() > 0 && failedTopics == topics.size());
+            if (totalNew > 0) {
+                consecutiveZeroNew = 0;
+                consecutiveFailures = 0;
+            } else if (allTopicsFailed || (failedTopics > 0 && totalNew == 0)) {
+                consecutiveFailures++;
+                consecutiveZeroNew = 0;
+            } else {
+                consecutiveZeroNew++;
+                consecutiveFailures = 0;
             }
             log.info("Bilibili crawler finished: {} new resources saved", totalNew);
+        } catch (Exception e) {
+            consecutiveFailures++;
+            lastRunTime = System.currentTimeMillis();
+            lastRunNewCount = 0;
+            log.error("Bilibili crawler failed", e);
         } finally {
             crawlerRunning.set(false);
+        }
+    }
+
+    /**
+     * 异步爬取指定主题（目标驱动即时爬取），不等待结果。
+     */
+    public void crawlTopicAsync(String topic) {
+        if (topic == null || topic.isBlank()) return;
+        if (!bilibiliCrawlerEnabled) return;
+        Runnable task = () -> {
+            if (!crawlerRunning.compareAndSet(false, true)) return;
+            try {
+                List<ResourceClient.CourseResource> candidates = fetchBilibiliCandidates(topic, topic, bilibiliCrawlerPerTopicLimit);
+                int saved = 0;
+                for (ResourceClient.CourseResource c : candidates) {
+                    if (saveIfNew(topic, c)) saved++;
+                }
+                totalCrawled += saved;
+                if (saved > 0) {
+                    consecutiveZeroNew = 0;
+                    consecutiveFailures = 0;
+                }
+                log.info("Goal-driven crawl for '{}': {} new resources", topic, saved);
+            } catch (Exception e) {
+                consecutiveFailures++;
+                log.warn("Goal-driven crawl failed for '{}': {}", topic, e.getMessage());
+            } finally {
+                crawlerRunning.set(false);
+            }
+        };
+        if (aiTaskExecutor != null) {
+            CompletableFuture.runAsync(task, aiTaskExecutor);
+        } else {
+            CompletableFuture.runAsync(task);
         }
     }
 
@@ -1468,23 +1575,21 @@ public class ResourceService {
 
     private String httpGetTextWithUA(String url, String userAgent, String referer, String origin) {
         int maxRetries = 2;
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("User-Agent", userAgent);
+        headers.set("Referer", referer);
+        if (origin != null) headers.set("Origin", origin);
+        headers.set("Accept", "application/json, text/plain, */*");
+        headers.set("Accept-Language", "zh-CN,zh;q=0.9");
+        HttpEntity<Void> entity = new HttpEntity<>(headers);
+
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
             try {
-                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(10000);
-                conn.setRequestProperty("User-Agent", userAgent);
-                conn.setRequestProperty("Referer", referer);
-                if (origin != null) conn.setRequestProperty("Origin", origin);
-                conn.setRequestProperty("Accept", "application/json, text/plain, */*");
-                conn.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9");
-                conn.setInstanceFollowRedirects(true);
-                int code = conn.getResponseCode();
-                if (code >= 200 && code < 300) {
-                    byte[] bytes = conn.getInputStream().readAllBytes();
-                    return new String(bytes, StandardCharsets.UTF_8);
+                ResponseEntity<String> resp = externalRestTemplate.exchange(url, HttpMethod.GET, entity, String.class);
+                if (resp.getStatusCode().is2xxSuccessful()) {
+                    return resp.getBody();
                 }
-                if (code == 429 || code >= 500) {
+                if (resp.getStatusCodeValue() == 429 || resp.getStatusCode().is5xxServerError()) {
                     if (attempt < maxRetries) {
                         try { Thread.sleep((attempt + 1) * 1000L); } catch (InterruptedException ignored) {}
                         continue;

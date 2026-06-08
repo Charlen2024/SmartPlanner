@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS punch_records (
     evidence_url VARCHAR(500),
     ai_audit_result INT,
     ai_audit_remark VARCHAR(500),
+    task_title VARCHAR(500),
     duration_seconds INT,
     started_at DATETIME,
     ended_at DATETIME,

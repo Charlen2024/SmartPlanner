@@ -336,9 +336,49 @@ Elasticsearch：用于 title/topic/summary 等字段候选检索（容器内 920
 - 开关：`smartplanner.crawler.bilibili.enabled`（默认 true）
 - 种子主题：18 个（Java/Spring Boot/Python/Vue/数据结构/算法/计算机网络/操作系统/数据库/机器学习/前端/Linux/Go/Rust/分布式/微服务/设计模式/计算机组成原理）
 - 动态主题：从已有资源和用户目标中自动扩展
-- 每主题抓取：8 条结果，含 UP主、播放量、时长、简介摘要
+- 每主题抓取：3 条结果（可配 `per-topic-limit`），含 UP主、播放量、时长、简介摘要
+- 主题间延迟：800ms（可配 `topic-delay-ms`），避免被 B 站限流
 - 去重：URL 归一化 + DB 已有判断
+- 统计追踪：lastRunTime / lastRunTopicsCount / lastRunNewCount / totalCrawled / consecutiveFailures / consecutiveZeroNew
 - 实现入口：`ResourceService.scheduledBilibiliCrawl()`
+
+**SBA 爬虫管理（Actuator 端点）**：
+
+通过 Spring Boot Admin 或直接调用 Actuator 接口管理爬虫：
+
+| 操作 | 方法 | 路径 | 说明 |
+|------|------|------|------|
+| 查看状态 | GET | `/actuator/crawler` | 返回 enabled/running/paused/totalCrawled/lastRunTime 等统计 |
+| 手动触发 | POST | `/actuator/crawler` `{"action":"trigger"}` | 立即触发一次爬取（不等待定时器） |
+| 暂停爬虫 | POST | `/actuator/crawler/pause` | 暂停后续定时爬取，不影响正在运行的任务 |
+| 恢复爬虫 | POST | `/actuator/crawler/resume` | 恢复定时爬取 |
+
+**健康指示器**（显示在 SBA 面板 Wallboard）：
+
+| 状态 | 条件 |
+|------|------|
+| 🟢 UP | 正常运行 |
+| 🟡 OUT_OF_SERVICE | 连续 2 次爬取零新增（可能主题已覆盖全面） |
+| 🔴 DOWN | 连续 3 次爬取失败（网络/API 异常） |
+| ⚪ UNKNOWN | 爬虫已禁用 |
+
+**目标驱动的即时爬取**：
+
+用户提交 Goal 后，系统自动触发该主题的 B 站爬虫，无需等待 6 小时定时器：
+
+- 触发链路：提交 Goal → MQ `goal.ai.queue` → `GoalAiWorker` 拆解任务 → Feign `POST /api/resources/crawl` → `crawlTopicAsync()` 异步爬取
+- 每次爬取指定主题 3 条结果，结果即时写入 DB/ES
+- 失败不影响主流程（独立 try-catch + CompletableFuture）
+- 与定时爬虫互斥：`crawlerRunning` AtomicBoolean 防止并发
+
+**健康检查准确性**：
+
+| 场景 | 判定逻辑 | 健康状态 |
+|------|----------|----------|
+| 新增 > 0 | 正常 | 🟢 UP |
+| 新增 = 0，无主题报错 | 可能资源已覆盖 | 🟡 OUT_OF_SERVICE |
+| 新增 = 0，部分/全部主题报错 | 实际失败 | 🔴 DOWN（consecutiveFailures++） |
+| 顶层异常 | 严重失败 | 🔴 DOWN |
 
 ### 8.2 resource-search：排程 × RAG 自动联动
 
@@ -384,14 +424,31 @@ resource-search 直接接口见 [ResourceController.java](file:///c:/Users/%E5%8
 
 ### 8.6 user-service：向量库（RedisStack）与索引策略
 
-user-service 使用 Spring AI 的 `RedisVectorStore`（DashScope embedding）作为向量检索底座，既用于课程资源推荐，也用于 Agent 的”随笔 + 打卡 + 课程”混合检索（searchPersonalData）。
+user-service 使用 Spring AI 的 `RedisVectorStore`（DashScope embedding）作为向量检索底座，存储两类数据：
 
-- 向量库配置：[RedissonConfig.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/user-service/src/main/java/com/chao/user/config/RedissonConfig.java)
-- 课程索引（`ensureCoursesIndexed`）：
-  - 懒初始化：首次向量检索时才从 resource-search 拉取资源列表（最多 800 条），分批写入 RedisStack（每批 20 条，避免 embedding API 单次输入限制）
-  - 刷新周期：索引标记 `sp:rag:indexed:courses` 在 Redis 中 TTL 1 天，过期后下次查询自动重建
-  - 这意味着爬虫新增的资源最长 1 天后就能被向量检索命中
-  - 课程索引统一由 `UserController.ensureCoursesIndexed()` 全局维护，`AgentChatService.ensureUserRagIndexed()` 不再按用户重复嵌入课程（避免同一批课程被反复调用 embedding API）
+**课程索引**（全局共享，`type=course`，无 `userId` 字段）
+
+- 管理方：`UserController.ensureCoursesIndexed()`
+- 懒初始化：首次向量检索时从 resource-search 拉取资源列表（最多 800 条），分批写入（每批 20 条，`VectorStoreUtils.addDocsInBatches`）
+- 刷新周期：Redis 标记 `sp:rag:indexed:courses`，TTL 1 天，过期后下次查询自动重建
+- 向量检索时通过 `filterExpression(type=course)` 命中
+
+**用户索引**（按用户隔离，`type=goal/task/journal/punch`，含 `userId` 字段）
+
+- 管理方：`AgentChatService.ensureUserRagIndexed(userId)`
+- 数据源：用户的目标、待办任务、随笔、打卡记录
+- 触发时机：Agent 调用 `searchPersonalData` 时懒初始化；每日凌晨 3 点全量预索引
+- 去重：Redis 标记 `sp:rag:indexed:u:{userId}`（TTL 3 天）+ 进程内 `ConcurrentHashMap`
+- 索引重建前先调用 `VectorStoreUtils.deleteByUserId(vs, userId)` 清理该用户旧文档，防止已删除数据残留
+
+**Agent 混合检索（searchPersonalData）**
+
+- 过滤条件：`userId == X OR type == course`，确保私人数据按用户隔离，课程资源全局共享
+- 向量检索不足时降级为关键词兜底（`goalClient.listJournals` 字符串匹配 + `resourceClient.searchOnlineCourses`）
+
+**公共工具**
+
+- `VectorStoreUtils`（`user-service/.../util/VectorStoreUtils.java`）：`addDocsInBatches(vs, docs, batchSize)` 分批写入 + `deleteByUserId(vs, userId)` 按 userId 清理
 
 ### 8.7 user-service：任务 → 课程资源推荐（RAG + 缓存 + 兜底）
 
@@ -440,7 +497,7 @@ Agent 基于 Spring AI Alibaba ReactAgent + RedisSaver 实现多轮对话，通�
 
 **检索工具（1 个）**
 
-- searchPersonalData(query, topK) — 混合检索（RedisStack 向量检索 + 关键词兜底），从用户随笔、打卡记录、课程资源中检索最相关内容
+- searchPersonalData(query, topK) — 混合检索（RedisStack 向量检索 + 关键词兜底），用 `userId == X OR type == course` 过滤向量库，确保私人数据隔离的同时保留全局课程资源可检索；不足时降级为关键词匹配 + 在线检索
 
 **Agent 行为约束（防止编造/跑偏）**
 
@@ -841,3 +898,73 @@ curl -N -X POST "http://localhost:8088/api/user/agent/chat/stream" ^
 - 不要把真实的 `AI_DASHSCOPE_API_KEY`、JWT 密钥等敏感信息提交到仓库
 - 生产环境务必替换 compose 中的 `JWT_SECRET`、演示账号密码等默认配置
 - 生产环境建议启用网关 `gateway.auth.api-key` 并完善跨域/限流策略
+
+---
+
+## 15. 性能优化记录（2026-06-08）
+
+### 15.1 统一 HTTP 客户端
+
+**问题**：3 处天气查询（InfoController、NotificationController、AgentChatService）各自用 `HttpURLConnection` 发起 HTTP 请求，无连接池、无超时配置，阻塞时可能无限等待。
+
+**修改**：
+- 新增 `WeatherClient`（`common/src/main/java/com/chao/common/util/WeatherClient.java`），统一封装 wttr.in 天气查询，含中英文天气映射
+- 新增 `WeatherData` DTO（`common/src/main/java/com/chao/common/dto/WeatherData.java`），统一天气响应字段
+- 新增 `HttpClientConfig`（`common/src/main/java/com/chao/common/config/HttpClientConfig.java`），提供 `externalRestTemplate` Bean（连接超时 5s，读超时 15s）
+- `ResourceService.httpGetTextWithUA()` 改用 `RestTemplate.exchange()` 替代 `HttpURLConnection`
+
+### 15.2 修复 @Async 自调用
+
+**问题**：`ScheduleService.smartScheduleAsync()` 标注 `@Async` 但通过 `this.smartScheduleAsync()` 自调用，Spring AOP 代理不拦截内部调用，导致异步注解失效，排程任务阻塞调用线程。
+
+**修改**：改用 `CompletableFuture.runAsync(() -> smartSchedule(userId))`，确保异步执行。（`schedule-engine/.../service/ScheduleService.java`）
+
+### 15.3 消除 ThreadLocal 内存泄漏
+
+**问题**：`AgentChatService` 使用 `ThreadLocal<Long>` 存储当前 userId，但 Spring Boot 默认使用线程池处理请求，ThreadLocal 未及时清理会导致后续请求读到错误 userId、且无法被 GC。
+
+**修改**：移除 `ThreadLocal`，改为方法参数显式传递 userId。（`user-service/.../service/AgentChatService.java`）
+
+### 15.5 重构 Docker 构建
+
+**问题**：7 个 Java 服务各有独立 Dockerfile（共 ~196 行），内容 95% 相同（仅服务名、端口、Maven/JVM 参数不同），维护成本高。
+
+**修改**：
+- 7 个 `{service}/Dockerfile` 合并为根目录 1 个参数化 `Dockerfile`（36 行），通过 ARG（`SERVICE_NAME`、`SERVICE_PORT`、`MAVEN_OPTS`、`JVM_OPTS`）区分服务
+- `docker-compose.yml` 用 YAML anchors（`*env-nacos`、`*env-rabbitmq`、`*env-ai`）去重环境变量
+
+### 15.6 统一 TaskExecutor Bean 与启动修复
+
+**问题**：`DailyPlanJobService` 和 `ResourceAdviceJobService` 注入 `@Qualifier("applicationTaskExecutor")`，但 `TaskExecutorConfig` 只定义了 `aiTaskExecutor`，导致 Spring 启动失败。
+
+**修改**：
+- `TaskExecutorConfig` 提取 `createExecutor(threadNamePrefix)` 工厂方法，新增 `applicationTaskExecutor` bean（线程前缀 `app-job-`）
+- 两个 Bean 各一行，消除重复代码
+
+### 15.7 Agent 修复——修复 userId 错串
+
+**问题**：`AgentChatService.ensureAgent()` 将 Agent 存为单例 `volatile ReactAgent agent`，`userIdSupplier` 永远返回第一个登录用户的 ID，后续用户调用所有 Tool 都查到别人的数据。
+
+**修改**：改为 `ConcurrentHashMap<Long, ReactAgent> agents`，每个用户独立 Agent 实例。
+
+### 15.8 Agent 修复——LLM 日期幻觉
+
+**问题**：LLM 不知道当前日期，调用 `listClasses` 时传入 `date=2023-10-05`（随机编造），导致课表查询返回错误结果或空。
+
+**修改**：每次 `chat/chatStream` 请求自动在用户消息前注入 `[今天是2026-06-08，星期一]`（`todayPrefix()` 方法），LLM 据此传入正确 date 参数。
+
+### 15.9 Agent 新增——课表查询 Tool
+
+**问题**：Agent 缺少课表查询能力，用户问"今天有什么课"时无法回答。
+
+**修改**：
+- `SmartPlannerTools` 新增 `listClasses(dayOfWeek?, date?, firstWeekMonday?)` Tool，调用 `scheduleClient.listClasses`
+- Tool 返回格式化字符串（`"共3门课：\n1. 课程名 周一 08:00-09:40 地点\n..."`），LLM 直接呈现不解释
+- `ScheduleService.listClassSchedules` 优化：`date` 传入时自动推导 `dayOfWeek`，`firstWeekMonday` 为空时自动从 `UserScheduleConfig` 查询
+- 系统提示词明确区分"排程任务"（`listTodaySchedules`）与"学校课程"（`listClasses`）
+
+### 15.10 修复 punch_records 缺列
+
+**问题**：`PunchRecord` 实体映射 `task_title` 列，但 `init.sql` 建表时未包含此列，导致 punch-service 查询抛出 `Unknown column 'task_title'`。
+
+**修改**：`sql/init.sql` 新增 `task_title VARCHAR(500)` 列。

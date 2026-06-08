@@ -197,6 +197,7 @@ public class GoalService {
         goalMapper.updateById(goal);
     }
 
+    @Transactional
     public void deleteGoal(Long goalId) {
         Goal goal = goalMapper.selectById(goalId);
         Long userId = goal != null ? goal.getUserId() : null;

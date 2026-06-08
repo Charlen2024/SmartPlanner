@@ -7,6 +7,7 @@ export const useNotifyStore = defineStore('notify', {
     ownerUserId: null,
     recentReminderSig: {},
     _recentPushSig: {},
+    _pendingTimeouts: [],
     items: [],
     reminders: [],
     signalSeq: {
@@ -23,10 +24,15 @@ export const useNotifyStore = defineStore('notify', {
       const uid = userId != null ? Number(userId) : null
       const next = Number.isFinite(uid) && uid > 0 ? uid : null
       if (this.ownerUserId && next && this.ownerUserId !== next) {
+        this._clearTimeouts()
         this.$reset()
       }
       this.ownerUserId = next
       this._restoreReminders()
+    },
+    _clearTimeouts() {
+      (this._pendingTimeouts || []).forEach(t => clearTimeout(t))
+      this._pendingTimeouts = []
     },
     push(message, type = 'info', timeout = 4500) {
       const msg = String(message ?? '').trim()
@@ -53,10 +59,12 @@ export const useNotifyStore = defineStore('notify', {
         timeout,
       })
       if (timeout > 0) {
-        setTimeout(() => {
+        const t1 = setTimeout(() => {
           this.close(id)
-          setTimeout(() => this.remove(id), 300)
+          const t2 = setTimeout(() => this.remove(id), 300)
+          this._pendingTimeouts = (this._pendingTimeouts || []).filter(t => t !== t1).concat(t2)
         }, timeout)
+        this._pendingTimeouts = (this._pendingTimeouts || []).concat(t1)
       }
       return id
     },

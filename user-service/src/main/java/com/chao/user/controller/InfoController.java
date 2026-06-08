@@ -2,6 +2,8 @@ package com.chao.user.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.dto.Result;
+import com.chao.common.dto.WeatherData;
+import com.chao.common.util.WeatherClient;
 import lombok.extern.slf4j.Slf4j;
 import com.chao.common.client.PunchClient;
 import com.chao.common.client.ScheduleClient;
@@ -12,7 +14,6 @@ import com.chao.user.dto.UserInsightDto;
 import com.chao.user.dto.UserPortraitDto;
 import com.chao.common.dto.SchedulePreferenceDto;
 import com.chao.user.dto.WeatherDto;
-import com.chao.user.dto.WttrResponse;
 import com.chao.user.util.JwtUtils;
 import com.chao.user.service.UserPortraitAiService;
 import org.redisson.api.RedissonClient;
@@ -26,14 +27,11 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
@@ -41,6 +39,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -52,6 +51,7 @@ public class InfoController {
     private final PunchClient punchClient;
     private final ScheduleClient scheduleClient;
     private final UserPortraitAiService userPortraitAiService;
+    private final WeatherClient weatherClient;
     private final ObjectProvider<VectorStore> vectorStoreProvider;
     private final ObjectProvider<RedissonClient> redissonProvider;
 
@@ -61,37 +61,19 @@ public class InfoController {
             @AuthenticationPrincipal Jwt jwt) {
         String loc = (location != null && !location.isBlank()) ? location.trim() : getUserWeatherLocation(jwt);
         if (loc.isBlank()) loc = "Shenzhen";
+        WeatherData wd = weatherClient.fetch(loc);
         WeatherDto dto = new WeatherDto();
         dto.setDate(LocalDate.now().toString());
         dto.setLocation(loc);
-        try {
-            String encoded = java.net.URLEncoder.encode(loc, java.nio.charset.StandardCharsets.UTF_8);
-            String url = "https://wttr.in/" + encoded + "?format=j1";
-            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-            conn.setConnectTimeout(8000);
-            conn.setReadTimeout(10000);
-            conn.setRequestProperty("User-Agent", "SmartPlanner/1.0");
-            conn.setInstanceFollowRedirects(true);
-            byte[] bytes = conn.getInputStream().readAllBytes();
-            WttrResponse resp = objectMapper.readValue(bytes, WttrResponse.class);
-            if (resp.getCurrentCondition() != null && !resp.getCurrentCondition().isEmpty()) {
-                WttrResponse.CurrentCondition c = resp.getCurrentCondition().get(0);
-                dto.setTemperature(parseDouble(c.getTempC()));
-                dto.setFeelsLike(parseDouble(c.getFeelsLikeC()));
-                dto.setWindspeed(parseDouble(c.getWindspeedKmph()));
-                dto.setHumidity(c.getHumidity());
-                String desc = c.getWeatherDesc() != null && !c.getWeatherDesc().isEmpty()
-                        ? c.getWeatherDesc().get(0).getValue() : null;
-                dto.setSummary(translateWeather(desc));
-            }
-        } catch (Exception e) {
-            log.warn("Weather fetch failed for location={}: {}", loc, e.toString());
-            dto.setSummary("天气服务不可用");
-        }
+        dto.setTemperature(wd.getTemperature());
+        dto.setFeelsLike(wd.getFeelsLike());
+        dto.setWindspeed(wd.getWindspeed());
+        dto.setHumidity(wd.getHumidity());
+        dto.setSummary(wd.getWeatherDescCn() != null ? wd.getWeatherDescCn() : "天气服务不可用");
         return Result.success(dto);
     }
 
-    @org.springframework.web.bind.annotation.PutMapping("/weather-location")
+    @PutMapping("/weather-location")
     public Result<String> saveWeatherLocation(@AuthenticationPrincipal Jwt jwt, @RequestParam String location) {
         Long userId = JwtUtils.getUserId(jwt);
         String loc = (location != null && !location.isBlank()) ? location.trim() : "Shenzhen";
@@ -423,48 +405,4 @@ public class InfoController {
         return dto;
     }
 
-    private Double parseDouble(String s) {
-        if (s == null || s.isBlank()) return null;
-        try { return Double.parseDouble(s.trim()); } catch (NumberFormatException ignored) { return null; }
-    }
-
-    private String translateWeather(String desc) {
-        if (desc == null) return "天气";
-        String d = desc.trim();
-        // Exact matches
-        return switch (d) {
-            case "Sunny" -> "晴";
-            case "Clear" -> "晴";
-            case "Partly Cloudy", "Partly cloudy" -> "多云";
-            case "Cloudy" -> "阴";
-            case "Overcast" -> "阴";
-            case "Mist", "Fog", "Freezing fog" -> "雾";
-            case "Light drizzle", "Patchy light drizzle" -> "毛毛雨";
-            case "Light rain", "Light Rain" -> "小雨";
-            case "Moderate rain", "Moderate or heavy rain shower" -> "中雨";
-            case "Heavy rain", "Torrential rain shower" -> "大雨";
-            case "Patchy rain possible", "Patchy rain nearby" -> "可能有雨";
-            case "Thunderstorm", "Thundery outbreaks possible" -> "雷暴";
-            case "Light snow", "Patchy light snow" -> "小雪";
-            case "Moderate snow" -> "中雪";
-            case "Heavy snow" -> "大雪";
-            case "Blizzard" -> "暴风雪";
-            case "Light sleet" -> "雨夹雪";
-            default -> {
-                String lower = d.toLowerCase();
-                if (lower.contains("sunny") || lower.contains("clear")) yield "晴";
-                if (lower.contains("cloudy")) yield "多云";
-                if (lower.contains("overcast")) yield "阴";
-                if (lower.contains("fog") || lower.contains("mist")) yield "雾";
-                if (lower.contains("drizzle")) yield "毛毛雨";
-                if (lower.contains("heavy rain") || lower.contains("torrential")) yield "大雨";
-                if (lower.contains("rain") || lower.contains("shower")) yield "有雨";
-                if (lower.contains("thunder") || lower.contains("lightning")) yield "雷暴";
-                if (lower.contains("snow") || lower.contains("blizzard")) yield "雪";
-                if (lower.contains("sleet") || lower.contains("ice")) yield "雨夹雪";
-                if (lower.contains("wind")) yield "大风";
-                yield "天气";
-            }
-        };
-    }
 }

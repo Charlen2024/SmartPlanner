@@ -4,6 +4,7 @@ import com.chao.common.client.GoalClient;
 import com.chao.common.client.PunchClient;
 import com.chao.common.client.ResourceClient;
 import com.chao.common.client.ScheduleClient;
+import com.chao.common.dto.ClassScheduleDto;
 import com.chao.common.dto.CourseResourceDto;
 import com.chao.common.dto.GoalDto;
 import com.chao.common.dto.GoalTaskDto;
@@ -11,6 +12,8 @@ import com.chao.common.dto.PunchRecordDto;
 import com.chao.common.dto.Result;
 import com.chao.common.dto.TaskScheduleDto;
 import com.chao.common.dto.UserJournalDto;
+import com.chao.common.dto.WeatherData;
+import com.chao.common.util.WeatherClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
@@ -38,6 +41,8 @@ import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
+import com.chao.user.util.VectorStoreUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.scheduling.annotation.Scheduled;
 import com.chao.user.entity.AppUser;
@@ -58,6 +63,8 @@ import java.time.Duration;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -77,8 +84,9 @@ public class AgentChatService {
     private final ObjectProvider<VectorStore> vectorStoreProvider;
     private final AppUserMapper appUserMapper;
     private final ObjectMapper objectMapper;
-    private final ThreadLocal<Long> currentUserId = new ThreadLocal<>();
-    private volatile ReactAgent agent;
+    private final WeatherClient weatherClient;
+    private final ConcurrentHashMap<Long, Boolean> ragIndexedLocal = new ConcurrentHashMap<>();
+    private final Map<Long, ReactAgent> agents = new java.util.concurrent.ConcurrentHashMap<>();
 
                 private static final String SYSTEM_PROMPT = """
             你是SmartPlanner学习助手。用口语化的中文回复，像朋友聊天一样自然。
@@ -102,7 +110,8 @@ public class AgentChatService {
             2-3句总结，不提建议（除非用户追问）
 
             工具使用规则（重要——每次只能调用1个工具！）：
-            - 问"今天做什么/日程/排程"：只调listTodaySchedules，按时间段列出，每个任务一行，附上可跳转的页面链接
+            - 问"今天做什么/日程/排程/有什么任务"：只调listTodaySchedules，按时间段列出，每个任务一行，附上可跳转的页面链接。注意：排程任务≠学校课程，不要把排程当成课表
+            - 问"课表/学校课程/上课安排/今天有什么课/周几有课/课程表"：调listClasses，必须传 date（今天日期），将工具返回的文本直接呈现给用户
             - 问"本周/最近总结/进度"：第一步调listPunchRecords查打卡，第二步调listJournals查随笔，每次只调一个，数据拿齐后再总结
             - 问"学习建议"：基于实际排程和随笔数据给建议，不要空泛说教
             - 所有查询类问题必须先调工具拿到真实数据再回答，不要给泛泛的"操作步骤"
@@ -113,6 +122,12 @@ public class AgentChatService {
 
             可用页面：/ /plan /goals /journals /schedule /resources /punch /profile /games/2048
             """;
+
+    private static String todayPrefix() {
+        LocalDate d = LocalDate.now(java.time.ZoneId.of("Asia/Shanghai"));
+        String[] wd = {"日", "一", "二", "三", "四", "五", "六"};
+        return "[今天是" + d + "，星期" + wd[d.getDayOfWeek().getValue() % 7] + "] ";
+    }
 
     public String chat(Long userId, String question) {
         String q = question != null ? question.trim() : "";
@@ -127,19 +142,16 @@ public class AgentChatService {
             return buildNavigateAnswer(navPath);
         }
 
-        currentUserId.set(userId);
         try {
-            try {
-                ReactAgent a = ensureAgent();
-                RunnableConfig config = RunnableConfig.builder().threadId("u:" + userId).build();
-                AssistantMessage msg = a.call(q, config);
-                return extractAnswer(msg != null ? msg.getText() : null);
-            } catch (Throwable e) {
-                log.error("agent chat failed, userId={}, q={}", userId, q, e);
-                return "助手暂时不可用，请稍后重试。";
-            }
-        } finally {
-            currentUserId.remove();
+            ReactAgent a = ensureAgent(userId);
+            RunnableConfig config = RunnableConfig.builder().threadId("u:" + userId).build();
+            // 注入当前日期，避免 LLM 猜测错误的日期
+            String prompt = todayPrefix() + q;
+            AssistantMessage msg = a.call(prompt, config);
+            return extractAnswer(msg != null ? msg.getText() : null);
+        } catch (Throwable e) {
+            log.error("agent chat failed, userId={}, q={}", userId, q, e);
+            return "助手暂时不可用，请稍后重试。";
         }
     }
 
@@ -172,13 +184,15 @@ public class AgentChatService {
             return Flux.just(chat(userId, q));
         }
         RunnableConfig config = RunnableConfig.builder().threadId("u:" + userId).build();
+        // 注入当前日期，避免 LLM 猜测错误的日期
+        String prompt = todayPrefix() + q;
         long startNs = System.nanoTime();
         AtomicReference<String> previous = new AtomicReference<>("");
         AtomicReference<String> maxPrevious = new AtomicReference<>("");
 
         Flux<Object> raw;
         try {
-            raw = (Flux<Object>) (Flux<?>) a.stream(q, config)
+            raw = (Flux<Object>) (Flux<?>) a.stream(prompt, config)
                     .contextCapture().doOnNext(out -> {
                         long ms = (System.nanoTime() - startNs) / 1_000_000L;
                         String type = out == null ? "null" : out.getClass().getName();
@@ -334,14 +348,8 @@ public class AgentChatService {
         return "";
     }
 
-    private ReactAgent ensureAgent() {
-        ReactAgent a = this.agent;
-        if (a != null) return a;
-        synchronized (this) {
-            if (this.agent != null) return this.agent;
-            this.agent = buildAgent(() -> currentUserId.get());
-            return this.agent;
-        }
+    private ReactAgent ensureAgent(Long userId) {
+        return agents.computeIfAbsent(userId, uid -> buildAgent(() -> uid));
     }
 
     private ReactAgent buildAgent(Supplier<Long> userIdSupplier) {
@@ -352,7 +360,9 @@ public class AgentChatService {
                 resourceClient,
                 redissonClient,
                 vectorStoreProvider != null ? vectorStoreProvider.getIfAvailable() : null,
-                userIdSupplier
+                userIdSupplier,
+                weatherClient,
+                this::ensureUserRagIndexed
         );
         ToolCallback[] toolCallbacks = MethodToolCallbackProvider.builder()
                 .toolObjects(tools)
@@ -615,6 +625,7 @@ public class AgentChatService {
     /** 每日凌晨3点全量用户索引入库，跳过已索引用户 */
     @Scheduled(cron = "0 0 3 * * ?")
     public void scheduledFullUserRagIndex() {
+        ragIndexedLocal.clear();
         try {
             java.util.List<AppUser> users = appUserMapper.selectList(null);
             if (users == null || users.isEmpty()) return;
@@ -635,13 +646,17 @@ public class AgentChatService {
     /** 公开索引方法：InfoController 等调用 */
     public void ensureUserRagIndexed(Long userId) {
         if (userId == null) return;
+        if (ragIndexedLocal.getOrDefault(userId, false)) return;
         if (redissonClient == null) return;
         VectorStore vs = vectorStoreProvider != null ? vectorStoreProvider.getIfAvailable() : null;
         if (vs == null) return;
         String key = "sp:rag:indexed:u:" + userId;
         RBucket<String> bucket = redissonClient.getBucket(key);
         String v = bucket.get();
-        if ("1".equals(v)) return;
+        if ("1".equals(v)) {
+            ragIndexedLocal.put(userId, true);
+            return;
+        }
 
         java.util.List<Document> docs = new java.util.ArrayList<>();
 
@@ -753,22 +768,15 @@ public class AgentChatService {
         }
 
         if (!docs.isEmpty()) {
-            addDocsInBatches(vs, docs, 20);
+            VectorStoreUtils.deleteByUserId(vs, userId);
+            VectorStoreUtils.addDocsInBatches(vs, docs, 20);
             bucket.set("1");
             bucket.expire(java.time.Duration.ofDays(3));
+            ragIndexedLocal.put(userId, true);
             return;
         }
         bucket.set("0");
         bucket.expire(java.time.Duration.ofHours(6));
-    }
-
-    private void addDocsInBatches(VectorStore vectorStore, java.util.List<Document> docs, int batchSize) {
-        if (vectorStore == null || docs == null || docs.isEmpty()) return;
-        int size = Math.max(1, Math.min(batchSize, 25));
-        for (int i = 0; i < docs.size(); i += size) {
-            java.util.List<Document> part = docs.subList(i, Math.min(docs.size(), i + size));
-            vectorStore.add(part);
-        }
     }
 
     static class SmartPlannerTools {
@@ -779,6 +787,8 @@ public class AgentChatService {
         private final RedissonClient redissonClient;
         private final VectorStore vectorStore;
         private final Supplier<Long> userIdSupplier;
+        private final WeatherClient weatherClient;
+        private final Consumer<Long> indexer;
 
         SmartPlannerTools(
                 GoalClient goalClient,
@@ -787,7 +797,9 @@ public class AgentChatService {
                 ResourceClient resourceClient,
                 RedissonClient redissonClient,
                 VectorStore vectorStore,
-                Supplier<Long> userIdSupplier) {
+                Supplier<Long> userIdSupplier,
+                WeatherClient weatherClient,
+                Consumer<Long> indexer) {
             this.goalClient = goalClient;
             this.scheduleClient = scheduleClient;
             this.punchClient = punchClient;
@@ -795,6 +807,8 @@ public class AgentChatService {
             this.redissonClient = redissonClient;
             this.vectorStore = vectorStore;
             this.userIdSupplier = userIdSupplier;
+            this.weatherClient = weatherClient;
+            this.indexer = indexer;
         }
 
         @Tool(description = "查询当前用户的目标列表。返回 JSON 数组，每个元素包含 id、title、description、deadline、status。")
@@ -922,6 +936,44 @@ public class AgentChatService {
                 if (out.size() >= 50) break;
             }
             return out;
+        }
+
+        @Tool(description = "查询当前用户的课表（课程安排/上课时间）。返回格式化文本，逐条列出课程。问'今天/明天/周X有什么课'时必须传 date 参数。")
+        public String listClasses(
+                @ToolParam(description = "星期几（1=周一，2=周二...），可空", required = false) @Nullable Integer dayOfWeek,
+                @ToolParam(description = "日期（YYYY-MM-DD），问今天/明天/某天时必须传此参数", required = false) @Nullable String date,
+                @ToolParam(description = "第一周周一日期（YYYY-MM-DD），用于计算当前教学周，可空", required = false) @Nullable String firstWeekMonday) {
+            Long userId = requireUserId();
+            // 不传任何过滤条件时默认查今天，避免 LLM 漏传 date 导致返回未过滤的全部课表
+            boolean dateBlank = date == null || date.isBlank();
+            boolean dowNull = dayOfWeek == null;
+            boolean fwmBlank = firstWeekMonday == null || firstWeekMonday.isBlank();
+            if (dateBlank && dowNull && fwmBlank) {
+                date = LocalDate.now(java.time.ZoneId.of("Asia/Shanghai")).toString();
+            }
+            log.info("listClasses called userId={} dayOfWeek={} date={} firstWeekMonday={}", userId, dayOfWeek, date, firstWeekMonday);
+            Result<List<ClassScheduleDto>> res = scheduleClient.listClasses(userId, dayOfWeek, date, firstWeekMonday);
+            List<ClassScheduleDto> list = res != null ? res.getData() : List.of();
+            list = list == null ? List.of() : list;
+            log.info("listClasses result userId={} size={}", userId, list.size());
+            if (list.isEmpty()) {
+                return "课表为空，请先导入课表。";
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("共").append(list.size()).append("门课：\n");
+            String[] wd = {"日", "一", "二", "三", "四", "五", "六"};
+            int idx = 0;
+            for (ClassScheduleDto c : list) {
+                if (c == null || c.getId() == null) continue;
+                idx++;
+                String name = c.getCourseName() != null ? c.getCourseName() : "未命名";
+                String start = c.getStartTime() != null ? c.getStartTime().toString() : "";
+                String end = c.getEndTime() != null ? c.getEndTime().toString() : "";
+                String loc = c.getLocation() != null ? " " + c.getLocation() : "";
+                int dow = c.getDayOfWeek() != null ? c.getDayOfWeek() : 0;
+                sb.append(idx).append(". ").append(name).append(" 周").append(wd[dow % 7]).append(" ").append(start).append("-").append(end).append(loc).append("\n");
+            }
+            return sb.toString().trim();
         }
 
         @Tool(description = "查询当前用户的打卡记录列表。用于查看打卡历史、本周/最近打卡情况、判断任务是否完成。返回 JSON 数组，每个元素包含 id、taskId、taskTitle（任务名）、startedAt、endedAt、createdAt（打卡时间）、durationSeconds、aiAuditResult、aiAuditRemark。不传时间参数时返回最近记录。")
@@ -1086,8 +1138,11 @@ public class AgentChatService {
             List<Map<String, Object>> out = new ArrayList<>();
 
             try {
-                ensureUserRagIndexed(userId);
-                List<Document> docs = vectorStore.similaritySearch(SearchRequest.builder().query(q).topK(k).build());
+                indexer.accept(userId);
+                FilterExpressionBuilder fb = new FilterExpressionBuilder();
+                var filter = fb.or(fb.eq("userId", userId), fb.eq("type", "course")).build();
+                List<Document> docs = vectorStore.similaritySearch(
+                        SearchRequest.builder().query(q).topK(k).filterExpression(filter).build());
                 if (docs != null) {
                     for (Document d : docs) {
                         if (d == null) continue;
@@ -1155,99 +1210,25 @@ public class AgentChatService {
                 @ToolParam(description = "城市名称，中文或英文，例如：深圳、北京、Shanghai。留空则使用用户保存的城市", required = false) String location) {
             String loc = (location != null && !location.isBlank()) ? location.trim() : getUserSavedLocation();
             if (loc.isBlank()) loc = "Shenzhen";
+            WeatherData wd = weatherClient.fetch(loc);
             Map<String, Object> out = new HashMap<>();
             out.put("location", loc);
-            try {
-                String encoded = java.net.URLEncoder.encode(loc, "UTF-8");
-                String url = "https://wttr.in/" + encoded + "?format=j1";
-                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-                conn.setConnectTimeout(8000);
-                conn.setReadTimeout(10000);
-                conn.setRequestProperty("User-Agent", "SmartPlanner/1.0");
-                conn.setInstanceFollowRedirects(true);
-                byte[] bytes = conn.getInputStream().readAllBytes();
-                com.fasterxml.jackson.databind.JsonNode root = new com.fasterxml.jackson.databind.ObjectMapper()
-                        .readTree(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
-                com.fasterxml.jackson.databind.JsonNode cc = root.path("current_condition");
-                if (cc.isArray() && !cc.isEmpty()) {
-                    com.fasterxml.jackson.databind.JsonNode c = cc.get(0);
-                    out.put("temperature_C", parseDoubleNode(c, "temp_C"));
-                    out.put("feelsLike_C", parseDoubleNode(c, "FeelsLikeC"));
-                    out.put("humidity", parseStringNode(c, "humidity"));
-                    out.put("windSpeed_kmph", parseDoubleNode(c, "windspeedKmph"));
-                    out.put("windDirection", parseStringNode(c, "winddir16Point"));
-                    out.put("visibility_km", parseDoubleNode(c, "visibility"));
-                    out.put("pressure", parseDoubleNode(c, "pressure"));
-                    String desc = c.path("weatherDesc").isArray() && !c.path("weatherDesc").isEmpty()
-                            ? c.path("weatherDesc").get(0).path("value").asText() : "";
-                    out.put("weather", translateWeatherDesc(desc));
-                    out.put("weatherEn", desc);
-                }
-                com.fasterxml.jackson.databind.JsonNode weather = root.path("weather");
-                if (weather.isArray() && !weather.isEmpty()) {
-                    com.fasterxml.jackson.databind.JsonNode today = weather.get(0);
-                    out.put("maxTemp_C", parseDoubleNode(today, "maxtempC"));
-                    out.put("minTemp_C", parseDoubleNode(today, "mintempC"));
-                    out.put("sunHour", parseDoubleNode(today, "sunHour"));
-                }
-            } catch (Exception e) {
-                out.put("error", "天气服务暂不可用：" + e.getMessage());
+            out.put("temperature_C", wd.getTemperature());
+            out.put("feelsLike_C", wd.getFeelsLike());
+            out.put("humidity", wd.getHumidity());
+            out.put("windSpeed_kmph", wd.getWindspeed());
+            out.put("windDirection", wd.getWindDirection());
+            out.put("visibility_km", wd.getVisibility());
+            out.put("pressure", wd.getPressure());
+            out.put("weather", wd.getWeatherDescCn());
+            out.put("weatherEn", wd.getWeatherDesc());
+            out.put("maxTemp_C", wd.getMaxTemp());
+            out.put("minTemp_C", wd.getMinTemp());
+            out.put("sunHour", wd.getSunHour());
+            if (wd.getWeatherDescCn() == null && wd.getTemperature() == null) {
+                out.put("error", "天气服务暂不可用");
             }
             return out;
-        }
-
-        private Double parseDoubleNode(com.fasterxml.jackson.databind.JsonNode parent, String field) {
-            com.fasterxml.jackson.databind.JsonNode n = parent.path(field);
-            if (n.isNull() || n.isMissingNode()) return null;
-            if (n.isNumber()) return n.asDouble();
-            if (n.isTextual()) {
-                try { return Double.parseDouble(n.asText().trim()); } catch (NumberFormatException ignored) {}
-            }
-            return null;
-        }
-
-        private String parseStringNode(com.fasterxml.jackson.databind.JsonNode parent, String field) {
-            com.fasterxml.jackson.databind.JsonNode n = parent.path(field);
-            if (n.isNull() || n.isMissingNode()) return null;
-            return n.asText().trim();
-        }
-
-        private String translateWeatherDesc(String desc) {
-            if (desc == null || desc.isBlank()) return "未知";
-            String d = desc.trim();
-            String lower = d.toLowerCase();
-            return switch (d) {
-                case "Sunny", "Clear" -> "晴";
-                case "Partly Cloudy", "Partly cloudy" -> "多云";
-                case "Cloudy" -> "阴";
-                case "Overcast" -> "阴";
-                case "Mist", "Fog", "Freezing fog" -> "雾";
-                case "Light drizzle", "Patchy light drizzle" -> "毛毛雨";
-                case "Light rain", "Light Rain" -> "小雨";
-                case "Moderate rain", "Moderate or heavy rain shower" -> "中雨";
-                case "Heavy rain", "Torrential rain shower" -> "大雨";
-                case "Patchy rain possible", "Patchy rain nearby" -> "可能有雨";
-                case "Thunderstorm", "Thundery outbreaks possible" -> "雷暴";
-                case "Light snow", "Patchy light snow" -> "小雪";
-                case "Moderate snow" -> "中雪";
-                case "Heavy snow" -> "大雪";
-                case "Blizzard" -> "暴风雪";
-                case "Light sleet" -> "雨夹雪";
-                default -> {
-                    if (lower.contains("sunny") || lower.contains("clear")) yield "晴";
-                    if (lower.contains("cloudy")) yield "多云";
-                    if (lower.contains("overcast")) yield "阴";
-                    if (lower.contains("fog") || lower.contains("mist")) yield "雾";
-                    if (lower.contains("drizzle")) yield "毛毛雨";
-                    if (lower.contains("heavy rain") || lower.contains("torrential")) yield "大雨";
-                    if (lower.contains("rain") || lower.contains("shower")) yield "有雨";
-                    if (lower.contains("thunder") || lower.contains("lightning")) yield "雷暴";
-                    if (lower.contains("snow") || lower.contains("blizzard")) yield "雪";
-                    if (lower.contains("sleet") || lower.contains("ice")) yield "雨夹雪";
-                    if (lower.contains("wind")) yield "大风";
-                    yield "未知";
-                }
-            };
         }
 
         private String getUserSavedLocation() {
@@ -1266,101 +1247,6 @@ public class AgentChatService {
             Long userId = userIdSupplier != null ? userIdSupplier.get() : null;
             if (userId == null) throw new IllegalStateException("userId missing");
             return userId;
-        }
-
-        private void ensureUserRagIndexed(Long userId) {
-            if (userId == null) return;
-            if (redissonClient == null || vectorStore == null) return;
-            String key = "sp:rag:indexed:u:" + userId;
-            RBucket<String> bucket = redissonClient.getBucket(key);
-            String v = bucket.get();
-            if ("1".equals(v)) return;
-
-            List<Document> docs = new ArrayList<>();
-
-            try {
-                Result<List<UserJournalDto>> jr = goalClient.listJournals(userId, null);
-                List<UserJournalDto> journals = jr != null ? jr.getData() : List.of();
-                if (journals != null) {
-                    for (UserJournalDto j : journals) {
-                        if (j == null || j.getId() == null) continue;
-                        String text = j.getContent();
-                        if (text == null || text.isBlank()) continue;
-                        Map<String, Object> meta = new HashMap<>();
-                        meta.put("type", "journal");
-                        meta.put("userId", userId);
-                        meta.put("journalId", j.getId());
-                        meta.put("goalId", j.getGoalId());
-                        meta.put("title", "随笔");
-                        docs.add(new Document("journal:" + userId + ":" + j.getId(), text, meta));
-                        if (docs.size() >= 200) break;
-                    }
-                }
-            } catch (Exception ignored) {
-            }
-
-            // Index punch records
-            try {
-                Result<List<PunchRecordDto>> pr = punchClient.listRecords(userId, null, null, null);
-                List<PunchRecordDto> records = pr != null ? pr.getData() : List.of();
-                if (records != null) {
-                    Map<Long, String> taskTitles = new HashMap<>();
-                    try {
-                        List<Long> taskIds = records.stream()
-                                .map(PunchRecordDto::getTaskId).filter(Objects::nonNull).distinct()
-                                .collect(java.util.stream.Collectors.toList());
-                        if (!taskIds.isEmpty()) {
-                            Result<List<GoalTaskDto>> tr = goalClient.getTasksByIds(taskIds);
-                            List<GoalTaskDto> tasks = tr != null ? tr.getData() : List.of();
-                            if (tasks != null) {
-                                for (GoalTaskDto t : tasks) {
-                                    if (t != null && t.getId() != null) {
-                                        taskTitles.put(t.getId(), t.getTitle() != null ? t.getTitle() : "未命名");
-                                    }
-                                }
-                            }
-                        }
-                    } catch (Exception ignored) {
-                    }
-                    for (PunchRecordDto r : records) {
-                        if (r == null || r.getId() == null) continue;
-                        String taskName = taskTitles.getOrDefault(r.getTaskId(), "任务" + r.getTaskId());
-                        String text = "打卡: " + taskName
-                                + " | 时长: " + formatDuration(r.getDurationSeconds())
-                                + " | 时间: " + (r.getCreatedAt() != null ? r.getCreatedAt().toString() : "");
-                        if (text.isBlank()) continue;
-                        Map<String, Object> meta = new HashMap<>();
-                        meta.put("type", "punch");
-                        meta.put("userId", userId);
-                        meta.put("punchId", r.getId());
-                        meta.put("taskId", r.getTaskId());
-                        meta.put("taskTitle", taskName);
-                        meta.put("createdAt", r.getCreatedAt() != null ? r.getCreatedAt().toString() : "");
-                        meta.put("durationSeconds", r.getDurationSeconds());
-                        docs.add(new Document("punch:" + userId + ":" + r.getId(), text, meta));
-                        if (docs.size() >= 500) break;
-                    }
-                }
-            } catch (Exception ignored) {
-            }
-
-            if (!docs.isEmpty()) {
-                addDocsInBatches(vectorStore, docs, 20);
-                bucket.set("1");
-                bucket.expire(java.time.Duration.ofDays(3));
-                return;
-            }
-            bucket.set("0");
-            bucket.expire(java.time.Duration.ofHours(6));
-        }
-
-        private void addDocsInBatches(VectorStore vectorStore, List<Document> docs, int batchSize) {
-            if (vectorStore == null || docs == null || docs.isEmpty()) return;
-            int size = Math.max(1, Math.min(batchSize, 25));
-            for (int i = 0; i < docs.size(); i += size) {
-                List<Document> part = docs.subList(i, Math.min(docs.size(), i + size));
-                vectorStore.add(part);
-            }
         }
 
         private void indexSingleJournal(Long userId, Long goalId, String content) {

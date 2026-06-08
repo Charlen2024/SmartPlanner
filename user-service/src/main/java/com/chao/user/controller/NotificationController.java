@@ -9,6 +9,8 @@ import com.chao.common.dto.TaskScheduleDto;
 import com.chao.common.dto.UserJournalDto;
 import com.chao.common.dto.GoalDto;
 import com.chao.common.dto.Result;
+import com.chao.common.dto.WeatherData;
+import com.chao.common.util.WeatherClient;
 import com.chao.user.service.AppUserService;
 import com.chao.user.util.JwtUtils;
 import lombok.RequiredArgsConstructor;
@@ -29,6 +31,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 
 @RestController
 @RequestMapping("/api/user/notifications")
@@ -42,6 +45,8 @@ public class NotificationController {
     private final PunchClient punchClient;
     private final GoalClient goalClient;
     private final AppUserService appUserService;
+    private final WeatherClient weatherClient;
+    private final Executor aiTaskExecutor;
 
     private final Map<Long, List<SseEmitter>> emitters = new ConcurrentHashMap<>();
     private final Map<Long, Set<String>> lastLoginCareSessionKeys = new ConcurrentHashMap<>();
@@ -69,7 +74,7 @@ public class NotificationController {
         }
 
         String sessionKey = buildSessionKey(jwt);
-        CompletableFuture.runAsync(() -> publishLoginCare(uid, sessionKey));
+        CompletableFuture.runAsync(() -> publishLoginCare(uid, sessionKey), aiTaskExecutor);
         return emitter;
     }
 
@@ -306,54 +311,14 @@ public class NotificationController {
 
     private String fetchWeatherBrief() {
         try {
-            String url = "https://wttr.in/Shenzhen?format=j1";
-            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-            conn.setConnectTimeout(8000);
-            conn.setReadTimeout(10000);
-            conn.setRequestProperty("User-Agent", "SmartPlanner/1.0");
-            conn.setInstanceFollowRedirects(true);
-            byte[] bytes = conn.getInputStream().readAllBytes();
-            com.fasterxml.jackson.databind.JsonNode root = new com.fasterxml.jackson.databind.ObjectMapper().readTree(
-                    new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
-            com.fasterxml.jackson.databind.JsonNode cc = root.path("current_condition");
-            if (cc.isArray() && !cc.isEmpty()) {
-                com.fasterxml.jackson.databind.JsonNode c = cc.get(0);
-                double temp = parseDouble(c, "temp_C");
-                String desc = c.path("weatherDesc").isArray() && !c.path("weatherDesc").isEmpty()
-                        ? c.path("weatherDesc").get(0).path("value").asText().trim() : "";
-                String cn = translateWeatherBrief(desc);
-                if (temp > 0 || !cn.isBlank()) {
-                    return cn + " " + (int) temp + "°C";
-                }
+            WeatherData wd = weatherClient.fetch("Shenzhen");
+            Double temp = wd.getTemperature();
+            String cn = wd.getWeatherDescCn() != null ? wd.getWeatherDescCn() : "";
+            if (temp != null && (temp > 0 || !cn.isBlank())) {
+                return cn + " " + temp.intValue() + "°C";
             }
         } catch (Exception ignored) {
         }
-        return "";
-    }
-
-    private double parseDouble(com.fasterxml.jackson.databind.JsonNode parent, String field) {
-        com.fasterxml.jackson.databind.JsonNode n = parent.path(field);
-        if (n.isNull() || n.isMissingNode()) return 0;
-        if (n.isNumber()) return n.asDouble();
-        if (n.isTextual()) {
-            try { return Double.parseDouble(n.asText().trim()); } catch (NumberFormatException ignored) {}
-        }
-        return 0;
-    }
-
-    private String translateWeatherBrief(String desc) {
-        if (desc == null || desc.isBlank()) return "";
-        String d = desc.trim();
-        String lower = d.toLowerCase();
-        if (lower.contains("sunny") || lower.contains("clear")) return "晴";
-        if (lower.contains("cloudy")) return "多云";
-        if (lower.contains("overcast")) return "阴";
-        if (lower.contains("fog") || lower.contains("mist")) return "雾";
-        if (lower.contains("drizzle")) return "毛毛雨";
-        if (lower.contains("heavy rain") || lower.contains("torrential")) return "大雨";
-        if (lower.contains("rain") || lower.contains("shower")) return "有雨";
-        if (lower.contains("thunder")) return "雷暴";
-        if (lower.contains("snow") || lower.contains("blizzard")) return "雪";
         return "";
     }
 

@@ -34,7 +34,6 @@ import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.ss.usermodel.WorkbookFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -57,6 +56,7 @@ import java.util.Set;
 import java.nio.charset.StandardCharsets;
 import java.util.stream.Collectors;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
@@ -71,6 +71,7 @@ public class ScheduleService {
     private final GoalClient goalClient;
     private final OpenAiCompatClient openAiCompatClient;
     private final ObjectMapper objectMapper;
+    private final Executor aiTaskExecutor;
     private final PlanCandidateWorker planCandidateWorker;
 
     @Value("${smartplanner.ai.schedule-timeout-seconds:170}")
@@ -805,6 +806,10 @@ public class ScheduleService {
     }
 
     public List<ClassSchedule> listClassSchedules(Long userId, Integer dayOfWeek, String date, String firstWeekMonday) {
+        // date 提供时自动推导 dayOfWeek，避免调用方传错
+        if (dayOfWeek == null && date != null && !date.isBlank()) {
+            dayOfWeek = LocalDate.parse(date).getDayOfWeek().getValue();
+        }
         LambdaQueryWrapper<ClassSchedule> qw = new LambdaQueryWrapper<ClassSchedule>()
                 .eq(ClassSchedule::getUserId, userId)
                 .orderByAsc(ClassSchedule::getDayOfWeek)
@@ -815,12 +820,23 @@ public class ScheduleService {
         List<ClassSchedule> classes = classScheduleMapper.selectList(qw);
 
         // 按周过滤，与 calculateFreeTime 保持一致
-        if (date != null && !date.isBlank() && firstWeekMonday != null && !firstWeekMonday.isBlank() && !classes.isEmpty()) {
-            LocalDate targetDate = LocalDate.parse(date);
-            LocalDate fwm = LocalDate.parse(firstWeekMonday);
-            long daysBetween = java.time.temporal.ChronoUnit.DAYS.between(fwm, targetDate);
-            int weekNumber = (int) Math.floor(daysBetween / 7.0) + 1;
-            classes = classes.stream().filter(c -> matchesWeek(c, weekNumber)).collect(Collectors.toList());
+        if (date != null && !date.isBlank() && !classes.isEmpty()) {
+            if (firstWeekMonday == null || firstWeekMonday.isBlank()) {
+                try {
+                    UserScheduleConfig cfg = userScheduleConfigMapper.selectById(userId);
+                    if (cfg != null && cfg.getFirstWeekMonday() != null) {
+                        firstWeekMonday = cfg.getFirstWeekMonday().toString();
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            if (firstWeekMonday != null && !firstWeekMonday.isBlank()) {
+                LocalDate targetDate = LocalDate.parse(date);
+                LocalDate fwm = LocalDate.parse(firstWeekMonday);
+                long daysBetween = java.time.temporal.ChronoUnit.DAYS.between(fwm, targetDate);
+                int weekNumber = (int) Math.floor(daysBetween / 7.0) + 1;
+                classes = classes.stream().filter(c -> matchesWeek(c, weekNumber)).collect(Collectors.toList());
+            }
         }
         return classes;
     }
@@ -907,10 +923,10 @@ public class ScheduleService {
             return freeSlots;
         }
 
-        // 午休 12:00-13:00 作为固定占用块
+        // 午休 12:00-14:00 作为固定占用块
         ClassSchedule lunch = new ClassSchedule();
         lunch.setStartTime(LocalTime.of(12, 0));
-        lunch.setEndTime(LocalTime.of(13, 0));
+        lunch.setEndTime(LocalTime.of(14, 0));
         classes.add(lunch);
 
         // 按开始时间排序
@@ -1056,9 +1072,8 @@ public class ScheduleService {
         }
     }
 
-    @Async
     public void smartScheduleAsync(Long userId) {
-        smartSchedule(userId);
+        CompletableFuture.runAsync(() -> smartSchedule(userId), aiTaskExecutor);
     }
 
     public PlanCandidateDto generatePlanCandidate(Long userId, GeneratePlanCandidateRequest request) {

@@ -43,6 +43,7 @@ let sseSource = null
 let sseRetryCount = 0
 let sseRetryTimer = null
 const SSE_MAX_DELAY = 30000
+const SSE_MAX_RETRIES = 20
 
 function onChatLinkClick(e) {
   const anchor = e.target.closest('a')
@@ -130,6 +131,11 @@ function startSse(token) {
   })
   sseSource.onerror = () => {
     stopSse()
+    if (sseRetryCount >= SSE_MAX_RETRIES) {
+      console.warn('SSE max retries reached, giving up')
+      notify.error('实时通知连接失败，请刷新页面重试', 0)
+      return
+    }
     const delay = Math.min(SSE_MAX_DELAY, 1000 * Math.pow(2, sseRetryCount))
     sseRetryCount++
     sseRetryTimer = setTimeout(() => startSse(localStorage.getItem("accessToken")), delay)

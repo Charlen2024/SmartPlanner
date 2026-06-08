@@ -1,7 +1,7 @@
 FROM docker.1panel.live/library/node:20-alpine AS build
 WORKDIR /app
 COPY web-front/package.json web-front/package-lock.json* ./
-RUN npm ci || npm install
+RUN npm ci
 COPY web-front/ ./
 RUN npm run build
 
