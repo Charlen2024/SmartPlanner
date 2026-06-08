@@ -23,7 +23,7 @@
     depends_on:
       - mysql
     networks:
-      - vibe-net
+      - sp-net
 
   mysql:
     image: docker.m.daocloud.io/library/mysql:8.0
@@ -36,7 +36,20 @@
     volumes:
       - ./sql:/docker-entrypoint-initdb.d
     networks:
-      - vibe-net
+      - sp-net
+
+  adminer:
+    image: docker.m.daocloud.io/library/adminer:4.8.1
+    container_name: adminer
+    restart: unless-stopped
+    ports:
+      - "8085:8080"
+    environment:
+      - ADMINER_DEFAULT_SERVER=mysql
+    depends_on:
+      - mysql
+    networks:
+      - sp-net
 
   redis:
     image: docker.m.daocloud.io/redis/redis-stack-server:7.2.0-v19
@@ -47,20 +60,20 @@
     ports:
       - "6379:6379"
     networks:
-      - vibe-net
+      - sp-net
 
   rabbitmq:
     image: docker.m.daocloud.io/library/rabbitmq:3.12-management
     container_name: rabbitmq
     restart: unless-stopped
     environment:
-      - RABBITMQ_DEFAULT_USER=vibe
-      - RABBITMQ_DEFAULT_PASS=vibe123
+      - RABBITMQ_DEFAULT_USER=sp
+      - RABBITMQ_DEFAULT_PASS=sp123
     ports:
       - "5672:5672"
       - "15672:15672"
     networks:
-      - vibe-net
+      - sp-net
 
   elasticsearch:
     image: docker.m.daocloud.io/library/elasticsearch:8.10.2
@@ -73,18 +86,7 @@
     ports:
       - "9201:9200"
     networks:
-      - vibe-net
-
-  seata-server:
-    image: docker.m.daocloud.io/seataio/seata-server:1.7.1
-    container_name: seata-server
-    restart: unless-stopped
-    ports:
-      - "8091:8091"
-    depends_on:
-      - mysql
-    networks:
-      - vibe-net
+      - sp-net
 
   # --- 寰湇鍔?(Microservices) ---
   goal-service:
@@ -98,11 +100,11 @@
     environment:
       - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
       - SPRING_CLOUD_NACOS_CONFIG_SERVER_ADDR=nacos:8848
-      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_goal?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/sp_goal?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
       - SPRING_REDIS_HOST=redis
       - SPRING_RABBITMQ_HOST=rabbitmq
-      - SPRING_RABBITMQ_USERNAME=vibe
-      - SPRING_RABBITMQ_PASSWORD=vibe123
+      - SPRING_RABBITMQ_USERNAME=sp
+      - SPRING_RABBITMQ_PASSWORD=sp123
       - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
       - MODEL=${MODEL}
       - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
@@ -113,7 +115,7 @@
       - redis
       - rabbitmq
     networks:
-      - vibe-net
+      - sp-net
 
   schedule-engine:
     build:
@@ -125,10 +127,10 @@
       - "8082:8082"
     environment:
       - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
-      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_schedule?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/sp_schedule?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
       - SPRING_RABBITMQ_HOST=rabbitmq
-      - SPRING_RABBITMQ_USERNAME=vibe
-      - SPRING_RABBITMQ_PASSWORD=vibe123
+      - SPRING_RABBITMQ_USERNAME=sp
+      - SPRING_RABBITMQ_PASSWORD=sp123
       - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
       - MODEL=${MODEL}
       - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
@@ -140,7 +142,7 @@
       - redis
       - rabbitmq
     networks:
-      - vibe-net
+      - sp-net
 
   resource-search:
     build:
@@ -152,11 +154,11 @@
       - "8083:8083"
     environment:
       - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
-      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_resource?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/sp_resource?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
       - SPRING_ELASTICSEARCH_URIS=http://elasticsearch:9200
       - SPRING_RABBITMQ_HOST=rabbitmq
-      - SPRING_RABBITMQ_USERNAME=vibe
-      - SPRING_RABBITMQ_PASSWORD=vibe123
+      - SPRING_RABBITMQ_USERNAME=sp
+      - SPRING_RABBITMQ_PASSWORD=sp123
       - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
       - MODEL=${MODEL}
       - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
@@ -167,7 +169,7 @@
       - elasticsearch
       - rabbitmq
     networks:
-      - vibe-net
+      - sp-net
 
   punch-service:
     build:
@@ -179,11 +181,11 @@
       - "8084:8084"
     environment:
       - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
-      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_punch?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/sp_punch?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
       - SPRING_REDIS_HOST=redis
       - SPRING_RABBITMQ_HOST=rabbitmq
-      - SPRING_RABBITMQ_USERNAME=vibe
-      - SPRING_RABBITMQ_PASSWORD=vibe123
+      - SPRING_RABBITMQ_USERNAME=sp
+      - SPRING_RABBITMQ_PASSWORD=sp123
       - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
       - MODEL=${MODEL}
       - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
@@ -194,7 +196,7 @@
       - redis
       - rabbitmq
     networks:
-      - vibe-net
+      - sp-net
 
   user-service:
     build:
@@ -207,8 +209,8 @@
     environment:
       - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
       - SPRING_RABBITMQ_HOST=rabbitmq
-      - SPRING_RABBITMQ_USERNAME=vibe
-      - SPRING_RABBITMQ_PASSWORD=vibe123
+      - SPRING_RABBITMQ_USERNAME=sp
+      - SPRING_RABBITMQ_PASSWORD=sp123
       - SPRING_REDIS_HOST=redis
       - SPRING_REDIS_PORT=6379
       - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
@@ -216,10 +218,10 @@
       - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
       - SPRING_AI_RETRY_MAX_ATTEMPTS=1
       - JWT_SECRET=dev-jwt-secret-change-me-please-32bytes
-      - JWT_ISSUER=http://vibe
+      - JWT_ISSUER=http://sp
       - AUTH_DEMO_USERNAME=demo
       - AUTH_DEMO_PASSWORD=demo123
-      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_user?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/sp_user?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
       - SPRING_DATASOURCE_USERNAME=root
       - SPRING_DATASOURCE_PASSWORD=root
     depends_on:
@@ -227,7 +229,22 @@
       - mysql
       - rabbitmq
     networks:
-      - vibe-net
+      - sp-net
+
+  admin-server:
+    build:
+      context: .
+      dockerfile: admin-server/Dockerfile
+    container_name: admin-server
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    environment:
+      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
+    depends_on:
+      - nacos
+    networks:
+      - sp-net
 
   gateway-service:
     build:
@@ -249,8 +266,8 @@
       - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
       - SPRING_REDIS_HOST=redis
       - SPRING_RABBITMQ_HOST=rabbitmq
-      - SPRING_RABBITMQ_USERNAME=vibe
-      - SPRING_RABBITMQ_PASSWORD=vibe123
+      - SPRING_RABBITMQ_USERNAME=sp
+      - SPRING_RABBITMQ_PASSWORD=sp123
       - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
       - MODEL=${MODEL}
       - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
@@ -264,7 +281,7 @@
       - user-service
       - rabbitmq
     networks:
-      - vibe-net
+      - sp-net
 
   web-front:
     build:
@@ -277,8 +294,8 @@
     depends_on:
       - gateway-service
     networks:
-      - vibe-net
+      - sp-net
 
 networks:
-  vibe-net:
+  sp-net:
     driver: bridge

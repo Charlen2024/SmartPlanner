@@ -9,15 +9,11 @@ import com.chao.punch.mapper.UserHabitMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -40,8 +36,7 @@ public class PunchService {
             Long startedAtMs,
             Long endedAtMs,
             String location,
-            String taskTitle,
-            MultipartFile evidence) {
+            String taskTitle) {
         PunchRecord record = new PunchRecord();
         record.setUserId(userId);
         record.setTaskId(taskId);
@@ -52,19 +47,12 @@ public class PunchService {
         record.setStartedAt(toLocalDateTime(startedAtMs));
         record.setEndedAt(toLocalDateTime(endedAtMs));
         record.setCreatedAt(LocalDateTime.now());
-        record.setAiAuditResult(0);
+        record.setAiAuditResult(1);
+        record.setAiAuditRemark("打卡成功");
         punchRecordMapper.insert(record);
 
         awardPoints(userId);
         autoUpdateHabit(userId, record.getCreatedAt(), type, durationSeconds);
-
-        if (evidence != null && type != null && type == 2) {
-            auditAsync(record.getId(), userId, taskId, type, location, evidence);
-        } else {
-            record.setAiAuditResult(1);
-            record.setAiAuditRemark("无需AI审核");
-            punchRecordMapper.updateById(record);
-        }
         return record;
     }
 
@@ -73,19 +61,6 @@ public class PunchService {
             return null;
         }
         return LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(ms), SHANGHAI);
-    }
-
-    @Async
-    public void auditAsync(Long recordId, Long userId, Long taskId, Integer type, String location, MultipartFile evidence) {
-        try {
-            PunchRecord record = new PunchRecord();
-            record.setId(recordId);
-            record.setAiAuditResult(1);
-            record.setAiAuditRemark("AI 审核通过：内容与任务高度相关");
-            punchRecordMapper.updateById(record);
-        } catch (Exception e) {
-            log.error("AI 审核失败", e);
-        }
     }
 
     private void awardPoints(Long userId) {

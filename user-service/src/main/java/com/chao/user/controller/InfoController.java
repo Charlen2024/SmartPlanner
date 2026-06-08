@@ -1,6 +1,5 @@
 package com.chao.user.controller;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.dto.Result;
 import lombok.extern.slf4j.Slf4j;
@@ -13,6 +12,8 @@ import com.chao.user.dto.UserInsightDto;
 import com.chao.user.dto.UserPortraitDto;
 import com.chao.common.dto.SchedulePreferenceDto;
 import com.chao.user.dto.WeatherDto;
+import com.chao.user.dto.WttrResponse;
+import com.chao.user.util.JwtUtils;
 import com.chao.user.service.UserPortraitAiService;
 import org.redisson.api.RedissonClient;
 import org.springframework.ai.document.Document;
@@ -72,16 +73,15 @@ public class InfoController {
             conn.setRequestProperty("User-Agent", "SmartPlanner/1.0");
             conn.setInstanceFollowRedirects(true);
             byte[] bytes = conn.getInputStream().readAllBytes();
-            JsonNode root = objectMapper.readTree(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
-            JsonNode cc = root.path("current_condition");
-            if (cc.isArray() && !cc.isEmpty()) {
-                JsonNode c = cc.get(0);
-                dto.setTemperature(parseDoubleNode(c, "temp_C"));
-                dto.setFeelsLike(parseDoubleNode(c, "FeelsLikeC"));
-                dto.setWindspeed(parseDoubleNode(c, "windspeedKmph"));
-                dto.setHumidity(parseStringNode(c, "humidity"));
-                String desc = c.path("weatherDesc").isArray() && !c.path("weatherDesc").isEmpty()
-                        ? c.path("weatherDesc").get(0).path("value").asText() : null;
+            WttrResponse resp = objectMapper.readValue(bytes, WttrResponse.class);
+            if (resp.getCurrentCondition() != null && !resp.getCurrentCondition().isEmpty()) {
+                WttrResponse.CurrentCondition c = resp.getCurrentCondition().get(0);
+                dto.setTemperature(parseDouble(c.getTempC()));
+                dto.setFeelsLike(parseDouble(c.getFeelsLikeC()));
+                dto.setWindspeed(parseDouble(c.getWindspeedKmph()));
+                dto.setHumidity(c.getHumidity());
+                String desc = c.getWeatherDesc() != null && !c.getWeatherDesc().isEmpty()
+                        ? c.getWeatherDesc().get(0).getValue() : null;
                 dto.setSummary(translateWeather(desc));
             }
         } catch (Exception e) {
@@ -93,7 +93,7 @@ public class InfoController {
 
     @org.springframework.web.bind.annotation.PutMapping("/weather-location")
     public Result<String> saveWeatherLocation(@AuthenticationPrincipal Jwt jwt, @RequestParam String location) {
-        Long userId = jwt.getClaim("userId");
+        Long userId = JwtUtils.getUserId(jwt);
         String loc = (location != null && !location.isBlank()) ? location.trim() : "Shenzhen";
         try {
             RedissonClient r = redissonProvider.getIfAvailable();
@@ -106,7 +106,7 @@ public class InfoController {
 
     private String getUserWeatherLocation(Jwt jwt) {
         try {
-            Long userId = jwt != null ? jwt.<Long>getClaim("userId") : null;
+            Long userId = jwt != null ? JwtUtils.getUserId(jwt) : null;
             if (userId == null) return "";
             RedissonClient r = redissonProvider.getIfAvailable();
             if (r != null) {
@@ -119,7 +119,7 @@ public class InfoController {
 
     @GetMapping("/insights")
     public Result<UserInsightDto> insights(@AuthenticationPrincipal Jwt jwt) {
-        Long userId = jwt.getClaim("userId");
+        Long userId = JwtUtils.getUserId(jwt);
         LocalDateTime to = LocalDateTime.now();
         LocalDateTime from = to.minusDays(7);
 
@@ -128,7 +128,7 @@ public class InfoController {
 
     @GetMapping("/portrait")
     public Result<UserPortraitDto> portrait(@AuthenticationPrincipal Jwt jwt) {
-        Long userId = jwt.getClaim("userId");
+        Long userId = JwtUtils.getUserId(jwt);
         LocalDateTime to = LocalDateTime.now();
         LocalDateTime from = to.minusDays(7);
 
@@ -143,7 +143,7 @@ public class InfoController {
 
     @PostMapping("/portrait/recompute")
     public Result<UserPortraitDto> recomputePortrait(@AuthenticationPrincipal Jwt jwt) {
-        Long userId = jwt.getClaim("userId");
+        Long userId = JwtUtils.getUserId(jwt);
         LocalDateTime to = LocalDateTime.now();
         LocalDateTime from = to.minusDays(7);
 
@@ -423,21 +423,9 @@ public class InfoController {
         return dto;
     }
 
-    private Double parseDoubleNode(JsonNode parent, String field) {
-        JsonNode n = parent.path(field);
-        if (n.isNull() || n.isMissingNode()) return null;
-        if (n.isNumber()) return n.asDouble();
-        if (n.isTextual()) {
-            try { return Double.parseDouble(n.asText().trim()); } catch (NumberFormatException ignored) {}
-        }
-        return null;
-    }
-
-    private String parseStringNode(JsonNode parent, String field) {
-        JsonNode n = parent.path(field);
-        if (n.isNull() || n.isMissingNode()) return null;
-        if (n.isTextual()) return n.asText().trim();
-        return n.asText();
+    private Double parseDouble(String s) {
+        if (s == null || s.isBlank()) return null;
+        try { return Double.parseDouble(s.trim()); } catch (NumberFormatException ignored) { return null; }
     }
 
     private String translateWeather(String desc) {

@@ -3,6 +3,7 @@ package com.chao.goal.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.ai.OpenAiCompatClient;
 import com.chao.common.client.ResourceClient;
+import com.chao.common.util.TextSimilarity;
 import com.chao.common.client.ScheduleClient;
 import com.chao.common.dto.GoalDto;
 import com.chao.common.dto.GoalTaskDto;
@@ -306,7 +307,7 @@ public class GoalService {
             if (a.equals(b)) return t;
             if (a.length() >= 4 && b.length() >= 4) {
                 if (a.contains(b) || b.contains(a)) return t;
-                double sim = bigramJaccard(a, b);
+                double sim = TextSimilarity.bigramJaccard(a, b);
                 if (sim >= 0.86d) return t;
             }
         }
@@ -319,33 +320,6 @@ public class GoalService {
         x = x.replaceAll("\\s+", "");
         x = x.replaceAll("[\\p{Punct}·•，。！？、；：()（）【】\\[\\]{}<>《》“”\"'`~@#$%^&*_+=|\\\\/]+", "");
         return x;
-    }
-
-    private double bigramJaccard(String a, String b) {
-        Set<String> sa = bigrams(a);
-        Set<String> sb = bigrams(b);
-        if (sa.isEmpty() || sb.isEmpty()) return 0d;
-        int inter = 0;
-        for (String g : sa) {
-            if (sb.contains(g)) inter++;
-        }
-        int union = sa.size() + sb.size() - inter;
-        return union <= 0 ? 0d : (inter * 1.0d / union);
-    }
-
-    private Set<String> bigrams(String s) {
-        Set<String> out = new HashSet<>();
-        if (s == null) return out;
-        String x = s.trim();
-        if (x.isEmpty()) return out;
-        if (x.length() == 1) {
-            out.add(x);
-            return out;
-        }
-        for (int i = 0; i < x.length() - 1; i++) {
-            out.add(x.substring(i, i + 2));
-        }
-        return out;
     }
 
     public List<GoalTask> listTasksByGoal(Long userId, Long goalId) {

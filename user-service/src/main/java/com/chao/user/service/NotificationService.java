@@ -2,6 +2,7 @@ package com.chao.user.service;
 
 import com.chao.common.ai.OpenAiCompatClient;
 import com.chao.common.config.RabbitMqConfig;
+import com.chao.common.util.TextSimilarity;
 import com.chao.common.dto.NotificationMessage;
 import com.chao.user.controller.NotificationController;
 import lombok.RequiredArgsConstructor;
@@ -254,7 +255,7 @@ public class NotificationService {
             int max = Math.max(x.length(), y.length());
             if (max > 0 && (min * 1.0 / max) >= 0.88) return true;
         }
-        return bigramJaccard(x, y) >= 0.86;
+        return TextSimilarity.bigramJaccard(x, y) >= 0.86;
     }
 
     private String normalizeForSimilarity(String s) {
@@ -268,22 +269,6 @@ public class NotificationService {
             }
         }
         return sb.toString();
-    }
-
-    private double bigramJaccard(String a, String b) {
-        java.util.HashSet<String> sa = new java.util.HashSet<>();
-        java.util.HashSet<String> sb = new java.util.HashSet<>();
-        for (int i = 0; i + 1 < a.length(); i++) sa.add(a.substring(i, i + 2));
-        for (int i = 0; i + 1 < b.length(); i++) sb.add(b.substring(i, i + 2));
-        if (sa.isEmpty() || sb.isEmpty()) return 0.0;
-
-        int inter = 0;
-        for (String g : sa) {
-            if (sb.contains(g)) inter++;
-        }
-        int union = sa.size() + sb.size() - inter;
-        if (union <= 0) return 0.0;
-        return inter * 1.0 / union;
     }
 
     private ParsedLoginCare parseFromPayloadAi(Map<?, ?> payload) {

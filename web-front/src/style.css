@@ -12,3 +12,7 @@ body {
   margin: 0;
   background: #0b1020;
 }
+
+.v-card {
+  outline: 1px solid transparent;
+}

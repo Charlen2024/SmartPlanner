@@ -341,28 +341,27 @@ const freeBlocks = computed(() =>
   (freeTimeSlots.value ?? []).map((f) => ({ ...f, _start: f.start, _end: f.end, style: blockStyle(f?.start, f?.end) })).filter((f) => f.style),
 )
 
-const scheduleBlocks = computed(() => {
-  const blocks = (displayTaskSchedules.value ?? [])
+const timelineBlocks = computed(() => {
+  const classList = (dayClasses.value ?? [])
+    .map((c) => {
+      const start = `${scheduleDate.value}T${String(c.startTime).slice(0, 5)}:00`
+      const end = `${scheduleDate.value}T${String(c.endTime).slice(0, 5)}:00`
+      return { ...c, _kind: 'class', _start: start, _end: end, style: blockStyle(start, end) }
+    })
+    .filter((c) => c.style)
+
+  const taskList = (displayTaskSchedules.value ?? [])
     .map((s, idx) => ({
       ...s,
+      _kind: 'schedule',
       _idx: idx + 1,
       _start: s?.startTime,
       _end: s?.endTime,
       style: blockStyle(s?.startTime, s?.endTime),
     }))
     .filter((s) => s.style)
-  return layoutOverlappingBlocks(blocks)
-})
 
-const classBlocks = computed(() => {
-  const blocks = (dayClasses.value ?? [])
-    .map((c) => {
-      const start = `${scheduleDate.value}T${String(c.startTime).slice(0, 5)}:00`
-      const end = `${scheduleDate.value}T${String(c.endTime).slice(0, 5)}:00`
-      return { ...c, _start: start, _end: end, style: blockStyle(start, end) }
-    })
-    .filter((c) => c.style)
-  return layoutOverlappingBlocks(blocks)
+  return layoutOverlappingBlocks([...classList, ...taskList])
 })
 
 function tempText() {
@@ -523,23 +522,14 @@ onMounted(load)
               <div v-for="(b, i) in freeBlocks" :key="'free-' + i" class="dash-timeline-free" :style="b.style" />
 
               <div
-                v-for="(b, i) in classBlocks"
-                :key="'class-' + (b.id ?? i)"
-                class="dash-timeline-block dash-timeline-class"
+                v-for="(b, i) in timelineBlocks"
+                :key="(b._kind || 'block') + '-' + (b.id ?? i)"
+                class="dash-timeline-block"
+                :class="b._kind === 'class' ? 'dash-timeline-class' : 'dash-timeline-task'"
                 :style="b.style"
               >
-                <div class="dash-timeline-title">{{ b.courseName }}</div>
-                <div class="dash-timeline-sub">{{ String(b.startTime).slice(0, 5) }} - {{ String(b.endTime).slice(0, 5) }} {{ b.location || '' }}</div>
-              </div>
-
-              <div
-                v-for="b in scheduleBlocks"
-                :key="b.id || `${b.taskId}-${b.startTime}`"
-                class="dash-timeline-block dash-timeline-task"
-                :style="b.style"
-              >
-                <div class="dash-timeline-title">{{ b.taskTitle || `任务 ${b._idx}` }}</div>
-                <div class="dash-timeline-sub">{{ fmtHm(b.startTime) }} - {{ fmtHm(b.endTime) }}</div>
+                <div class="dash-timeline-title">{{ b._kind === 'class' ? b.courseName : (b.taskTitle || '任务 ' + b._idx) }}</div>
+                <div class="dash-timeline-sub">{{ b._kind === 'class' ? (String(b.startTime).slice(0, 5) + ' - ' + String(b.endTime).slice(0, 5) + ' ' + (b.location || '')) : (fmtHm(b.startTime) + ' - ' + fmtHm(b.endTime)) }}</div>
               </div>
             </div>
           </div>

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, watch, onBeforeUnmount } from 'vue'
 import api from '../plugins/api'
 
 const topic = ref('')
@@ -12,10 +12,13 @@ const loading = ref(false)
 const error = ref('')
 const advice = ref('')
 const jobSeq = ref(0)
+const aborted = ref(false)
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }
+
+let topicDebounce = null
 
 async function searchOnline() {
   if (!topic.value?.trim()) {
@@ -36,6 +39,7 @@ async function searchOnline() {
 
     for (let i = 0; i < 180; i++) {
       await sleep(1000)
+      if (aborted.value) return
       if (seq !== jobSeq.value) return
       const st = await api.get(`/user/resources/search/advice/jobs/${jobId}`, { timeout: 15000 })
       const data = st?.data?.data ?? null
@@ -51,6 +55,7 @@ async function searchOnline() {
     }
     throw new Error('等待检索结果超时，请稍后重试')
   } catch (e) {
+    if (aborted.value) return
     if (e?.response?.status === 401) {
       error.value = '未登录或登录已过期，请重新登录后再检索'
     } else if (e?.code === 'ECONNABORTED') {
@@ -65,12 +70,16 @@ async function searchOnline() {
 
 async function createResource() {
   if (!topic.value || !title.value) return
-  await api.post('/user/resources', null, { params: { topic: topic.value, title: title.value, platform: platform.value, url: url.value, summary: summary.value } })
-  title.value = ''
-  platform.value = ''
-  url.value = ''
-  summary.value = ''
-  await loadLocal()
+  try {
+    await api.post('/user/resources', null, { params: { topic: topic.value, title: title.value, platform: platform.value, url: url.value, summary: summary.value } })
+    title.value = ''
+    platform.value = ''
+    url.value = ''
+    summary.value = ''
+    await loadLocal()
+  } catch (e) {
+    error.value = e?.response?.data?.message || e?.message || '保存失败'
+  }
 }
 
 async function loadLocal() {
@@ -83,23 +92,33 @@ async function loadLocal() {
 }
 
 async function remove(id) {
-  await api.delete(`/user/resources/${id}`)
-  await loadLocal()
+  try {
+    await api.delete(`/user/resources/${id}`)
+    await loadLocal()
+  } catch (e) {
+    error.value = e?.response?.data?.message || e?.message || '删除失败'
+  }
 }
 
 watch(
   topic,
-  async (v) => {
+  (v) => {
+    clearTimeout(topicDebounce)
     if (!v?.trim()) {
       advice.value = ''
       error.value = ''
       list.value = []
       return
     }
-    await loadLocal()
+    topicDebounce = setTimeout(() => loadLocal(), 400)
   },
   { immediate: true }
 )
+
+onBeforeUnmount(() => {
+  aborted.value = true
+  clearTimeout(topicDebounce)
+})
 </script>
 
 <template>

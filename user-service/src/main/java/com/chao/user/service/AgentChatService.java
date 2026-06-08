@@ -752,28 +752,6 @@ public class AgentChatService {
         } catch (Exception ignored) {
         }
 
-        try {
-            Result<java.util.List<CourseResourceDto>> rr = resourceClient.listResources(null);
-            java.util.List<CourseResourceDto> resources = rr != null ? rr.getData() : java.util.List.of();
-            if (resources != null) {
-                for (CourseResourceDto r : resources) {
-                    if (r == null || r.getId() == null) continue;
-                    String text = (r.getTitle() == null ? "" : r.getTitle()) + "\n" + (r.getContentSummary() == null ? "" : r.getContentSummary());
-                    if (text.isBlank()) continue;
-                    java.util.Map<String, Object> meta = new java.util.HashMap<>();
-                    meta.put("type", "course");
-                    meta.put("resourceId", r.getId());
-                    meta.put("title", r.getTitle());
-                    meta.put("platform", r.getPlatform());
-                    meta.put("url", r.getSourceUrl());
-                    meta.put("topic", r.getTopic());
-                    docs.add(new Document("course:" + r.getId(), text, meta));
-                    if (docs.size() >= 500) break;
-                }
-            }
-        } catch (Exception ignored) {
-        }
-
         if (!docs.isEmpty()) {
             addDocsInBatches(vs, docs, 20);
             bucket.set("1");
@@ -1360,28 +1338,6 @@ public class AgentChatService {
                         meta.put("createdAt", r.getCreatedAt() != null ? r.getCreatedAt().toString() : "");
                         meta.put("durationSeconds", r.getDurationSeconds());
                         docs.add(new Document("punch:" + userId + ":" + r.getId(), text, meta));
-                        if (docs.size() >= 500) break;
-                    }
-                }
-            } catch (Exception ignored) {
-            }
-
-            try {
-                Result<List<CourseResourceDto>> rr = resourceClient.listResources(null);
-                List<CourseResourceDto> resources = rr != null ? rr.getData() : List.of();
-                if (resources != null) {
-                    for (CourseResourceDto r : resources) {
-                        if (r == null || r.getId() == null) continue;
-                        String text = (r.getTitle() == null ? "" : r.getTitle()) + "\n" + (r.getContentSummary() == null ? "" : r.getContentSummary());
-                        if (text.isBlank()) continue;
-                        Map<String, Object> meta = new HashMap<>();
-                        meta.put("type", "course");
-                        meta.put("resourceId", r.getId());
-                        meta.put("title", r.getTitle());
-                        meta.put("platform", r.getPlatform());
-                        meta.put("url", r.getSourceUrl());
-                        meta.put("topic", r.getTopic());
-                        docs.add(new Document("course:" + r.getId(), text, meta));
                         if (docs.size() >= 500) break;
                     }
                 }

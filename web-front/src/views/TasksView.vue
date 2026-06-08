@@ -5,6 +5,7 @@ import api from '../plugins/api'
 const loading = ref(false)
 const error = ref('')
 const tasks = ref([])
+const actionLoading = ref(new Set())
 
 async function load() {
   loading.value = true
@@ -20,8 +21,15 @@ async function load() {
 }
 
 async function updateStatus(taskId, status) {
-  await api.patch(`/user/tasks/${taskId}/status`, null, { params: { status } })
-  await load()
+  actionLoading.value.add(taskId)
+  try {
+    await api.patch(`/user/tasks/${taskId}/status`, null, { params: { status } })
+    await load()
+  } catch (e) {
+    error.value = e?.response?.data?.message || e?.message || '操作失败'
+  } finally {
+    actionLoading.value.delete(taskId)
+  }
 }
 
 onMounted(load)
@@ -40,8 +48,8 @@ onMounted(load)
     <v-list>
       <v-list-item v-for="t in tasks" :key="t.id" :title="t.title" :subtitle="t.description">
         <template #append>
-          <v-btn size="small" variant="tonal" color="success" class="mr-2" @click="updateStatus(t.id, 1)">完成</v-btn>
-          <v-btn size="small" variant="text" color="warning" @click="updateStatus(t.id, 2)">取消</v-btn>
+          <v-btn size="small" variant="tonal" color="success" class="mr-2" :loading="actionLoading.has(t.id)" @click="updateStatus(t.id, 1)">完成</v-btn>
+          <v-btn size="small" variant="text" color="warning" :disabled="actionLoading.has(t.id)" @click="updateStatus(t.id, 2)">取消</v-btn>
         </template>
       </v-list-item>
     </v-list>

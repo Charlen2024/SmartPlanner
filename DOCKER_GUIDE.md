@@ -19,12 +19,12 @@ docker-compose up -d --build
 
 该命令会自动：
 1. 构建各微服务的镜像（通过多阶段构建优化体积）
-2. 启动基础设施（Nacos, MySQL, Redis, RabbitMQ, ES, Seata）
+2. 启动基础设施（Nacos, MySQL, Redis, RabbitMQ, ES）
 3. 启动所有微服务并注册到 Nacos
 
 ## 3. 访问入口
 - **Nacos 控制台**: http://localhost:8848/nacos (账号/密码: nacos/nacos)
-- **RabbitMQ 管理界面**: http://localhost:15672 (账号/密码: vibe/vibe123)
+- **RabbitMQ 管理界面**: http://localhost:15672 (账号/密码: sp/sp123)
 - **微服务接口**:
     - Goal Service: http://localhost:8081
     - Schedule Engine: http://localhost:8082

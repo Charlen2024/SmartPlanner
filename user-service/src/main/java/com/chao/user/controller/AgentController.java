@@ -3,6 +3,7 @@ package com.chao.user.controller;
 import com.chao.common.dto.Result;
 import com.chao.user.dto.AgentChatResponse;
 import com.chao.user.service.AgentChatService;
+import com.chao.user.util.JwtUtils;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -24,7 +25,7 @@ public class AgentController {
 
     @PostMapping("/chat")
     public Result<AgentChatResponse> chat(@AuthenticationPrincipal Jwt jwt, @RequestBody(required = false) String question) {
-        Long userId = jwt.getClaim("userId");
+        Long userId = JwtUtils.getUserId(jwt);
         String answer = agentChatService.chat(userId, question);
         AgentChatResponse resp = new AgentChatResponse();
         resp.setAnswer(answer);
@@ -35,7 +36,7 @@ public class AgentController {
     public ResponseEntity<StreamingResponseBody> chatStream(
             @AuthenticationPrincipal Jwt jwt,
             @RequestBody(required = false) String question) {
-        Long userId = jwt.getClaim("userId");
+        Long userId = JwtUtils.getUserId(jwt);
 
         StreamingResponseBody body = outputStream -> {
             java.util.concurrent.atomic.AtomicReference<String> lastSent = new java.util.concurrent.atomic.AtomicReference<>("");

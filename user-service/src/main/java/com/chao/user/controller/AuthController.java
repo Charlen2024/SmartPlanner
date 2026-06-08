@@ -9,6 +9,7 @@ import com.chao.user.dto.AuthTokenResponse;
 import com.chao.user.entity.AppUser;
 import com.chao.user.service.AppUserService;
 import com.chao.user.service.JwtTokenService;
+import com.chao.user.util.JwtUtils;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -22,7 +23,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/auth")
 @RequiredArgsConstructor
-public class AuthController {
+    public class AuthController {
     private final AuthenticationManager authenticationManager;
     private final JwtTokenService jwtTokenService;
     private final AppUserService appUserService;
@@ -48,14 +49,13 @@ public class AuthController {
     @PostMapping("/refresh")
     public Result<AuthTokenResponse> refresh(@RequestBody AuthRefreshRequest request) {
         Jwt jwt = jwtTokenService.parse(request.getRefreshToken());
-        Object typ = jwt.getClaims().get("typ");
-        if (typ == null || !"refresh".equals(String.valueOf(typ))) {
+        String typ = JwtUtils.getStringClaim(jwt, "typ");
+        if (typ == null || !"refresh".equals(typ)) {
             return Result.fail(401, "Invalid refresh token");
         }
 
-        Object userIdClaim = jwt.getClaims().get("userId");
-        Long userId = userIdClaim != null ? Long.valueOf(String.valueOf(userIdClaim)) : null;
-        List<String> roles = jwt.getClaimAsStringList("roles");
+        Long userId = JwtUtils.getUserId(jwt);
+        List<String> roles = JwtUtils.getRoles(jwt);
         Authentication authentication = new UsernamePasswordAuthenticationToken(jwt.getSubject(), "N/A",
                 roles != null ? AuthorityUtils.createAuthorityList(roles.toArray(new String[0])) : AuthorityUtils.NO_AUTHORITIES);
 
@@ -66,14 +66,11 @@ public class AuthController {
     @GetMapping("/me")
     public Result<AuthMeResponse> me(@org.springframework.security.core.annotation.AuthenticationPrincipal Jwt jwt) {
         AuthMeResponse resp = new AuthMeResponse();
-        Object userIdClaim = jwt.getClaims().get("userId");
-        if (userIdClaim != null) {
-            resp.setUserId(Long.valueOf(String.valueOf(userIdClaim)));
-        }
-        resp.setUsername(jwt.getSubject());
-        resp.setRoles(jwt.getClaimAsStringList("roles"));
+        resp.setUserId(JwtUtils.getUserId(jwt));
+        resp.setUsername(JwtUtils.getUsername(jwt));
+        resp.setRoles(JwtUtils.getRoles(jwt));
         AppUser u = appUserService.getById(resp.getUserId());
-        resp.setScheduleImported(u != null ? Boolean.TRUE.equals(u.getScheduleImported()) : null);
+        resp.setScheduleImported(u != null ? !Boolean.FALSE.equals(u.getScheduleImported()) : null);
         resp.setFirstWeekMonday(u != null ? u.getFirstWeekMonday() : null);
         return Result.success(resp);
     }

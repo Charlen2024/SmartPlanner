@@ -1,16 +1,16 @@
 -- =====================================================
 -- 创建数据库
 -- =====================================================
-CREATE DATABASE IF NOT EXISTS vibe_user CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE DATABASE IF NOT EXISTS vibe_goal CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE DATABASE IF NOT EXISTS vibe_schedule CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE DATABASE IF NOT EXISTS vibe_punch CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE DATABASE IF NOT EXISTS vibe_resource CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS sp_user CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS sp_goal CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS sp_schedule CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS sp_punch CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS sp_resource CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- =====================================================
--- 1. vibe_user 数据库 - 用户相关表
+-- 1. sp_user 数据库 - 用户相关表
 -- =====================================================
-USE vibe_user;
+USE sp_user;
 
 -- 用户表 (AppUser)
 CREATE TABLE IF NOT EXISTS app_users (
@@ -24,9 +24,9 @@ CREATE TABLE IF NOT EXISTS app_users (
 );
 
 -- =====================================================
--- 2. vibe_goal 数据库 - 目标相关表
+-- 2. sp_goal 数据库 - 目标相关表
 -- =====================================================
-USE vibe_goal;
+USE sp_goal;
 
 -- 目标表 (GoalDto)
 CREATE TABLE IF NOT EXISTS goals (
@@ -73,9 +73,9 @@ CREATE TABLE IF NOT EXISTS user_journals (
 );
 
 -- =====================================================
--- 3. vibe_schedule 数据库 - 排程相关表
+-- 3. sp_schedule 数据库 - 排程相关表
 -- =====================================================
-USE vibe_schedule;
+USE sp_schedule;
 
 -- 课程表 (ClassSchedule)
 CREATE TABLE IF NOT EXISTS class_schedule (
@@ -122,9 +122,9 @@ CREATE TABLE IF NOT EXISTS plan_candidates (
 );
 
 -- =====================================================
--- 4. vibe_punch 数据库 - 打卡相关表
+-- 4. sp_punch 数据库 - 打卡相关表
 -- =====================================================
-USE vibe_punch;
+USE sp_punch;
 
 -- 用户习惯表 (UserHabit)
 CREATE TABLE IF NOT EXISTS user_habits (
@@ -158,9 +158,9 @@ CREATE TABLE IF NOT EXISTS punch_records (
 );
 
 -- =====================================================
--- 5. vibe_resource 数据库 - 资源相关表
+-- 5. sp_resource 数据库 - 资源相关表
 -- =====================================================
-USE vibe_resource;
+USE sp_resource;
 
 -- 课程资源表 (CourseResource)
 CREATE TABLE IF NOT EXISTS course_resources (
@@ -179,12 +179,12 @@ CREATE TABLE IF NOT EXISTS course_resources (
 -- =====================================================
 -- 验证表创建完成
 -- =====================================================
-SELECT 'vibe_user' AS database_name, COUNT(*) AS table_count FROM information_schema.tables WHERE table_schema = 'vibe_user'
+SELECT 'sp_user' AS database_name, COUNT(*) AS table_count FROM information_schema.tables WHERE table_schema = 'sp_user'
 UNION ALL
-SELECT 'vibe_goal', COUNT(*) FROM information_schema.tables WHERE table_schema = 'vibe_goal'
+SELECT 'sp_goal', COUNT(*) FROM information_schema.tables WHERE table_schema = 'sp_goal'
 UNION ALL
-SELECT 'vibe_schedule', COUNT(*) FROM information_schema.tables WHERE table_schema = 'vibe_schedule'
+SELECT 'sp_schedule', COUNT(*) FROM information_schema.tables WHERE table_schema = 'sp_schedule'
 UNION ALL
-SELECT 'vibe_punch', COUNT(*) FROM information_schema.tables WHERE table_schema = 'vibe_punch'
+SELECT 'sp_punch', COUNT(*) FROM information_schema.tables WHERE table_schema = 'sp_punch'
 UNION ALL
-SELECT 'vibe_resource', COUNT(*) FROM information_schema.tables WHERE table_schema = 'vibe_resource';
+SELECT 'sp_resource', COUNT(*) FROM information_schema.tables WHERE table_schema = 'sp_resource';

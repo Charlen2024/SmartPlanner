@@ -53,18 +53,18 @@ SmartPlanner 是一个面向个人学习场景的微服务应用：从“目标 
 | schedule-engine | 8082 | 排程与日计划（支持 job 形式异步执行） |
 | resource-search | 8083 | 资源库管理、ES 检索、RAG 增强、去重、资源推荐 job |
 | punch-service | 8084 | 打卡记录、习惯数据 |
+| admin-server | 9090 | Spring Boot Admin 监控面板（健康、指标、日志、线程、环境变量） |
 
 ### 2.2 基础设施
 
 | 组件 | 端口 | 说明 |
 |---|---:|---|
 | Nacos | 8848 | 服务注册/发现 |
-| MySQL | 3306 | 多库（`vibe_user/vibe_goal/vibe_schedule/vibe_resource/vibe_punch`） |
+| MySQL | 3306 | 多库（`sp_user/sp_goal/sp_schedule/sp_resource/sp_punch`） |
 | RedisStack | 6379 | 缓存/限流 + 向量检索（RedisVectorStore） |
 | RabbitMQ | 5672 / 15672 | 异步任务与通知 |
 | Elasticsearch | 9201 | 资源检索索引（容器内 9200 映射到宿主 9201） |
-| Seata Server | 8091 | compose 已包含（当前业务是否使用依赖于服务内部实现） |
-
+| Adminer | 8085 | 轻量数据库管理（~500KB 单文件，类 phpMyAdmin） |
 ### 2.3 架构拓扑图
 
 ```mermaid
@@ -76,6 +76,7 @@ graph TB
   SE["schedule-engine :8082"]
   RS["resource-search :8083"]
   PS["punch-service :8084"]
+  Admin["admin-server :9090"]
   Nacos["Nacos :8848"]
   MySQL[("MySQL :3306")]
   Redis[("Redis :6379")]
@@ -100,6 +101,7 @@ graph TB
   RS -.-> Nacos
   PS -.-> Nacos
   GW -.-> Nacos
+  Admin -.-> Nacos
 
   GS --> MySQL
   SE --> MySQL
@@ -144,11 +146,35 @@ graph TB
 - `accessToken`：用于请求 `Authorization: Bearer ...`
 - `refreshToken`：用于刷新 token
 
+**JWT 令牌结构（HS256 签名）**
+
+访问令牌和刷新令牌均包含以下 claims：
+
+| Claim | 类型 | 说明 |
+|-------|------|------|
+| `sub` | String | 用户名 |
+| `iss` | String | 签发者（`security.jwt.issuer`，默认 `http://sp`） |
+| `iat` | Instant | 签发时间 |
+| `exp` | Instant | 过期时间 |
+| `typ` | String | `"access"` 或 `"refresh"` |
+| `userId` | Number | 用户数据库 ID |
+| `roles` | List\<String\> | 用户角色列表 |
+
+令牌签发由 `JwtTokenService` 通过 Spring Security 的 `JwtEncoder` + `JwsHeader.with(MacAlgorithm.HS256)` 完成，验证由 `JwtDecoder` 处理。user-service 中提供了 `JwtUtils` 工具类（`getUserId` / `getUsername` / `getRoles` / `getStringClaim`），供各 Controller 统一获取 claims，避免手动类型转换。
+
 网关会在用户携带 JWT 时，把 `userId/username/roles` 透传为请求头（见 [UserContextForwardFilter.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/gateway-service/src/main/java/com/chao/gateway/filter/UserContextForwardFilter.java)）：
 
 - `X-User-Id`
 - `X-Username`
 - `X-Roles`
+
+**安全过滤链架构（双重链，防止过期 token 阻塞登录）**
+
+gateway 和 user-service 均采用双 `SecurityFilterChain` 设计：
+- **链 0（高优先级）**：匹配 `/api/auth/**`、`/actuator/**` 等公开路径，不配置 OAuth2 Resource Server，不处理 Bearer token，直接放行
+- **链 1（低优先级）**：匹配其余所有路径，进行 JWT 校验
+
+这样即使用户浏览器缓存了过期 token 后访问登录页，也不会被 `BearerTokenAuthenticationFilter` 拦截。统一异常处理器 `GlobalExceptionHandler`（位于 common 模块，通过 `scanBasePackages = "com.chao"` 被所有服务共享）提供分层异常处理：`AuthenticationException` → 401 "用户名或密码错误"，`IllegalArgumentException` 等 → 400，其余 → 500 "服务异常"。
 
 ### 3.4 网关过滤链（可选 API Key、限流、用户上下文）
 
@@ -302,7 +328,7 @@ weekNumber = floor(daysBetween / 7) + 1
 
 ### 8.1 resource-search：资源库 + ES 候选检索
 
-MySQL：`vibe_resource.course_resources`
+MySQL：`sp_resource.course_resources`
 Elasticsearch：用于 title/topic/summary 等字段候选检索（容器内 9200 对外映射 9201）
 
 补充：resource-search 内置 Bilibili 定时爬虫（HTTP 抓取 + 重试 + 去重），用于持续补全 `course_resources`：
@@ -363,8 +389,9 @@ user-service 使用 Spring AI 的 `RedisVectorStore`（DashScope embedding）作
 - 向量库配置：[RedissonConfig.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/user-service/src/main/java/com/chao/user/config/RedissonConfig.java)
 - 课程索引（`ensureCoursesIndexed`）：
   - 懒初始化：首次向量检索时才从 resource-search 拉取资源列表（最多 800 条），分批写入 RedisStack（每批 20 条，避免 embedding API 单次输入限制）
-  - 刷新周期：索引标记 `sp:rag:indexed:courses` 在 Redis 中 TTL 7 天，过期后下次查询自动重建
-  - 这意味着爬虫新增的资源最长 7 天后才能被向量检索命中
+  - 刷新周期：索引标记 `sp:rag:indexed:courses` 在 Redis 中 TTL 1 天，过期后下次查询自动重建
+  - 这意味着爬虫新增的资源最长 1 天后就能被向量检索命中
+  - 课程索引统一由 `UserController.ensureCoursesIndexed()` 全局维护，`AgentChatService.ensureUserRagIndexed()` 不再按用户重复嵌入课程（避免同一批课程被反复调用 embedding API）
 
 ### 8.7 user-service：任务 → 课程资源推荐（RAG + 缓存 + 兜底）
 
@@ -442,10 +469,12 @@ Agent 流式接口走 `text/plain` 分块输出，链路上任何一层缓冲/�
 
 直接接口见 [PunchController.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/punch-service/src/main/java/com/chao/punch/controller/PunchController.java)：
 
-- `POST /api/punch/submit`：提交打卡（可带 evidence 文件、taskTitle 任务名快照）
-- `GET  /api/punch/records`：查询打卡记录（含 taskTitle 字段）
-- `GET  /api/punch/streak`：连续打卡
-- `GET/PUT /api/punch/habits`：读取/更新习惯画像字段
+- `POST /api/punch/submit`：提交打卡（可带 evidence 截图文件、taskTitle 任务名快照、durationSeconds 学习时长、startedAt/endedAt 时间戳）。提交后自动更新连续打卡天数（Redis 缓存）和习惯指标
+- `GET  /api/punch/records`：查询打卡记录（含 taskTitle 字段，支持按 taskId 和日期范围过滤）
+- `DELETE /api/punch/records/{recordId}`：删除打卡记录
+- `GET  /api/punch/streak`：连续打卡天数（基于数据库日历去重计算，最长回溯 60 天）
+- `GET /api/punch/habits`：读取习惯画像（morningPersonScore、focusDurationAvg、procrastinationIndex）
+- `PUT /api/punch/habits`：更新习惯画像字段（由画像分析流程调用）
 
 ### 9.2 画像与洞察（user-service）
 
@@ -454,7 +483,7 @@ Agent 流式接口走 `text/plain` 分块输出，链路上任何一层缓冲/�
 - `GET  /api/user/insights`：近 7 天洞察（准时率、平均延迟、完成率等）
 - `GET  /api/user/portrait`：画像汇总（habits + insights + recommendation + tips）。当画像数据过期/为空时会自动触发一次 AI 分析来补齐建议与推荐参数。
 - `POST /api/user/portrait/recompute`：重新计算画像（强制走 AI 分析，返回 recommendation + tips，并回写 habits 的画像字段）
-- `GET  /api/user/weather?location=城市名`：天气查询（wttr.in，支持中文/英文城市名；若不传 location 则使用用户保存的城市偏好）。前端仪表盘城市选择器通过 `PUT /api/user/weather-location?location=城市名` 保存城市到 Redis，Agent 天气 Tool 和仪表盘天气卡片均自动读取
+- `GET  /api/user/weather?location=城市名`：天气查询（wttr.in，支持中文/英文城市名；若不传 location 则使用用户保存的城市偏好）。响应使用 `WttrResponse` DTO 反序列化 wttr.in JSON，提取温度/体感温度/风速/湿度/天气描述，英文天气描述自动翻译为中文。前端仪表盘城市选择器通过 `PUT /api/user/weather-location?location=城市名` 保存城市到 Redis（缓存 365 天），Agent 天气 Tool 和仪表盘天气卡片均自动读取
 
 ### 9.3 习惯指标计算原理（user-service）
 
@@ -636,9 +665,11 @@ docker compose up -d --build
 
 - 前端：http://localhost:5175
 - 网关（API）：http://localhost:8088
-- RabbitMQ 管理台：http://localhost:15672（默认账号 `vibe` / `vibe123`）
+- RabbitMQ 管理台：http://localhost:15672（默认账号 `sp` / `sp123`）
 - Nacos：http://localhost:8848
 - Elasticsearch：http://localhost:9201
+- Spring Boot Admin：http://localhost:9090
+- Adminer：http://localhost:8085（系统 MySQL，账号 root / 密码 root）
 
 ### 11.2 本地开发（不走容器）
 

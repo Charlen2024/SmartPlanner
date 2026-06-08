@@ -11,7 +11,10 @@ import { createPinia } from 'pinia'
 import { createRouter } from './router'
 import { setupApi } from './plugins/api'
 
-const savedTheme = localStorage.getItem('theme') || 'vibeLight'
+let savedTheme = localStorage.getItem('theme') || 'spLight'
+if (savedTheme === 'vibeLight') savedTheme = 'spLight'
+if (savedTheme === 'vibeDark') savedTheme = 'spDark'
+localStorage.setItem('theme', savedTheme)
 
 const vuetify = createVuetify({
   components,
@@ -25,7 +28,7 @@ const vuetify = createVuetify({
   theme: {
     defaultTheme: savedTheme,
     themes: {
-      vibeLight: {
+      spLight: {
         dark: false,
         colors: {
           primary: '#2563EB',
@@ -35,7 +38,7 @@ const vuetify = createVuetify({
           'on-surface': '#0F172A',
         },
       },
-      vibeDark: {
+      spDark: {
         dark: true,
         colors: {
           primary: '#3B82F6',

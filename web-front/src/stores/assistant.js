@@ -197,54 +197,96 @@ export const useAssistantStore = defineStore('assistant', {
         aiMsg = { _key: nextMsgId(), role: 'assistant', text: '' }
         this.chatMessages.push(aiMsg)
         aiMsg = this.chatMessages[this.chatMessages.length - 1]
-        const token = localStorage.getItem('accessToken')
-        const ctrl = new AbortController()
-        const t = setTimeout(() => ctrl.abort(), 120000)
-        try {
-          const res = await fetch('/api/user/agent/chat/stream', {
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
-            body: text, signal: ctrl.signal,
-          })
-          if (!res.ok) throw new Error('HTTP ' + res.status)
-          const reader = res.body?.getReader?.()
-          if (!reader) { aiMsg.text = String(await res.text() || '服务返回为空'); return }
-          const decoder = new TextDecoder('utf-8')
-          let buf = '', sseBuf = '', lastFlush = 0, lastFlushed = ''
-          const flush = () => { if (buf !== lastFlushed) { lastFlushed = buf; aiMsg.text = buf; lastFlush = Date.now() } }
-          const processSSE = () => {
-            const lines = sseBuf.split('\n'); sseBuf = lines.pop() || ''
-            let data = [], inData = false, inEvent = false
-            for (const l of lines) {
-              if (l.startsWith('event:')) { inData = false; inEvent = true }
-              else if (l.startsWith('data:')) { if (!inEvent) data.push(l.slice(5).trimStart()); inData = true; inEvent = false }
-              else if (inData && !inEvent) data.push(l)
+
+        let token = localStorage.getItem('accessToken')
+        let streamRes = null
+
+        const doStream = async (accessToken) => {
+          const ctrl = new AbortController()
+          const t = setTimeout(() => ctrl.abort(), 120000)
+          try {
+            const res = await fetch('/api/user/agent/chat/stream', {
+              method: 'POST',
+              headers: { 'Content-Type': 'text/plain', ...(accessToken ? { Authorization: 'Bearer ' + accessToken } : {}) },
+              body: text, signal: ctrl.signal,
+            })
+            if (res.status === 401) return { needRefresh: true }
+            if (!res.ok) throw new Error('HTTP ' + res.status)
+            return { res }
+          } finally { clearTimeout(t) }
+        }
+
+        const first = await doStream(token)
+        if (first.needRefresh) {
+          const refreshToken = localStorage.getItem('refreshToken')
+          if (refreshToken) {
+            try {
+              const refreshRes = await api.post('/auth/refresh', { refreshToken })
+              const newAccess = refreshRes?.data?.data?.accessToken
+              const newRefresh = refreshRes?.data?.data?.refreshToken
+              if (newAccess) {
+                localStorage.setItem('accessToken', newAccess)
+                if (newRefresh) localStorage.setItem('refreshToken', newRefresh)
+                token = newAccess
+                const retry = await doStream(token)
+                if (retry.res) streamRes = retry.res
+                else if (retry.needRefresh) throw new Error('会话已过期，请重新登录')
+              } else {
+                throw new Error('会话已过期，请重新登录')
+              }
+            } catch (e) {
+              if (e.message === '会话已过期，请重新登录') throw e
+              const retry2 = await doStream(token)
+              if (retry2.res) streamRes = retry2.res
+              else throw new Error('服务异常，请稍后再试')
             }
-            if (data.length) {
-              while (data.length && data[data.length - 1] === '') data.pop()
-              const chunk = data.join('\n')
-              if (chunk && !buf.endsWith(chunk)) buf += chunk
-            }
-            if (Date.now() - lastFlush > 50) flush()
           }
-          while (true) {
-            const { value, done } = await reader.read()
-            if (done) { processSSE(); flush(); break }
-            sseBuf += decoder.decode(value, { stream: true })
-            processSSE()
+        } else if (first.res) {
+          streamRes = first.res
+        }
+
+        if (!streamRes) {
+          aiMsg.text = '服务连接失败，请稍后再试'
+          return
+        }
+
+        const reader = streamRes.body?.getReader?.()
+        if (!reader) { aiMsg.text = String(await streamRes.text() || '服务返回为空'); return }
+        const decoder = new TextDecoder('utf-8')
+        let buf = '', sseBuf = '', lastFlush = 0, lastFlushed = ''
+        const flush = () => { if (buf !== lastFlushed) { lastFlushed = buf; aiMsg.text = buf; lastFlush = Date.now() } }
+        const processSSE = () => {
+          const lines = sseBuf.split('\n'); sseBuf = lines.pop() || ''
+          let data = [], inData = false, inEvent = false
+          for (const l of lines) {
+            if (l.startsWith('event:')) { inData = false; inEvent = true }
+            else if (l.startsWith('data:')) { if (!inEvent) data.push(l.slice(5).trimStart()); inData = true; inEvent = false }
+            else if (inData && !inEvent) data.push(l)
           }
-          if (aiMsg.text && aiMsg.text.trim()) {
-            aiMsg.text = dedupParagraphs(aiMsg.text.trim())
-          } else {
-            aiMsg.text = '我暂时没想好，可以换个问法吗？'
+          if (data.length) {
+            while (data.length && data[data.length - 1] === '') data.pop()
+            const chunk = data.join('\n')
+            if (chunk && !buf.endsWith(chunk)) buf += chunk
           }
-          const navPaths = extractNavigateDirective(aiMsg.text)
-          if (navPaths?.length) {
-            aiMsg.navs = navPaths.map(p => { const it = NAV_ITEMS.find(x => x.to === p); return { to: p, title: it?.title || p } })
-            aiMsg.text = stripNavigateDirective(aiMsg.text)
-          }
-          aiMsg.html = renderAiHtml(aiMsg.text)
-        } finally { clearTimeout(t) }
+          if (Date.now() - lastFlush > 50) flush()
+        }
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) { processSSE(); flush(); break }
+          sseBuf += decoder.decode(value, { stream: true })
+          processSSE()
+        }
+        if (aiMsg.text && aiMsg.text.trim()) {
+          aiMsg.text = dedupParagraphs(aiMsg.text.trim())
+        } else {
+          aiMsg.text = '我暂时没想好，可以换个问法吗？'
+        }
+        const navPaths = extractNavigateDirective(aiMsg.text)
+        if (navPaths?.length) {
+          aiMsg.navs = navPaths.map(p => { const it = NAV_ITEMS.find(x => x.to === p); return { to: p, title: it?.title || p } })
+          aiMsg.text = stripNavigateDirective(aiMsg.text)
+        }
+        aiMsg.html = renderAiHtml(aiMsg.text)
       } catch (e) {
         const msg = String(e?.message || '服务异常，请稍后再试')
         if (aiMsg) aiMsg.text = msg

@@ -27,12 +27,21 @@ async function load() {
   }
 }
 
+const creating = ref(false)
+
 async function create() {
-  if (!content.value) return
-  await api.post('/user/journals', null, { params: { content: content.value, mood: mood.value } })
-  content.value = ''
-  mood.value = ''
-  await load()
+  if (!content.value?.trim()) return
+  creating.value = true
+  try {
+    await api.post('/user/journals', null, { params: { content: content.value.trim(), mood: mood.value } })
+    content.value = ''
+    mood.value = ''
+    await load()
+  } catch (e) {
+    error.value = e?.response?.data?.message || e?.message || '保存失败'
+  } finally {
+    creating.value = false
+  }
 }
 
 function askDelete(j) {
@@ -70,7 +79,7 @@ onMounted(load)
       <v-text-field v-model="mood" label="心情" variant="outlined" density="comfortable" />
     </v-col>
     <v-col cols="12" md="2">
-      <v-btn color="primary" :loading="loading" @click="create">记录</v-btn>
+      <v-btn color="primary" :loading="creating" :disabled="!content?.trim()" @click="create">记录</v-btn>
     </v-col>
   </v-row>
   <v-alert v-if="error" type="error" variant="tonal" class="mb-4">{{ error }}</v-alert>

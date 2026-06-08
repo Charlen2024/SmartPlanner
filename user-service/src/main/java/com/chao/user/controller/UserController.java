@@ -9,6 +9,7 @@ import com.chao.common.dto.*;
 import com.chao.user.dto.DashboardDto;
 import com.chao.user.service.UserService;
 import com.chao.user.service.TaskAdviceAiService;
+import com.chao.user.util.JwtUtils;
 import lombok.RequiredArgsConstructor;
 import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
@@ -611,7 +612,7 @@ public class UserController {
                 return false;
             }
             b.set("1");
-            b.expire(Duration.ofDays(7));
+            b.expire(Duration.ofDays(1));
             return true;
         } catch (Exception e) {
             return false;
@@ -1088,13 +1089,7 @@ public class UserController {
     }
 
     private Long resolveUserId(Jwt jwt, Long headerUserId, Long userId) {
-        Long jwtUserId = null;
-        if (jwt != null) {
-            Object claim = jwt.getClaims().get("userId");
-            if (claim != null) {
-                jwtUserId = Long.valueOf(String.valueOf(claim));
-            }
-        }
+        Long jwtUserId = jwt != null ? JwtUtils.getUserId(jwt) : null;
 
         if (jwtUserId != null) {
             if (headerUserId != null && !jwtUserId.equals(headerUserId)) {

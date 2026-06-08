@@ -12,6 +12,7 @@ COPY resource-search/pom.xml resource-search/
 COPY punch-service/pom.xml punch-service/
 COPY user-service/pom.xml user-service/
 COPY gateway-service/pom.xml gateway-service/
+COPY admin-server/pom.xml admin-server/
 
 # 2. 复制 common 和目标服务的源码
 COPY common/src common/src

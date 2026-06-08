@@ -12,6 +12,7 @@ const notify = useNotifyStore()
 
 const loading = ref(false)
 const error = ref('')
+const busy = ref(false)
 const date = ref('')
 const free = ref([])
 const schedules = ref([])
@@ -177,21 +178,48 @@ const freeBlocks = computed(() =>
     .filter((f) => f.style),
 )
 
-const classBlocks = computed(() =>
-  (dayClasses.value ?? [])
+const timelineBlocks = computed(() => {
+  const classList = (dayClasses.value ?? [])
     .map((c) => {
       const start = `${date.value}T${String(c.startTime).slice(0, 5)}:00`
       const end = `${date.value}T${String(c.endTime).slice(0, 5)}:00`
-      return { ...c, _start: start, _end: end, style: blockStyle(start, end) }
+      return { ...c, _kind: 'class', _start: start, _end: end, style: blockStyle(start, end) }
     })
-    .filter((c) => c.style),
-)
+    .filter((c) => c.style)
 
-const scheduleBlocks = computed(() =>
-  (filteredSchedules.value ?? [])
-    .map((s) => ({ ...s, style: blockStyle(s.startTime, s.endTime) }))
-    .filter((s) => s.style),
-)
+  const taskList = (filteredSchedules.value ?? [])
+    .map((s) => ({ ...s, _kind: 'schedule', style: blockStyle(s.startTime, s.endTime) }))
+    .filter((s) => s.style)
+
+  // Merge and lay out all blocks together to avoid class/task overlap
+  const all = [...classList, ...taskList].sort((a, b) => (a._start || '').localeCompare(b._start || ''))
+  if (!all.length) return []
+  const groups = []
+  let cur = [all[0]]
+  let curEnd = all[0]._end || ''
+  for (let i = 1; i < all.length; i++) {
+    const s = all[i]._start || ''
+    if (s < curEnd) {
+      cur.push(all[i])
+      if ((all[i]._end || '') > curEnd) curEnd = all[i]._end || ''
+    } else {
+      groups.push(cur)
+      cur = [all[i]]
+      curEnd = all[i]._end || ''
+    }
+  }
+  groups.push(cur)
+  const margin = 1.5
+  for (const g of groups) {
+    if (g.length <= 1) continue
+    const n = g.length
+    const pct = (100 - margin * (n + 1)) / n
+    g.forEach((b, col) => {
+      b.style = { ...b.style, left: `${margin + col * (pct + margin)}%`, width: `${pct}%` }
+    })
+  }
+  return all
+})
 
 const doneCount = computed(() => (filteredSchedules.value ?? []).filter((s) => Number(s?.status) === 1).length)
 const totalCount = computed(() => (filteredSchedules.value ?? []).length)
@@ -283,6 +311,7 @@ async function updateScheduleStatus(id, status) {
 
 async function importSchedule() {
   if (!file.value) return
+  busy.value = true
   const fd = new FormData()
   fd.append('file', file.value)
   if (firstWeekMonday.value) fd.append('firstWeekMonday', firstWeekMonday.value)
@@ -321,6 +350,8 @@ async function importSchedule() {
     }
   } catch (e) {
     error.value = e?.response?.data?.message || '导入失败（支持 .ics / .xlsx / .csv）'
+  } finally {
+    busy.value = false
   }
 }
 
@@ -339,10 +370,14 @@ async function loadClasses(dateParam) {
 }
 
 async function clearClasses() {
-  await api.delete('/user/schedule/classes')
-  dayClassesFiltered.value = null
-  await loadClasses()
-  if (date.value) await loadClasses(date.value)
+  busy.value = true
+  try {
+    await api.delete('/user/schedule/classes')
+    dayClassesFiltered.value = null
+    await loadClasses()
+  } finally {
+    busy.value = false
+  }
 }
 
 onMounted(async () => {
@@ -350,7 +385,8 @@ onMounted(async () => {
     const t = new Date()
     date.value = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`
   }
-  await Promise.all([loadSchedules(), loadClasses(), loadClasses(date.value)])
+  await Promise.all([loadSchedules(), loadClasses()])
+  if (date.value) await loadClasses(date.value)
 })
 
 watch(
@@ -624,24 +660,14 @@ function fmtHm(dt) {
                 <div v-for="(b, i) in freeBlocks" :key="'free-' + i" class="timeline-free" :style="b.style" />
 
                 <div
-                  v-for="(b, i) in classBlocks"
-                  :key="'class-' + (b.id ?? i)"
-                  class="timeline-block timeline-class"
+                  v-for="(b, i) in timelineBlocks"
+                  :key="(b._kind || 'block') + '-' + (b.id ?? i)"
+                  class="timeline-block"
+                  :class="b._kind === 'class' ? 'timeline-class' : ['timeline-task', { 'timeline-task-done': Number(b.status) === 1 }]"
                   :style="b.style"
                 >
-                  <div class="timeline-title">{{ b.courseName }}</div>
-                  <div class="timeline-sub">{{ String(b.startTime).slice(0, 5) }} - {{ String(b.endTime).slice(0, 5) }} {{ b.location || '' }}</div>
-                </div>
-
-                <div
-                  v-for="(b, i) in scheduleBlocks"
-                  :key="'task-' + (b.id ?? i)"
-                  class="timeline-block timeline-task"
-                  :class="{ 'timeline-task-done': Number(b.status) === 1 }"
-                  :style="b.style"
-                >
-                  <div class="timeline-title">{{ b.taskTitle || `任务 ${b.taskId}` }}</div>
-                  <div class="timeline-sub">{{ fmt(b.startTime).slice(11, 16) }} - {{ fmt(b.endTime).slice(11, 16) }}</div>
+                  <div class="timeline-title">{{ b._kind === 'class' ? b.courseName : (b.taskTitle || '任务 ' + b.taskId) }}</div>
+                  <div class="timeline-sub">{{ b._kind === 'class' ? (String(b.startTime).slice(0, 5) + ' - ' + String(b.endTime).slice(0, 5) + ' ' + (b.location || '')) : (fmt(b.startTime).slice(11, 16) + ' - ' + fmt(b.endTime).slice(11, 16)) }}</div>
                 </div>
               </div>
             </div>

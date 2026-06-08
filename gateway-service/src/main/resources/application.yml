@@ -48,3 +48,12 @@ gateway:
   ratelimit:
     replenish-rate: ${GATEWAY_RL_REPLENISH:5}
     burst-capacity: ${GATEWAY_RL_BURST:10}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+  endpoint:
+    health:
+      show-details: always

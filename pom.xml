@@ -18,6 +18,7 @@
         <spring-ai-alibaba.version>1.1.2.0</spring-ai-alibaba.version>
         <mybatis-plus.version>3.5.7</mybatis-plus.version>
         <redisson.version>3.27.2</redisson.version>
+        <spring-boot-admin.version>3.2.3</spring-boot-admin.version>
     </properties>
 
     <modules>
@@ -28,6 +29,7 @@
         <module>punch-service</module>
         <module>user-service</module>
         <module>gateway-service</module>
+        <module>admin-server</module>
     </modules>
 
     <dependencyManagement>
@@ -86,6 +88,18 @@
                 <version>${spring-ai-alibaba.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>de.codecentric</groupId>
+                <artifactId>spring-boot-admin-dependencies</artifactId>
+                <version>${spring-boot-admin.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>de.codecentric</groupId>
+                <artifactId>spring-boot-admin-starter-client</artifactId>
+                <version>${spring-boot-admin.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

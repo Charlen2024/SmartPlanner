@@ -52,6 +52,12 @@ export const useNotifyStore = defineStore('notify', {
         type,
         timeout,
       })
+      if (timeout > 0) {
+        setTimeout(() => {
+          this.close(id)
+          setTimeout(() => this.remove(id), 300)
+        }, timeout)
+      }
       return id
     },
     close(id) {

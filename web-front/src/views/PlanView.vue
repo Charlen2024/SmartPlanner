@@ -351,7 +351,7 @@ onBeforeUnmount(() => {
 
       <v-stepper-window>
         <v-stepper-window-item :value="1">
-          <v-card v-if="needsImport || showScheduleUpload" class="pa-6">
+          <v-card v-if="needsImport || showScheduleUpload" class="pa-6" elevation="0">
             <div class="text-h6 font-weight-bold mb-4">上传大学课表</div>
 
             <!-- 文件上传区域 -->
@@ -377,7 +377,7 @@ onBeforeUnmount(() => {
               />
               <div v-if="!scheduleFile" class="text-body-1 font-weight-medium">点击或拖拽文件到此处</div>
               <div v-else class="text-body-1 font-weight-medium text-success">
-                {{ Array.isArray(scheduleFile) ? scheduleFile[0]?.name : scheduleFile?.name }}
+                {{ (scheduleFile?.[0] ?? scheduleFile)?.name || '' }}
               </div>
               <div class="text-caption mt-1" style="opacity:0.6">支持 .ics / .xlsx / .csv</div>
             </div>
@@ -455,7 +455,7 @@ onBeforeUnmount(() => {
             </v-alert>
           </v-card>
 
-          <v-card v-else class="pa-4">
+          <v-card v-else class="pa-4" elevation="0">
             <div class="d-flex align-center mb-3">
               <v-icon icon="mdi-check-circle" color="success" size="28" class="mr-3" />
               <div>
@@ -473,7 +473,7 @@ onBeforeUnmount(() => {
         </v-stepper-window-item>
 
         <v-stepper-window-item :value="2">
-          <v-card class="pa-4">
+          <v-card class="pa-4" elevation="0">
             <div class="text-subtitle-1 font-weight-semibold mb-2">添加新目标</div>
             <v-textarea v-model="goalText" label="例如：学习分布式系统" variant="outlined" rows="3" auto-grow />
             <v-text-field v-model="topic" label="资源主题（用于推荐）" variant="outlined" />
@@ -484,13 +484,13 @@ onBeforeUnmount(() => {
         </v-stepper-window-item>
 
         <v-stepper-window-item :value="3">
-          <v-card class="pa-4">
+          <v-card class="pa-4" elevation="0">
             <v-alert v-if="tasksPolling" type="info" variant="tonal" class="mb-3">
               {{ tasksPollingMessage || '任务拆解进行中…' }}
             </v-alert>
             <v-alert v-else-if="!tasks?.length" type="info" variant="tonal" class="mb-3">暂无待办任务，稍后刷新重试</v-alert>
-            <div v-else class="vibe-scroll">
-              <div class="vibe-scroll-header">
+            <div v-else class="sp-scroll">
+              <div class="sp-scroll-header">
                 <div class="d-flex align-center">
                   <div class="text-subtitle-1 font-weight-semibold">任务列表</div>
                   <v-btn variant="tonal" class="mr-2" :disabled="!currentGoalId" @click="acceptTasks">满意</v-btn>
@@ -516,7 +516,7 @@ onBeforeUnmount(() => {
         <v-stepper-window-item :value="4">
           <v-row>
             <v-col cols="12" md="6">
-              <v-card class="pa-4">
+              <v-card class="pa-4" elevation="0">
                 <div class="text-subtitle-1 font-weight-semibold mb-2">排程</div>
                 <v-alert type="info" variant="tonal" class="mb-3">
                   课表提交统一在本页完成。智能排程统一在「目标」页生成（异步执行，完成后会通知）。
@@ -528,7 +528,7 @@ onBeforeUnmount(() => {
               </v-card>
             </v-col>
             <v-col cols="12" md="6">
-              <v-card class="pa-4">
+              <v-card class="pa-4" elevation="0">
                 <div class="text-subtitle-1 font-weight-semibold mb-2">完成</div>
                 <div class="d-flex justify-end">
                   <v-btn color="primary" @click="finishWizard">完成</v-btn>
@@ -581,7 +581,7 @@ onBeforeUnmount(() => {
   background: rgba(var(--v-theme-on-surface), 0.03);
 }
 
-.vibe-scroll {
+.sp-scroll {
   max-height: 64vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
@@ -590,7 +590,7 @@ onBeforeUnmount(() => {
   border-radius: 16px;
 }
 
-.vibe-scroll-header {
+.sp-scroll-header {
   position: sticky;
   top: 0;
   z-index: 2;

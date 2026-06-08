@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import api from '../plugins/api'
 import { useNotifyStore } from '../stores/notify'
 
@@ -23,6 +23,7 @@ const planDate = ref(dateStr(new Date()))
 const planDays = ref(1)
 const scheduleWaiting = ref(false)
 const scheduleWaitingGoalId = ref(null)
+let scheduleWaitingTimer = null
 const deleteGoalOpen = ref(false)
 const deleteGoalBusy = ref(false)
 const deletingGoal = ref(null)
@@ -137,9 +138,11 @@ async function load() {
     pendingTasks.value = pb?.data ?? []
 
     await loadSchedulesRange(365, 30)
-    await rebuildTaskGoalMap()
-    await loadTaskResourcesForSchedules()
-    await loadTaskAdvice()
+    await Promise.all([
+      rebuildTaskGoalMap(),
+      loadTaskResourcesForSchedules(),
+      loadTaskAdvice(),
+    ])
   } catch (e) {
     error.value = e?.response?.data?.message || e?.message || '加载失败'
   } finally {
@@ -282,6 +285,13 @@ async function confirmPlanning() {
     planDialogOpen.value = false
     scheduleWaiting.value = true
     scheduleWaitingGoalId.value = goalId
+    if (scheduleWaitingTimer) clearTimeout(scheduleWaitingTimer)
+    scheduleWaitingTimer = setTimeout(() => {
+      if (scheduleWaiting.value) {
+        scheduleWaiting.value = false
+        notify.info('排程任务仍在后台运行，请稍后手动刷新查看结果', 6000)
+      }
+    }, 5 * 60 * 1000)
     notify.info('已启动后台智能排程，你可以先去看别的页面；完成后会自动刷新')
   } catch (e) {
     notify.error(e?.response?.data?.message || e?.message || '排程失败')
@@ -422,6 +432,7 @@ watch(
   () => notify.signalSeq?.SCHEDULE_DONE,
   async () => {
     if (!scheduleWaiting.value) return
+    if (scheduleWaitingTimer) { clearTimeout(scheduleWaitingTimer); scheduleWaitingTimer = null }
     scheduleWaiting.value = false
     await load()
     const gid = Number(scheduleWaitingGoalId.value)
@@ -438,6 +449,7 @@ watch(
   () => notify.signalSeq?.SCHEDULE_FAILED,
   () => {
     if (!scheduleWaiting.value) return
+    if (scheduleWaitingTimer) { clearTimeout(scheduleWaitingTimer); scheduleWaitingTimer = null }
     scheduleWaiting.value = false
   },
 )
@@ -449,6 +461,10 @@ watch(
     notify.success('课程资源推荐已更新！', 6000)
   },
 )
+
+onBeforeUnmount(() => {
+  if (scheduleWaitingTimer) clearTimeout(scheduleWaitingTimer)
+})
 
 onMounted(load)
 </script>

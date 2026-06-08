@@ -24,6 +24,11 @@ const notify = useNotifyStore()
 const assistant = useAssistantStore()
 const slots = useSlots()
 
+function dismissNotify(id) {
+  notify.close(id)
+  setTimeout(() => notify.remove(id), 300)
+}
+
 const dragging = ref(false)
 const resizing = ref(false)
 let dragStart = null
@@ -66,27 +71,31 @@ function startSse(token) {
   const t = String(token || '').trim()
   if (!t) return
   stopSse()
+  sseRetryCount = 0
   sseSource = new EventSource(`/api/user/notifications/stream?access_token=${encodeURIComponent(t)}`)
   sseSource.addEventListener('GOAL_TASK_READY', (e) => {
     try {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
+      notify.signal('GOAL_TASK_READY', data)
       notify.success(data.content || 'AI任务拆解已完成！')
-    } catch (err) {}
+    } catch (err) { console.warn('SSE event parse error:', err) }
   })
   sseSource.addEventListener('SCHEDULE_DONE', (e) => {
     try {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
+      notify.signal('SCHEDULE_DONE', data)
       notify.success(data.content || '智能排程已完成！')
-    } catch (err) {}
+    } catch (err) { console.warn('SSE event parse error:', err) }
   })
   sseSource.addEventListener('SCHEDULE_FAILED', (e) => {
     try {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
+      notify.signal('SCHEDULE_FAILED', data)
       notify.error(data.content || '智能排程失败！')
-    } catch (err) {}
+    } catch (err) { console.warn('SSE event parse error:', err) }
   })
   sseSource.addEventListener('AGENT_REMINDER', (e) => {
     try {
@@ -94,28 +103,30 @@ function startSse(token) {
       notify.addReminder(data)
       notify.info(data.content || '新消息')
       assistant.setCareText(data.content || '')
-    } catch (err) {}
+    } catch (err) { console.warn('SSE event parse error:', err) }
   })
   sseSource.addEventListener('AGENT_BADGE', (e) => {
     try {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
       notify.success(data.content || '成就解锁！')
-    } catch (err) {}
+    } catch (err) { console.warn('SSE event parse error:', err) }
   })
   sseSource.addEventListener('RESOURCE_ADVICE_DONE', (e) => {
     try {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
+      notify.signal('RESOURCE_ADVICE_DONE', data)
       notify.success(data.content || '资源推荐已完成')
-    } catch (err) {}
+    } catch (err) { console.warn('SSE event parse error:', err) }
   })
   sseSource.addEventListener('RESOURCE_ADVICE_FAILED', (e) => {
     try {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
+      notify.signal('RESOURCE_ADVICE_FAILED', data)
       notify.error(data.content || '资源推荐失败')
-    } catch (err) {}
+    } catch (err) { console.warn('SSE event parse error:', err) }
   })
   sseSource.onerror = () => {
     stopSse()
@@ -185,7 +196,7 @@ const title = computed(() => {
     profile: '画像',
     game2048: '2048',
   }
-  return map[route.name] || 'Vibe'
+  return map[route.name] || 'SP'
 })
 
 const menu = [
@@ -202,7 +213,7 @@ const menu = [
 
 
 function toggleTheme() {
-  const next = isDark.value ? 'vibeLight' : 'vibeDark'
+  const next = isDark.value ? 'spLight' : 'spDark'
   theme.global.name.value = next
   localStorage.setItem('theme', next)
 }
@@ -234,7 +245,7 @@ function clampRect({ x, y, width, height, isMinimized }) {
 function onDragStart(e) {
   if (!e || e.button !== 0) return
   const target = e.target
-  if (target?.closest?.('.vibe-agent-actions')) return
+  if (target?.closest?.('.sp-agent-actions')) return
   if (target?.closest?.('.resize-handle')) return
   if (target?.closest?.('button, a, input, textarea, .v-input, .v-field, .v-btn, .v-progress-circular')) return
   dragging.value = true
@@ -359,12 +370,12 @@ function onResizeEnd() {
 </script>
 
 <template>
-  <v-layout class="vibe-shell">
-    <v-app-bar elevation="0" height="64" class="vibe-appbar">
+  <v-layout class="sp-shell">
+    <v-app-bar elevation="0" height="64" class="sp-appbar">
       <v-app-bar-nav-icon @click="drawer = !drawer" />
       <v-app-bar-title class="font-weight-semibold">
         {{ title }}
-        <span v-if="userLabel" class="vibe-user">{{ userLabel }}</span>
+        <span v-if="userLabel" class="sp-user">{{ userLabel }}</span>
       </v-app-bar-title>
       <v-spacer />
       <v-btn  class="mr-2" @click="toggleTheme">
@@ -372,9 +383,10 @@ function onResizeEnd() {
       </v-btn>
       <v-menu v-model="notifMenu" :close-on-content-click="false" location="bottom end">
         <template #activator="{ props: menuProps }">
-          <v-badge :model-value="unreadCount > 0" :content="unreadCount" color="error" overlap>
-            <v-btn v-bind="menuProps" icon="mdi-bell-outline"  class="mr-2" />
-          </v-badge>
+          <span class="bell-wrap">
+            <v-btn v-bind="menuProps" icon="mdi-bell-outline" class="mr-2" />
+            <span v-if="unreadCount > 0" class="bell-dot">{{ unreadCount }}</span>
+          </span>
         </template>
         <v-card min-width="340" max-width="420" max-height="480" class="overflow-y-auto">
           <div class="d-flex align-center pa-3 border-b">
@@ -417,7 +429,7 @@ function onResizeEnd() {
         :permanent="!display.mobile.value"
         width="288"
         rail-width="76"
-        class="vibe-drawer"
+        class="sp-drawer"
     >
       <div v-if="!rail" class="px-3 pt-3 pb-2">
         <v-card variant="tonal" color="primary" class="pa-3 rounded-lg">
@@ -447,16 +459,17 @@ function onResizeEnd() {
       </template>
     </v-navigation-drawer>
 
-    <v-main class="vibe-main">
+    <v-main class="sp-main">
       <v-container class="py-6" style="max-width: 1200px">
         <slot v-if="slots.default" />
         <router-view v-else />
       </v-container>
     </v-main>
 
-    <div class="notif-stack">
+    <TransitionGroup name="notif" tag="div" class="notif-stack">
       <v-alert
           v-for="(n, idx) in notify.items"
+          v-show="n.open"
           :key="n.id"
           :text="n.message"
           :type="n.type"
@@ -464,13 +477,13 @@ function onResizeEnd() {
           density="compact"
           variant="tonal"
           class="notif-toast"
-          @click:close="notify.remove(n.id)"
+          @click:close="dismissNotify(n.id)"
       />
-    </div>
+    </TransitionGroup>
 
     <div
         v-show="assistant.x !== null"
-        class="vibe-agent"
+        class="sp-agent"
         :class="{ minimized: assistant.minimized }"
         :style="{
         left: `${assistant.x ?? 16}px`,
@@ -479,16 +492,16 @@ function onResizeEnd() {
       }"
     >
       <v-card
-          class="vibe-agent-card d-flex flex-column"
+          class="sp-agent-card d-flex flex-column"
           variant="tonal"
           :style="{
           height: assistant.minimized ? '48px' : `${assistant.height ?? 520}px`,
           overflow: 'hidden',
         }"
       >
-        <div class="d-flex align-center px-3 py-2 vibe-agent-header flex-shrink-0" @pointerdown="onDragStart">
+        <div class="d-flex align-center px-3 py-2 sp-agent-header flex-shrink-0" @pointerdown="onDragStart">
           <v-icon class="mr-2" color="primary" size="20">mdi-robot-outline</v-icon>
-          <div class="text-subtitle-2 font-weight-semibold vibe-agent-title">Agent</div>
+          <div class="text-subtitle-2 font-weight-semibold sp-agent-title">Agent</div>
           <v-spacer />
           <div @pointerdown.stop>
             <v-btn size="small" variant="text" :icon="assistant.minimized ? 'mdi-arrow-expand' : 'mdi-window-minimize'" @click.stop="assistant.toggleMinimize" density="compact" />
@@ -504,9 +517,9 @@ function onResizeEnd() {
           </div>
           <div v-if="assistant.chatMessages?.length">
             <div v-for="m in assistant.chatMessages" :key="m._key" class="mb-3">
-              <div :class="['vibe-chat-bubble', m.role === 'user' ? 'vibe-chat-user' : 'vibe-chat-ai']">
+              <div :class="['sp-chat-bubble', m.role === 'user' ? 'sp-chat-user' : 'sp-chat-ai']">
                 <span v-if="m.role === 'user'" style="white-space: pre-wrap;">{{ m.text }}</span>
-                  <span v-else class="vibe-chat-markdown" v-html="m.html || m.text" @click="onChatLinkClick"></span>
+                  <span v-else class="sp-chat-markdown" v-html="m.html || m.text" @click="onChatLinkClick"></span>
                 <div v-if="m.navs?.length" class="mt-2 d-flex flex-wrap ga-1">
                   <v-chip
                     v-for="nav in m.navs"
@@ -535,14 +548,14 @@ function onResizeEnd() {
               @click="assistant.chatInput = p; assistant.sendChat()"
             >{{ p }}</v-chip>
           </div>
-          <div class="vibe-chat-bar">
+          <div class="sp-chat-bar">
             <v-text-field
                 v-model="assistant.chatInput"
                 :placeholder="chatHint()"
                 variant="plain"
                 density="compact"
                 :disabled="assistant.chatLoading"
-                class="vibe-chat-field"
+                class="sp-chat-field"
                 hide-details
                 @keyup.enter="assistant.sendChat()"
             />
@@ -561,7 +574,7 @@ function onResizeEnd() {
         <div v-show="!assistant.minimized" class="resize-handle resize-tl" @pointerdown.stop="onResizeStart($event, 'nw')" />
         <div v-show="!assistant.minimized" class="resize-handle resize-tr" @pointerdown.stop="onResizeStart($event, 'ne')" />
         <div v-show="!assistant.minimized" class="resize-handle resize-bl" @pointerdown.stop="onResizeStart($event, 'sw')" />
-        <div v-show="!assistant.minimized" class="resize-handle resize-br vibe-agent-resize" @pointerdown.stop="onResizeStart($event, 'se')" />
+        <div v-show="!assistant.minimized" class="resize-handle resize-br sp-agent-resize" @pointerdown.stop="onResizeStart($event, 'se')" />
       </v-card>
     </div>
 
@@ -569,41 +582,41 @@ function onResizeEnd() {
 </template>
 
 <style scoped>
-.vibe-shell {
+.sp-shell {
   height: 100vh;
 }
-.vibe-appbar {
+.sp-appbar {
   backdrop-filter: blur(10px);
   background: rgba(var(--v-theme-surface), 0.85);
   border-bottom: 1px solid rgba(var(--v-theme-on-surface), 0.08);
 }
-.vibe-drawer {
+.sp-drawer {
   border-right: 1px solid rgba(var(--v-theme-on-surface), 0.08);
 }
-.vibe-main {
+.sp-main {
   background:
       radial-gradient(1200px 700px at 20% -10%, rgba(var(--v-theme-primary), 0.18), transparent 55%),
       radial-gradient(1000px 600px at 90% 0%, rgba(var(--v-theme-secondary), 0.16), transparent 55%),
       linear-gradient(180deg, rgba(var(--v-theme-background), 1), rgba(var(--v-theme-background), 1));
   overflow-y: auto;
 }
-.vibe-user {
+.sp-user {
   margin-left: 10px;
   font-size: 12px;
   opacity: 0.75;
 }
-.vibe-agent {
+.sp-agent {
   position: fixed;
   z-index: 3000;
 }
-.vibe-agent-card {
+.sp-agent-card {
   position: relative;
   border: 1px solid rgba(var(--v-theme-on-surface), 0.14);
   background: transparent !important;
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
   will-change: width, height, transform;
 }
-.vibe-agent-card::before {
+.sp-agent-card::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -615,11 +628,11 @@ function onResizeEnd() {
   will-change: width, height, transform;
   pointer-events: none;
 }
-.vibe-agent-card > * {
+.sp-agent-card > * {
   position: relative;
   z-index: 1;
 }
-.vibe-agent-header {
+.sp-agent-header {
   position: relative;
   z-index: 6;
   cursor: move;
@@ -627,13 +640,13 @@ function onResizeEnd() {
   touch-action: none;
   background: linear-gradient(180deg, rgba(var(--v-theme-on-surface), 0.03), transparent);
 }
-.vibe-agent-title {
+.sp-agent-title {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.vibe-agent-actions {
+.sp-agent-actions {
   margin-left: auto;
   margin-right: 18px;
   display: flex;
@@ -642,19 +655,19 @@ function onResizeEnd() {
   flex-wrap: nowrap;
   white-space: nowrap;
 }
-.vibe-agent-actions :deep(.v-btn) {
+.sp-agent-actions :deep(.v-btn) {
   min-width: 72px;
   padding-inline: 12px;
 }
-.vibe-agent-actions :deep(.v-btn__loader) {
+.sp-agent-actions :deep(.v-btn__loader) {
   margin-inline-end: 8px;
 }
-.vibe-agent-loading {
+.sp-agent-loading {
   margin-left: 8px;
   opacity: 0.85;
 }
 
-.vibe-agent-resize {
+.sp-agent-resize {
   position: absolute;
   right: 2px;
   bottom: 2px;
@@ -674,10 +687,10 @@ function onResizeEnd() {
 .resize-tr { top: -6px; right: -6px; cursor: nesw-resize; }
 .resize-bl { bottom: -6px; left: -6px; cursor: nesw-resize; }
 .resize-br { bottom: -6px; right: -6px; cursor: nwse-resize; }
-.vibe-agent-resize:hover {
+.sp-agent-resize:hover {
   opacity: 1;
 }
-.vibe-agent-resize:after {
+.sp-agent-resize:after {
   content: '';
   position: absolute;
   right: 2px;
@@ -688,7 +701,7 @@ function onResizeEnd() {
   border-bottom: 2px solid rgba(var(--v-theme-on-surface), 0.35);
   border-radius: 2px;
 }
-.vibe-agent-chat {
+.sp-agent-chat {
   max-height: 240px;
   overflow-y: auto;
   padding: 8px 10px;
@@ -699,7 +712,7 @@ function onResizeEnd() {
   -webkit-backdrop-filter: blur(14px);
 }
 
-.vibe-agent :deep(.v-field__overlay) {
+.sp-agent :deep(.v-field__overlay) {
   background: rgba(var(--v-theme-surface), 0.70) !important;
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
@@ -716,6 +729,26 @@ function onResizeEnd() {
   gap: 10px;
   max-width: 420px;
 }
+.bell-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.bell-dot {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: rgb(var(--v-theme-error));
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  padding: 0 5px;
+  pointer-events: none;
+}
 .notif-toast {
   border-radius: 14px !important;
   backdrop-filter: blur(24px) saturate(180%) !important;
@@ -728,13 +761,30 @@ function onResizeEnd() {
   border: 1px solid rgba(var(--v-theme-on-surface), 0.07) !important;
 }
 
+/* === Notification Transition === */
+.notif-enter-active,
+.notif-leave-active {
+  transition: all 0.3s ease;
+}
+.notif-enter-from {
+  opacity: 0;
+  transform: translateX(30px);
+}
+.notif-leave-to {
+  opacity: 0;
+  transform: translateX(30px);
+}
+.notif-move {
+  transition: transform 0.3s ease;
+}
+
 /* Sidebar menu items */
-.vibe-menu-item {
+.sp-menu-item {
   margin: 2px 8px;
   border-radius: 10px;
 }
 /* Chat bubbles */
-.vibe-chat-bubble {
+.sp-chat-bubble {
   padding: 10px 14px;
   border-radius: 16px;
   max-width: 92%;
@@ -742,55 +792,55 @@ function onResizeEnd() {
   line-height: 1.55;
   font-size: 13px;
 }
-.vibe-chat-user {
+.sp-chat-user {
   margin-left: auto;
   background: rgba(var(--v-theme-primary), 0.15);
   border-bottom-right-radius: 6px;
 }
-.vibe-chat-ai {
+.sp-chat-ai {
   margin-right: auto;
   background: rgba(var(--v-theme-on-surface), 0.06);
   border-bottom-left-radius: 6px;
 }
-.vibe-chat-markdown :deep(p) {
+.sp-chat-markdown :deep(p) {
   margin: 0 0 6px;
   line-height: 1.55;
 }
-.vibe-chat-markdown :deep(p:last-child) {
+.sp-chat-markdown :deep(p:last-child) {
   margin-bottom: 0;
 }
-.vibe-chat-markdown :deep(ul), .vibe-chat-markdown :deep(ol) {
+.sp-chat-markdown :deep(ul), .sp-chat-markdown :deep(ol) {
   margin: 0 0 6px;
   padding-left: 18px;
 }
-.vibe-chat-markdown :deep(li) {
+.sp-chat-markdown :deep(li) {
   margin-bottom: 2px;
 }
-.vibe-chat-markdown :deep(a) {
+.sp-chat-markdown :deep(a) {
   color: rgb(var(--v-theme-primary));
   text-decoration: none;
 }
-.vibe-chat-markdown :deep(a:hover) {
+.sp-chat-markdown :deep(a:hover) {
   text-decoration: underline;
 }
-.vibe-chat-markdown :deep(strong) {
+.sp-chat-markdown :deep(strong) {
   font-weight: 600;
 }
-.vibe-chat-markdown :deep(h1), .vibe-chat-markdown :deep(h2), .vibe-chat-markdown :deep(h3) {
+.sp-chat-markdown :deep(h1), .sp-chat-markdown :deep(h2), .sp-chat-markdown :deep(h3) {
   font-size: 14px;
   font-weight: 600;
   margin: 8px 0 4px;
 }
-.vibe-chat-markdown :deep(h1:first-child), .vibe-chat-markdown :deep(h2:first-child), .vibe-chat-markdown :deep(h3:first-child) {
+.sp-chat-markdown :deep(h1:first-child), .sp-chat-markdown :deep(h2:first-child), .sp-chat-markdown :deep(h3:first-child) {
   margin-top: 0;
 }
-.vibe-chat-scroll {
+.sp-chat-scroll {
   scroll-behavior: smooth;
 }
-.vibe-chat-input :deep(.v-field) {
+.sp-chat-input :deep(.v-field) {
   background: transparent !important;
 }
-.vibe-chat-bar {
+.sp-chat-bar {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -800,30 +850,30 @@ function onResizeEnd() {
   border: 1px solid rgba(var(--v-theme-on-surface), 0.08);
   transition: border-color 0.2s;
 }
-.vibe-chat-bar:focus-within {
+.sp-chat-bar:focus-within {
   border-color: rgba(var(--v-theme-primary), 0.35);
   background: rgba(var(--v-theme-on-surface), 0.06);
 }
-.vibe-chat-field {
+.sp-chat-field {
   flex: 1;
 }
-.vibe-chat-field :deep(.v-field__overlay) {
+.sp-chat-field :deep(.v-field__overlay) {
   opacity: 0 !important;
 }
-.vibe-chat-field :deep(.v-field__input) {
+.sp-chat-field :deep(.v-field__input) {
   font-size: 13px !important;
   padding-top: 6px !important;
   padding-bottom: 6px !important;
 }
-.vibe-chat-input :deep(.v-field__overlay) {
+.sp-chat-input :deep(.v-field__overlay) {
   opacity: 0 !important;
 }
 /* Agent card stronger glass */
-.vibe-agent-card {
+.sp-agent-card {
   backdrop-filter: blur(20px) saturate(160%) !important;
   -webkit-backdrop-filter: blur(20px) saturate(160%) !important;
 }
-.vibe-agent-card::before {
+.sp-agent-card::before {
   backdrop-filter: blur(20px) saturate(160%) !important;
   -webkit-backdrop-filter: blur(20px) saturate(160%) !important;
 }

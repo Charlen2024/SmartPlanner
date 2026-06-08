@@ -1,8 +1,9 @@
-package com.chao.user.handler;
+package com.chao.common.handler;
 
 import com.chao.common.dto.Result;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -15,6 +16,11 @@ public class GlobalExceptionHandler {
     @ExceptionHandler({IllegalArgumentException.class, MethodArgumentTypeMismatchException.class, HttpMessageNotReadableException.class, MethodArgumentNotValidException.class})
     public Result<String> handleBadRequest(Exception e) {
         return Result.fail(400, e.getMessage());
+    }
+
+    @ExceptionHandler(AuthenticationException.class)
+    public Result<String> handleAuthenticationException(AuthenticationException e) {
+        return Result.fail(401, "用户名或密码错误");
     }
 
     @ExceptionHandler(Exception.class)

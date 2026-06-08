@@ -10,6 +10,7 @@ COPY resource-search/pom.xml resource-search/
 COPY punch-service/pom.xml punch-service/
 COPY user-service/pom.xml user-service/
 COPY gateway-service/pom.xml gateway-service/
+COPY admin-server/pom.xml admin-server/
 
 COPY common/src common/src
 COPY punch-service/src punch-service/src

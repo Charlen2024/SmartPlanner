@@ -7,8 +7,10 @@ import com.chao.common.config.RabbitMqConfig;
 import com.chao.common.dto.NotificationMessage;
 import com.chao.common.dto.TaskScheduleDto;
 import com.chao.common.dto.UserJournalDto;
+import com.chao.common.dto.GoalDto;
 import com.chao.common.dto.Result;
 import com.chao.user.service.AppUserService;
+import com.chao.user.util.JwtUtils;
 import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.http.MediaType;
@@ -48,7 +50,7 @@ public class NotificationController {
 
     @GetMapping(path = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter stream(@AuthenticationPrincipal Jwt jwt, @RequestParam(required = false) Long userId) {
-        Long uid = jwt != null ? jwt.getClaim("userId") : userId;
+        Long uid = jwt != null ? JwtUtils.getUserId(jwt) : userId;
         if (uid == null) {
             throw new IllegalArgumentException("未授权");
         }
@@ -180,14 +182,23 @@ public class NotificationController {
         String weatherInfo = fetchWeatherBrief();
 
         boolean scheduleImported = false;
+        boolean hasGoals = false;
         try {
             var user = appUserService.getById(userId);
             scheduleImported = user != null && Boolean.TRUE.equals(user.getScheduleImported());
         } catch (Exception ignored) {}
+        try {
+            Result<List<GoalDto>> gr = goalClient.listGoals(userId);
+            hasGoals = gr != null && gr.getData() != null && !gr.getData().isEmpty();
+        } catch (Exception ignored) {}
         boolean isNewUser = !scheduleImported;
+        boolean isOnboarded = scheduleImported && !hasGoals;
+
         String fallback;
         if (isNewUser) {
             fallback = "欢迎来到 SmartPlanner！请先导入课表，然后创建你的第一个学习目标，AI 会帮你智能排程。";
+        } else if (isOnboarded) {
+            fallback = "课表已导入，去创建你的第一个学习目标，AI 会帮你拆解任务并智能排程。";
         } else {
             fallback = buildLoginCareFallback(streak, pending, nextTask, latestMood, 1);
         }
@@ -195,10 +206,15 @@ public class NotificationController {
         String nav;
         String prompt;
         if (isNewUser) {
-            nav = "/schedule";
+            nav = "/plan";
             prompt = "用户刚注册，还未导入课表，没有任何学习数据。请生成一条约50字中文新用户引导消息，欢迎并引导用户先上传课表、创建学习目标。\n"
                     + "输出要求：温暖、可执行，不要Markdown，不要表情符号。\n"
                     + "引导方向：告诉用户第一步上传课表，然后创建学习目标，AI会自动排程。";
+        } else if (isOnboarded) {
+            nav = "/plan";
+            prompt = "用户已导入课表但尚未创建任何学习目标。请生成一条约50字中文引导消息，引导用户去创建第一个学习目标。\n"
+                    + "输出要求：温暖、可执行，不要Markdown，不要表情符号，不要出现\"今天没有安排\"之类的话。\n"
+                    + "引导方向：告诉用户课表已就绪，现在去添加学习目标，AI会拆解任务并排程。";
         } else {
             nav = chooseLoginCareNav(pending);
             String weatherLine = weatherInfo.isBlank() ? "" : ",\"weather\":\"" + weatherInfo + "\"";
