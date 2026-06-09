@@ -5,6 +5,70 @@ import api from '../plugins/api'
 const portrait = ref(null)
 const loading = ref(false)
 const error = ref('')
+const showComputation = ref(false)
+
+const metricHelp = {
+  onTimeRate: '实际打卡时间与排程开始时间偏差 ≤ 10 分钟即算"准时"。准时率 = 准时次数 ÷ 可匹配的打卡次数。',
+  avgDelay: '统计所有迟到的打卡（打卡时间晚于排程时间），取平均延迟分钟数。准时或提前到达不计入。',
+  completionRate: '近 7 天排程中状态为"已完成"的比例。反映你按计划执行的完成度。',
+  streak: '从今天往前回溯，最多连续打卡的天数。中断一天即重置。',
+  morningScore: '分析 10:00 前的打卡和排程占比，得分越高越偏晨型。打卡权重 60%，排程权重 40%。',
+  focusAvg: '统计有学习时长的打卡记录，取实际学习分钟数的均值。无打卡时用已完成排程时长降级估算。',
+  procrastination: '综合延迟程度(45%)、不准时率(35%)、未完成率(20%)。越高越拖延，冷启动(<3次)用完成率估算。',
+  recommendation: '根据专注时长区间推荐排程参数：<40→30min，40~69→45min，≥70→60min。新手或准时率低时降低上限。',
+}
+
+function metricIcon(key) {
+  const map = {
+    onTimeRate: 'mdi-clock-check-outline',
+    avgDelay: 'mdi-timer-sand',
+    completionRate: 'mdi-check-circle-outline',
+    streak: 'mdi-fire',
+    morningScore: 'mdi-weather-sunny',
+    focusAvg: 'mdi-brain',
+    procrastination: 'mdi-progress-clock',
+    recommendation: 'mdi-tune',
+  }
+  return map[key] || 'mdi-calculator'
+}
+
+const inputLabels = {
+  onTimeCount: '准时次数', matchedCount: '匹配次数',
+  lateCount: '迟到次数', totalDelayMinutes: '总延迟(分钟)',
+  totalSchedules: '总排程数', doneCount: '已完成数',
+  morningPunchCount: '晨间打卡', totalPunchRecords: '总打卡数',
+  morningScheduleCount: '晨间排程', totalDurationMinutes: '总学习分钟',
+  punchCount: '打卡次数',
+  delayScore: '延迟分', onTimeRate: '准时率', completionRate: '完成率',
+  focusAvgInput: '专注均值', streakInput: '连续打卡', onTimeRateInput: '准时率',
+  localResult: '本地计算结果',
+}
+
+function inputLabel(k) {
+  return inputLabels[k] || k
+}
+
+function inputHelp(k) {
+  const h = {
+    onTimeCount: '打卡时间与排程偏差 ≤ 10 分钟的次数',
+    matchedCount: '打卡记录能匹配到对应排程的次数（偏差 ≤ 180 分钟）',
+    lateCount: '打卡时间晚于排程开始时间的次数',
+    totalDelayMinutes: '所有迟到的延迟分钟数之和',
+    totalSchedules: '近 7 天排程总数',
+    doneCount: '状态为"已完成"的排程数',
+    morningPunchCount: '10:00 之前的打卡次数',
+    totalPunchRecords: '近 7 天打卡记录总数',
+    morningScheduleCount: '开始时间在 10:00 之前的排程数',
+    totalDurationMinutes: '所有打卡的 durationSeconds 折算为分钟数之和',
+    punchCount: '有有效时长的打卡次数',
+    delayScore: '延迟分钟数 / 180，上限 1.0',
+    focusAvgInput: '当前习惯画像中的平均专注时长',
+    streakInput: '当前连续打卡天数',
+    onTimeRateInput: '当前准时率',
+    localResult: '后端本地公式算出的原始值，AI 可能在此基础上微调',
+  }
+  return h[k] || '该项指标的计算输入'
+}
 
 async function load() {
   loading.value = true
@@ -155,6 +219,62 @@ onMounted(load)
           </v-card-text>
         </v-card>
       </v-col>
+
+      <!-- 计算明细 -->
+      <v-col v-if="portrait?.computation && Object.keys(portrait.computation).length" cols="12">
+        <v-card class="pa-2">
+          <v-card-title class="d-flex align-center" style="cursor:pointer" @click="showComputation = !showComputation">
+            <v-icon :icon="showComputation ? 'mdi-chevron-up' : 'mdi-chevron-down'" class="mr-2" />
+            计算明细
+            <v-spacer />
+            <v-chip size="x-small" variant="tonal">{{ Object.keys(portrait.computation).length }} 项指标</v-chip>
+          </v-card-title>
+          <v-expand-transition>
+            <v-card-text v-show="showComputation">
+              <div class="comp-grid">
+                <div v-for="(item, key) in portrait.computation" :key="key" class="comp-row">
+                  <!-- 指标名 + 帮助图标 -->
+                  <div class="comp-label">
+                    <v-icon :icon="metricIcon(key)" size="18" class="mr-1" />
+                    <span class="text-body-2 font-weight-semibold">{{ item.label }}</span>
+                    <v-tooltip location="top" max-width="320">
+                      <template #activator="{ props: tp }">
+                        <v-icon v-bind="tp" icon="mdi-help-circle-outline" size="14" class="ml-1 comp-help" />
+                      </template>
+                      <span>{{ metricHelp[key] || '暂无说明' }}</span>
+                    </v-tooltip>
+                  </div>
+
+                  <!-- 输入数据 -->
+                  <div class="comp-inputs">
+                    <template v-if="item.inputs && Object.keys(item.inputs).length">
+                      <v-tooltip v-for="(v, k) in item.inputs" :key="k" location="top" max-width="280">
+                        <template #activator="{ props: tp }">
+                          <span v-bind="tp" class="comp-chip">{{ inputLabel(k) }}&nbsp;<strong>{{ v }}</strong></span>
+                        </template>
+                        <span>{{ inputHelp(k) }}</span>
+                      </v-tooltip>
+                    </template>
+                    <span v-else class="comp-chip comp-chip-dim">直接获取</span>
+                  </div>
+
+                  <!-- 公式与结果 -->
+                  <div class="comp-result">
+                    <v-tooltip location="top" max-width="360">
+                      <template #activator="{ props: tp }">
+                        <span v-bind="tp" class="comp-formula">{{ item.formula }}</span>
+                      </template>
+                      <span>计算公式</span>
+                    </v-tooltip>
+                    <v-icon size="16" class="mx-2" style="opacity:0.4">mdi-arrow-right</v-icon>
+                    <span class="comp-value">{{ item.result }}</span>
+                  </div>
+                </div>
+              </div>
+            </v-card-text>
+          </v-expand-transition>
+        </v-card>
+      </v-col>
     </v-row>
   </div>
 </template>
@@ -162,5 +282,101 @@ onMounted(load)
 <style scoped>
 .portrait-view {
   padding: 16px;
+}
+
+.comp-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.comp-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(var(--v-theme-on-surface), 0.03);
+  transition: background 0.15s;
+  flex-wrap: wrap;
+}
+
+.comp-row:hover {
+  background: rgba(var(--v-theme-on-surface), 0.06);
+}
+
+.comp-label {
+  display: flex;
+  align-items: center;
+  min-width: 130px;
+  flex-shrink: 0;
+}
+
+.comp-help {
+  opacity: 0.35;
+  cursor: help;
+  transition: opacity 0.15s;
+}
+
+.comp-help:hover {
+  opacity: 0.8;
+}
+
+.comp-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.comp-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  background: rgba(var(--v-theme-on-surface), 0.07);
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.1);
+  cursor: default;
+  white-space: nowrap;
+  transition: border-color 0.15s;
+}
+
+.comp-chip:hover {
+  border-color: rgba(var(--v-theme-primary), 0.35);
+}
+
+.comp-chip strong {
+  color: rgb(var(--v-theme-primary));
+}
+
+.comp-chip-dim {
+  opacity: 0.5;
+  font-style: italic;
+}
+
+.comp-result {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.comp-formula {
+  font-size: 12px;
+  opacity: 0.55;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.comp-value {
+  font-size: 16px;
+  font-weight: 700;
+  color: rgb(var(--v-theme-primary));
+  white-space: nowrap;
 }
 </style>

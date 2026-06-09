@@ -77,30 +77,32 @@ public class UserService {
         if (goals == null || goals.isEmpty()) {
             return List.of();
         }
-        List<GoalProgressDto> list = new ArrayList<>();
+        // Fire all task-fetch calls in parallel
+        List<CompletableFuture<GoalProgressDto>> futures = new ArrayList<>();
         for (GoalDto g : goals) {
-            if (g == null || g.getId() == null) {
-                continue;
-            }
-            List<GoalTaskDto> tasks = safe(() -> goalClient.listTasks(g.getId(), userId).getData());
-            int total = tasks != null ? tasks.size() : 0;
-            int done = 0;
-            if (tasks != null) {
-                for (GoalTaskDto t : tasks) {
-                    if (t != null && t.getStatus() != null && t.getStatus() == 2) {
-                        done++;
+            if (g == null || g.getId() == null) continue;
+            futures.add(CompletableFuture.supplyAsync(() -> {
+                List<GoalTaskDto> tasks = safe(() -> goalClient.listTasks(g.getId(), userId).getData());
+                int total = tasks != null ? tasks.size() : 0;
+                int done = 0;
+                if (tasks != null) {
+                    for (GoalTaskDto t : tasks) {
+                        if (t != null && t.getStatus() != null && t.getStatus() == 2) done++;
                     }
                 }
-            }
-            GoalProgressDto p = new GoalProgressDto();
-            p.setGoalId(g.getId());
-            p.setTitle(g.getTitle());
-            p.setTotalTasks(total);
-            p.setDoneTasks(done);
-            p.setPercent(total == 0 ? 0 : (int) Math.round(done * 100.0 / total));
-            list.add(p);
+                GoalProgressDto p = new GoalProgressDto();
+                p.setGoalId(g.getId());
+                p.setTitle(g.getTitle());
+                p.setTotalTasks(total);
+                p.setDoneTasks(done);
+                p.setPercent(total == 0 ? 0 : (int) Math.round(done * 100.0 / total));
+                return p;
+            }));
         }
-        return list;
+        return futures.stream()
+                .map(f -> safe(() -> f.join()))
+                .filter(p -> p != null)
+                .collect(java.util.stream.Collectors.toList());
     }
 
     @SuppressWarnings("unchecked")

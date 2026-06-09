@@ -45,6 +45,9 @@ public class GoalAiWorker {
 
         log.info("MQ接收到任务，开始拆解用户 {} 的目标: {}", userId, goalDescription);
         try {
+            // Notify frontend: decomposition started
+            sendDecomposeProgress(userId, "GOAL_DECOMPOSE_STARTED", goalDescription, "INTENT", 5, "正在分析目标意图", 0, List.of());
+
             String response;
             try {
                 String sys = systemPrompt == null ? "" : systemPrompt;
@@ -67,6 +70,7 @@ public class GoalAiWorker {
             List<GoalTaskDto> tasks = objectMapper.readValue(response, new TypeReference<List<GoalTaskDto>>() {});
             tasks = tasks == null ? List.of() : tasks.stream().filter(Objects::nonNull).collect(Collectors.toList());
             tasks = sanitizeTasks(tasks);
+
             if (tasks.isEmpty()) {
                 tasks = objectMapper.readValue("""
                     [
@@ -75,6 +79,13 @@ public class GoalAiWorker {
                     ]
                     """, new TypeReference<List<GoalTaskDto>>() {});
             }
+
+            // Notify frontend: tasks generated (after fallback, so count is never 0)
+            List<String> taskTitles = tasks.stream()
+                    .map(GoalTaskDto::getTitle)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+            sendDecomposeProgress(userId, "GOAL_DECOMPOSE_PROGRESS", goalDescription, "LLM", 50, "AI正在拆解生成任务…", tasks.size(), taskTitles);
 
             boolean degraded = tasks.stream().anyMatch(t -> {
                 String title = t.getTitle();
@@ -119,38 +130,62 @@ public class GoalAiWorker {
                 }
             }
 
+            // Notify: saving to database
+            sendDecomposeProgress(userId, "GOAL_DECOMPOSE_SAVING", goalDescription, "SAVING", 75, "正在保存任务并触发资源检索…", tasks.size(), taskTitles);
+
+            // 为目标主题做 AI 资源推荐并写入库
             try {
                 resourceClient.searchOnlineCourses(goalDescription);
             } catch (Exception e) {
                 log.warn("资源检索/写入失败: {}", e.getMessage());
             }
-            // 目标驱动即时爬取：为新目标主题抓取 B 站资源
-            try {
-                resourceClient.crawlTopic(goalDescription);
-            } catch (Exception e) {
-                log.warn("即时爬取触发失败: {}", e.getMessage());
+
+            // 按每个任务标题逐条触发爬虫，动态扩充资源库
+            List<String> crawlTopics = tasks.stream()
+                    .map(GoalTaskDto::getTitle)
+                    .filter(t -> t != null && !t.isBlank() && !t.startsWith("[AI降级]"))
+                    .distinct()
+                    .collect(Collectors.toList());
+            if (!crawlTopics.isEmpty()) {
+                log.info("触发 {} 个主题的爬取: {}", crawlTopics.size(), crawlTopics);
             }
-            
+            for (String topic : crawlTopics) {
+                try {
+                    resourceClient.crawlTopic(topic);
+                } catch (Exception e) {
+                    log.warn("爬取触发失败 topic={}: {}", topic, e.getMessage());
+                }
+            }
+
             NotificationMessage notif = new NotificationMessage();
             notif.setUserId(userId);
             notif.setType("GOAL_TASK_READY");
-            notif.setContent("trigger=goal_task_ready; data=" + java.util.Map.of("goal", goalDescription));
-            notif.setPayload(java.util.Map.of(
-                    "nav", "/schedule",
-                    "level", "success",
-                    "ai", java.util.Map.of(
-                            "userPrompt", "触发：goal_task_ready。目标任务拆解已完成。请生成一句简短提醒（不固定模板），引导用户去日程/排程查看。数据：" + java.util.Map.of(
-                                    "goal", goalDescription
-                            )
-                    ),
-                    "data", java.util.Map.of(
+            notif.setContent("AI任务拆解已完成！");
+            java.util.Map<String, Object> readyPayload = new java.util.LinkedHashMap<>();
+            readyPayload.put("stage", "DONE");
+            readyPayload.put("progress", 100);
+            readyPayload.put("message", "拆解完成，共生成 " + tasks.size() + " 个任务");
+            readyPayload.put("nav", "/schedule");
+            readyPayload.put("level", "success");
+            readyPayload.put("taskCount", tasks.size());
+            readyPayload.put("taskTitles", taskTitles);
+            readyPayload.put("goal", goalDescription);
+            readyPayload.put("ai", java.util.Map.of(
+                    "userPrompt", "触发：goal_task_ready。目标任务拆解已完成。请生成一句简短提醒（不固定模板），引导用户去日程/排程查看。数据：" + java.util.Map.of(
                             "goal", goalDescription
                     )
             ));
+            readyPayload.put("data", java.util.Map.of(
+                    "goal", goalDescription
+            ));
+            notif.setPayload(readyPayload);
             rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, notif);
             
         } catch (Exception e) {
-            log.error("解析或保存目标失败", e);
+            log.error("目标拆解失败: userId={}, goalId={}, error={}", userId, goalId, e.getMessage());
+            sendDecomposeProgress(userId, "GOAL_DECOMPOSE_FAILED", goalDescription, "FAILED", 100,
+                    "拆解失败: " + (e.getMessage() != null ? e.getMessage() : "服务异常"),
+                    0, List.of());
         }
     }
 
@@ -216,6 +251,26 @@ public class GoalAiWorker {
         if (text == null || text.isBlank()) return false;
         String s = text;
         return s.matches(".*\\d{4}-\\d{2}-\\d{2}.*") || s.matches(".*\\b\\d{1,2}:\\d{2}\\b.*");
+    }
+
+    private void sendDecomposeProgress(Long userId, String type, String goalDescription, String stage, int progress, String message, int taskCount, List<String> taskTitles) {
+        try {
+            NotificationMessage notif = new NotificationMessage();
+            notif.setUserId(userId);
+            notif.setType(type);
+            notif.setContent(message);
+            java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
+            payload.put("stage", stage);
+            payload.put("progress", progress);
+            payload.put("message", message);
+            payload.put("goal", goalDescription);
+            payload.put("taskCount", taskCount);
+            payload.put("taskTitles", taskTitles);
+            notif.setPayload(payload);
+            rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, notif);
+        } catch (Exception e) {
+            log.warn("发送拆解进度通知失败: {}", e.getMessage());
+        }
     }
 
     private void saveTaskRecursive(Long userId, Long goalId, Long parentId, GoalTaskDto taskDto, boolean degraded) {

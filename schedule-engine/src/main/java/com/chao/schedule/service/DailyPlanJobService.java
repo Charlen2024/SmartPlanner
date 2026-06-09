@@ -5,6 +5,7 @@ import com.chao.common.dto.DailyPlanCommitResponse;
 import com.chao.common.dto.DailyPlanJobStartRequest;
 import com.chao.common.dto.DailyPlanJobStartResponse;
 import com.chao.common.dto.DailyPlanJobStatusResponse;
+import com.chao.common.dto.SchedulePreferenceDto;
 import lombok.Data;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
@@ -91,17 +92,50 @@ public class DailyPlanJobService {
         }
         LocalDate date = request != null ? request.getDate() : null;
         update(state, "RUNNING", "PREPARE", 5, "正在准备排程参数" + (date != null ? "（" + date + "）" : ""));
+        sendScheduleProgress(userId, "SCHEDULE_STARTED", "PREPARE", 5, "开始智能排程", Map.of("date", date != null ? date.toString() : ""));
         try {
-            DailyPlanCommitResponse resp = scheduleService.commitDailyPlan(userId, request, (stage, progress, message) -> update(state, "RUNNING", stage, progress, message));
+            DailyPlanCommitResponse resp = scheduleService.commitDailyPlan(userId, request,
+                (stage, progress, message) -> {
+                    update(state, "RUNNING", stage, progress, message);
+                    sendScheduleProgress(userId, "SCHEDULE_PROGRESS", stage, progress, message, null);
+                });
             update(state, "DONE", "DONE", 100, "已完成排程并写入日程");
             state.result = resp;
             triggerResourceAdviceForSchedules(userId, resp);
-            sendNotification(userId, "SCHEDULE_DONE", "你的智能学习计划已经排好，快去查看吧！");
+            // Send SCHEDULE_DONE with scheduling params for the frontend panel
+            int scheduleCount = resp != null && resp.getSchedules() != null ? resp.getSchedules().size() : 0;
+            SchedulePreferenceDto pref = request != null ? scheduleService.resolvePreference(request.getPreference()) : scheduleService.resolvePreference(null);
+            sendScheduleProgress(userId, "SCHEDULE_DONE", "DONE", 100, "排程完成",
+                Map.of("taskCount", scheduleCount,
+                       "date", date != null ? date.toString() : "",
+                       "focusMinutes", pref.getFocusMinutes(),
+                       "breakMinutes", pref.getBreakMinutes(),
+                       "maxDailyMinutes", pref.getMaxDailyMinutes(),
+                       "procrastinationIndex", Math.round(pref.getProcrastinationIndex() * 100) / 100.0));
         } catch (Exception e) {
             update(state, "FAILED", "FAILED", 100, "排程失败");
             state.error = e.getMessage() != null ? e.getMessage() : "服务异常";
             log.warn("日程排程 job 失败: userId={}, jobId={}, error={}", userId, jobId, state.error);
-            sendNotification(userId, "SCHEDULE_FAILED", "智能排程失败：" + state.error);
+            sendScheduleProgress(userId, "SCHEDULE_FAILED", "FAILED", 100, "排程失败: " + state.error,
+                Map.of("error", state.error));
+        }
+    }
+
+    private void sendScheduleProgress(Long userId, String type, String stage, int progress, String message, Map<String, Object> extra) {
+        try {
+            NotificationMessage notif = new NotificationMessage();
+            notif.setUserId(userId);
+            notif.setType(type);
+            notif.setContent(message);
+            Map<String, Object> payload = new java.util.LinkedHashMap<>();
+            payload.put("stage", stage);
+            payload.put("progress", progress);
+            payload.put("message", message);
+            if (extra != null) payload.putAll(extra);
+            notif.setPayload(payload);
+            rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, notif);
+        } catch (Exception e) {
+            log.warn("Schedule progress notification FAILED: userId={}, type={}, err={}", userId, type, e.getMessage());
         }
     }
 

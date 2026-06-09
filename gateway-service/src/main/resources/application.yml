@@ -35,6 +35,10 @@ spring:
               - Authorization
             allowCredentials: true
       routes:
+        - id: agent-service
+          uri: lb://agent-service
+          predicates:
+            - Path=/api/agent/**
         - id: user-service
           uri: lb://user-service
           predicates:

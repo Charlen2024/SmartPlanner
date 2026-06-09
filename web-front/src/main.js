@@ -6,6 +6,7 @@ import '@mdi/font/css/materialdesignicons.css'
 import 'vuetify/styles'
 import { createVuetify } from 'vuetify'
 import * as components from 'vuetify/components'
+import { VDateInput } from 'vuetify/labs/VDateInput'
 import * as directives from 'vuetify/directives'
 import { createPinia } from 'pinia'
 import { createRouter } from './router'
@@ -17,13 +18,18 @@ if (savedTheme === 'vibeDark') savedTheme = 'spDark'
 localStorage.setItem('theme', savedTheme)
 
 const vuetify = createVuetify({
-  components,
+  components: { ...components, VDateInput },
   directives,
   defaults: {
     VCard: { rounded: 'xl' },
     VBtn: { rounded: 'lg' },
     VTextField: { rounded: 'lg' },
     VSelect: { rounded: 'lg' },
+    VDateInput: { rounded: 'lg' },
+  },
+  locale: {
+    locale: 'zhHans',
+    fallback: 'en',
   },
   theme: {
     defaultTheme: savedTheme,

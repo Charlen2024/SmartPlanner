@@ -20,10 +20,19 @@ function sanitizeHtml(html) {
 function renderAiHtml(text) {
   if (!text) return ''
   try {
-    // 修复 LLM 输出的 markdown 格式问题：##Heading → ## Heading，-item → - item
     let fixed = text
       .replace(/^(#{1,6})([^\s#])/gm, '$1 $2')
       .replace(/^(\s*)([-*])([^\s])/gm, '$1$2 $3')
+    // Prevent broken rendering from unclosed markers during streaming
+    if ((fixed.match(/\*\*/g) || []).length % 2 !== 0) {
+      fixed = fixed.replace(/\*\*([^*]*)$/, '$1')
+    }
+    if ((fixed.match(/(?<!\*)\*(?!\*)/g) || []).length % 2 !== 0) {
+      fixed = fixed.replace(/(?<!\*)\*(?!\*)([^*]*)$/, '$1')
+    }
+    if ((fixed.match(/`/g) || []).length % 2 !== 0) {
+      fixed = fixed.replace(/`([^`]*)$/, '$1')
+    }
     return sanitizeHtml(marked.parse(fixed))
   } catch {
     return text
@@ -83,6 +92,27 @@ function extractNavigateDirective(text) {
 
 function stripNavigateDirective(text) {
   return String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/(?:跳转|打开|进入)\s*[:：]?\s*\/[a-z0-9\-\/]+/gi, '').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+const TOOL_FRIENDLY_NAME = {
+  listGoals: '正在查看你的目标',
+  listPendingTasks: '正在获取待办任务',
+  listGoalTasks: '正在获取目标任务',
+  listTodaySchedules: '正在查询今日排程',
+  listTaskSchedules: '正在查询排程',
+  listClasses: '正在查询课表',
+  listPunchRecords: '正在查询打卡记录',
+  listRecentJournals: '正在查询随笔',
+  searchPersonalData: '正在检索个人资料',
+  getWeather: '正在查询天气',
+}
+
+function mapToolName(raw) {
+  if (!raw) return null
+  // Strip arguments, keep only the tool name
+  const toolName = raw.split(/[(\s]/)[0]?.trim()
+  if (!toolName) return raw
+  return TOOL_FRIENDLY_NAME[toolName] || ('正在执行: ' + toolName)
 }
 
 function dedupParagraphs(text) {
@@ -146,12 +176,15 @@ export const useAssistantStore = defineStore('assistant', {
   state: () => ({
     initialized: false, minimized: false, x: null, y: null, width: 380, height: 520,
     adviceText: '', chatOpen: false, chatInput: '', chatLoading: false, chatMessages: [], navRequest: null,
+    toolStatus: null, // null | string — shown as progress indicator during tool execution
   }),
   actions: {
     async init() {
       if (this.initialized) return
       this.initialized = true
       this.adviceText = '欢迎回来，先照顾好自己。'
+      // Pre-build agent on page load so first chat is fast
+      api.post('/agent/warmup').catch(() => {})
     },
     setRect({ x, y, width, height }) {
       if (Number.isFinite(x)) this.x = x
@@ -205,7 +238,7 @@ export const useAssistantStore = defineStore('assistant', {
           const ctrl = new AbortController()
           const t = setTimeout(() => ctrl.abort(), 120000)
           try {
-            const res = await fetch('/api/user/agent/chat/stream', {
+            const res = await fetch('/api/agent/chat/stream', {
               method: 'POST',
               headers: { 'Content-Type': 'text/plain', ...(accessToken ? { Authorization: 'Bearer ' + accessToken } : {}) },
               body: text, signal: ctrl.signal,
@@ -253,8 +286,15 @@ export const useAssistantStore = defineStore('assistant', {
         const reader = streamRes.body?.getReader?.()
         if (!reader) { aiMsg.text = String(await streamRes.text() || '服务返回为空'); return }
         const decoder = new TextDecoder('utf-8')
-        let buf = '', sseBuf = '', lastFlush = 0, lastFlushed = ''
-        const flush = () => { if (buf !== lastFlushed) { lastFlushed = buf; aiMsg.text = buf; lastFlush = Date.now() } }
+        let buf = '', sseBuf = '', lastFlush = 0, lastFlushed = '', pendingToolLine = ''
+        const flush = () => {
+          if (buf !== lastFlushed) {
+            lastFlushed = buf
+            aiMsg.text = buf
+            aiMsg.html = renderAiHtml(buf) // real-time markdown
+            lastFlush = Date.now()
+          }
+        }
         const processSSE = () => {
           const lines = sseBuf.split('\n'); sseBuf = lines.pop() || ''
           let data = [], inData = false, inEvent = false
@@ -266,7 +306,30 @@ export const useAssistantStore = defineStore('assistant', {
           if (data.length) {
             while (data.length && data[data.length - 1] === '') data.pop()
             const chunk = data.join('\n')
-            if (chunk && !buf.endsWith(chunk)) buf += chunk
+            // Intercept tool call markers — inject styled inline lines
+            if (chunk.startsWith('__SP_TOOL:CALL:')) {
+              const raw = chunk.slice(15)
+              const name = raw.endsWith('__') ? raw.slice(0, -2) : raw
+              const friendly = mapToolName(name?.trim()) || '处理中...'
+              const line = '\n\n<div class="sp-tool-call"><span class="sp-tool-dot"></span>' + friendly + '</div>\n\n'
+              pendingToolLine = line
+              buf += line
+              flush()
+              return
+            }
+            if (chunk === '__SP_TOOL:DONE__') {
+              if (pendingToolLine && buf.includes(pendingToolLine)) {
+                buf = buf.replace(pendingToolLine, '')
+              }
+              pendingToolLine = ''
+              flush()
+              return
+            }
+            if (chunk && !buf.endsWith(chunk)) {
+              // Filter raw JSON tool call attempts leaked by LLM (e.g. {"name": "listTodaySchedules", "arguments": {}})
+              if (/^\{"name"\s*:\s*"\w+"\s*,\s*"arguments"\s*:/.test(chunk)) return
+              buf += chunk
+            }
           }
           if (Date.now() - lastFlush > 50) flush()
         }

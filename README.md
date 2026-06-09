@@ -49,6 +49,7 @@ SmartPlanner 是一个面向个人学习场景的微服务应用：从“目标 
 | web-front | 5175 | Vue3 + Vite + Vuetify，Nginx 静态托管 |
 | gateway-service | 8088 | Spring Cloud Gateway，统一入口 `/api/**` |
 | user-service | 8080 | 认证 + 用户域接口聚合（对其它服务 OpenFeign 调用入口） |
+| agent-service | 8086 | AI Agent 对话、RAG 索引、智能提醒、用户画像分析 |
 | goal-service | 8081 | 目标/任务、AI 拆解（MQ 异步） |
 | schedule-engine | 8082 | 排程与日计划（支持 job 形式异步执行） |
 | resource-search | 8083 | 资源库管理、ES 检索、RAG 增强、去重、资源推荐 job |
@@ -72,6 +73,7 @@ graph TB
   Web["web-front :5175"]
   GW["gateway-service :8088"]
   US["user-service :8080"]
+  AG["agent-service :8086"]
   GS["goal-service :8081"]
   SE["schedule-engine :8082"]
   RS["resource-search :8083"]
@@ -85,6 +87,8 @@ graph TB
 
   Web -->|api| GW
   GW -->|lb| US
+  GW -->|lb| AG
+  US -->|Feign| AG
   US -->|Feign| GS
   US -->|Feign| SE
   US -->|Feign| RS
@@ -92,10 +96,12 @@ graph TB
 
   GW --> Redis
   US --> Redis
+  AG --> Redis
   GS --> Redis
   PS --> Redis
 
   US -.-> Nacos
+  AG -.-> Nacos
   GS -.-> Nacos
   SE -.-> Nacos
   RS -.-> Nacos
@@ -129,7 +135,7 @@ graph TB
 
 前端默认通过网关访问：
 
-`/api/** -> gateway-service:8088 -> (Nacos) user-service -> (Feign) 其它服务`
+`/api/** -> gateway-service:8088 -> (Nacos) user-service（或 agent-service，匹配 /api/agent/**）-> (Feign) 其它服务`
 
 ### 3.2 统一响应体 Result<T>
 
@@ -170,18 +176,18 @@ graph TB
 
 **安全过滤链架构（双重链，防止过期 token 阻塞登录）**
 
-gateway 和 user-service 均采用双 `SecurityFilterChain` 设计：
-- **链 0（高优先级）**：匹配 `/api/auth/**`、`/actuator/**` 等公开路径，不配置 OAuth2 Resource Server，不处理 Bearer token，直接放行
+gateway、user-service、agent-service 均采用双 `SecurityFilterChain` 设计：
+- **链 0（高优先级）**：匹配公开路径（`/api/auth/**`、`/actuator/**` 等，agent-service 额外包含 `/api/agent/portrait/**`、`/api/agent/tasks/**`、`/api/agent/schedule/**` 供内部 Feign 调用），不配置 OAuth2 Resource Server，直接放行
 - **链 1（低优先级）**：匹配其余所有路径，进行 JWT 校验
 
-这样即使用户浏览器缓存了过期 token 后访问登录页，也不会被 `BearerTokenAuthenticationFilter` 拦截。统一异常处理器 `GlobalExceptionHandler`（位于 common 模块，通过 `scanBasePackages = "com.chao"` 被所有服务共享）提供分层异常处理：`AuthenticationException` → 401 "用户名或密码错误"，`IllegalArgumentException` 等 → 400，其余 → 500 "服务异常"。
+这样即使用户浏览器缓存了过期 token 后访问登录页，也不会被 `BearerTokenAuthenticationFilter` 拦截。agent-service 的 JWT 解码依赖 `spring.security.oauth2.resourceserver.jwt.secret-key=${JWT_SECRET:}`，与 user-service 保持一致。统一异常处理器 `GlobalExceptionHandler`（位于 common 模块，通过 `scanBasePackages = "com.chao"` 被所有服务共享）提供分层异常处理：`AuthenticationException` → 401 "用户名或密码错误"，`IllegalArgumentException` 等 → 400，其余 → 500 "服务异常"。
 
 ### 3.4 网关过滤链（可选 API Key、限流、用户上下文）
 
 - `ApiKeyAuthFilter`：如果配置了 `gateway.auth.api-key`，要求请求头 `X-API-KEY`（见 [ApiKeyAuthFilter.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/gateway-service/src/main/java/com/chao/gateway/filter/ApiKeyAuthFilter.java)）
 - `UserContextForwardFilter`：从 JWT 解析并透传用户信息（见上）
 - `RedisRateLimitFilter`：对 `/api/**`（排除 `/api/auth/**`）做 Redis 计数限流（见 [RedisRateLimitFilter.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/gateway-service/src/main/java/com/chao/gateway/filter/RedisRateLimitFilter.java)）
-  - 说明：对流式接口（`/api/user/agent/chat/stream`）如果需要加禁缓冲响应头，必须通过 `beforeCommit` 设置，避免“响应已提交后再改 header”导致连接被关闭，从而出现断流/一次性返回的错觉。
+  - 说明：对流式接口（`/api/agent/chat/stream`）如果需要加禁缓冲响应头，必须通过 `beforeCommit` 设置，避免“响应已提交后再改 header”导致连接被关闭，从而出现断流/一次性返回的错觉。
 
 ---
 
@@ -324,21 +330,26 @@ weekNumber = floor(daysBetween / 7) + 1
 
 ---
 
-## 8. 资源检索与 RAG（resource-search：ES 检索 + LLM 建议 + 爬虫；user-service：RedisStack 向量检索 + task 推荐 + Agent 复盘）
+## 8. 资源检索与 RAG（resource-search：ES 检索 + LLM 建议 + 爬虫；agent-service：RedisStack 向量检索 + Agent 复盘）
 
-### 8.1 resource-search：资源库 + ES 候选检索
+### 8.1 resource-search：资源库 + ES 向量语义检索
 
 MySQL：`sp_resource.course_resources`
-Elasticsearch：用于 title/topic/summary 等字段候选检索（容器内 9200 对外映射 9201）
+Elasticsearch：kNN 向量检索（`text-embedding-v2`，1536维）+ multiMatch 文本检索降级，容器内 9200 对外映射 9201
 
-补充：resource-search 内置 Bilibili 定时爬虫（HTTP 抓取 + 重试 + 去重），用于持续补全 `course_resources`：
+补充：resource-search 内置 Bilibili 定时爬虫（HTTP 抓取 + 重试 + 去重 + 多层质量过滤），用于持续补全 `course_resources`：
 
 - 开关：`smartplanner.crawler.bilibili.enabled`（默认 true）
 - 种子主题：18 个（Java/Spring Boot/Python/Vue/数据结构/算法/计算机网络/操作系统/数据库/机器学习/前端/Linux/Go/Rust/分布式/微服务/设计模式/计算机组成原理）
 - 动态主题：从已有资源和用户目标中自动扩展
-- 每主题抓取：3 条结果（可配 `per-topic-limit`），含 UP主、播放量、时长、简介摘要
+- 每主题抓取：8 条结果（可配 `per-topic-limit`），含 UP主、播放量、时长、简介摘要
+- 多查询词扩展：CJK 主题自动拼接后缀（`教程`/`入门`/`基础`），多个查询词独立请求 B站 API（间隔 400ms），扩充候选池后统一质量过滤
 - 主题间延迟：800ms（可配 `topic-delay-ms`），避免被 B 站限流
 - 去重：URL 归一化 + DB 已有判断
+- 三层质量过滤：
+  - **标题门禁**（`isValidTitle`）：过滤纯哈希值（`HEX_HASH` 32位+）、哈希后缀（`_16位hex`）、纯数字、% 开头、无 CJK 的过长英文标题
+  - **内容相关性**（`isContentRelevantToTopic`）：bigram 相似度 + CJK 字符匹配，中文阈值 0.06、非中文阈值 0.10
+  - **入库写 embedding**：仅通过质量过滤的资源才写入 DB 并生成 1536 维向量存入 ES
 - 统计追踪：lastRunTime / lastRunTopicsCount / lastRunNewCount / totalCrawled / consecutiveFailures / consecutiveZeroNew
 - 实现入口：`ResourceService.scheduledBilibiliCrawl()`
 
@@ -392,19 +403,21 @@ Elasticsearch：用于 title/topic/summary 等字段候选检索（容器内 920
 
 resource-search 的 `searchResourcesWithAdvice(topic)` 大致策略：
 
-1) ES 查询：multiMatch + BestFields + OR（title^3, topic^2, contentSummary），召回候选
-2) DB 候选：按 topic/relatedTopics 查询
-3) 快速结果：规则过滤 + 去重（无需 LLM）
-4) 候选增强：将候选组织成上下文，让 LLM 输出建议与资源
-5) 写库补全：LLM 生成的资源会做归一与去重后 upsert 到 DB/ES，降低下次请求成本
-6) 终极兜底（`defaultResources`）：以上全失败时返回 8 条硬编码搜索引擎链接（Google/B站/GitHub/知乎/Coursera/edX/Medium），供用户自行搜索
+1) ES kNN 向量语义检索：DashScope `text-embedding-v2`（1536 维）生成查询向量 → ES `dense_vector` cosine 相似度匹配，通过 `RestClient` 发送原生 kNN 查询并手动解析 JSON 响应（避免 ES Java Client 版本兼容问题），响应排除了 embedding 字段减少传输体积
+2) ES 文本检索降级：kNN 失败时自动 fallback 到 `NativeQuery` multiMatch + BestFields + OR（title^3, topic^2, contentSummary）
+3) DB 候选：按 topic/relatedTopics 查询
+4) 快速结果：规则过滤 + 去重（无需 LLM）
+5) 候选增强：将候选组织成上下文，让 LLM 输出建议与资源
+6) 终极兜底（`defaultResources`）：以上全失败时返回国内平台搜索链接（B站/慕课网/知乎/GitHub）
 
 对应实现集中在 [ResourceService.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/resource-search/src/main/java/com/chao/resource/service/ResourceService.java)。
 
-另外一个更快的接口 `searchResources(topic)` 用于“只要资源列表，不要建议文本”的场景：
+另外一个更快的接口 `searchResources(topic)` 用于”只要资源列表，不要建议文本”的场景：
 
-- 先 ES（全文 multiMatch）-> 再 AI 推荐（可选写库补全）-> 再 DB like -> 最后 defaultResources
-- 注意：当前 ES 查询主要是全文检索（multiMatch），如需真正向量检索（kNN），建议在 ES 或 RedisStack 侧单独建设向量索引后再接入。
+- 先 ES kNN 向量语义检索（优先）→ 失败时降级 multiMatch 文本检索 → 返回匹配结果
+- 嵌入生成：`buildEmbeddingText(topic, title, summary)` 拼接文本 → `embeddingModel.embed()` 生成 1536 维向量
+- 写入路径：爬虫入库时 `generateAndSetEmbedding(doc)` 自动生成向量，失败不阻塞写入
+- 兜底平台仅限国内：B站、慕课网、知乎、GitHub（不含 Google/Coursera/edX/Medium）
 
 ### 8.4 resource-search：去重原理（重点解决 B 站 BV 分 P / 标题噪声）
 
@@ -422,20 +435,20 @@ resource-search 的 `searchResourcesWithAdvice(topic)` 大致策略：
 
 resource-search 直接接口见 [ResourceController.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/resource-search/src/main/java/com/chao/resource/controller/ResourceController.java)。
 
-### 8.6 user-service：向量库（RedisStack）与索引策略
+### 8.6 agent-service：向量库（RedisStack）与索引策略
 
-user-service 使用 Spring AI 的 `RedisVectorStore`（DashScope embedding）作为向量检索底座，存储两类数据：
+agent-service 使用 Spring AI 的 `RedisVectorStore`（DashScope embedding）作为向量检索底座，存储两类数据：
 
 **课程索引**（全局共享，`type=course`，无 `userId` 字段）
 
-- 管理方：`UserController.ensureCoursesIndexed()`
+- 管理方：`AgentRagIndexer`（由每日凌晨 3 点定时任务触发）
 - 懒初始化：首次向量检索时从 resource-search 拉取资源列表（最多 800 条），分批写入（每批 20 条，`VectorStoreUtils.addDocsInBatches`）
 - 刷新周期：Redis 标记 `sp:rag:indexed:courses`，TTL 1 天，过期后下次查询自动重建
 - 向量检索时通过 `filterExpression(type=course)` 命中
 
 **用户索引**（按用户隔离，`type=goal/task/journal/punch`，含 `userId` 字段）
 
-- 管理方：`AgentChatService.ensureUserRagIndexed(userId)`
+- 管理方：`AgentRagIndexer.ensureUserRagIndexed(userId)`
 - 数据源：用户的目标、待办任务、随笔、打卡记录
 - 触发时机：Agent 调用 `searchPersonalData` 时懒初始化；每日凌晨 3 点全量预索引
 - 去重：Redis 标记 `sp:rag:indexed:u:{userId}`（TTL 3 天）+ 进程内 `ConcurrentHashMap`
@@ -450,17 +463,13 @@ user-service 使用 Spring AI 的 `RedisVectorStore`（DashScope embedding）作
 
 - `VectorStoreUtils`（`user-service/.../util/VectorStoreUtils.java`）：`addDocsInBatches(vs, docs, batchSize)` 分批写入 + `deleteByUserId(vs, userId)` 按 userId 清理
 
-### 8.7 user-service：任务 → 课程资源推荐（RAG + 缓存 + 兜底）
+### 8.7 user-service：任务 → 课程资源推荐（在线检索 + 缓存 + 兜底）
 
 - 批量接口：`POST /api/user/tasks/resources`（入参 taskIds，返回 taskId -> resources[]）
 - 核心策略：
-  - 优先：向量相似度检索（metadata 过滤 `type=course`）
-  - 不足：调用 `resource-search` 在线检索兜底补齐
+  - 调用 `resource-search` 在线检索获取课程资源
   - 缓存：按 taskId 缓存推荐结果（TTL 2 天）
   - 强制刷新：传 `{ "refresh": true }` 可跳过缓存重新检索
-- 已知限制：
-  - 空结果和 Google 兜底链接也会被缓存 2 天。若首次查询时 RedisStack/爬虫尚未就绪，该 task 的推荐将暂时停留在搜索引擎链接，需手动清 Redis 或传 `refresh: true` 触发重试
-  - 向量检索对带前缀的任务标题（如"阅读：""总结："）匹配率偏低，因 DashScope embedding 对任务描述与 B 站课程标题的语义对齐有限
 
 对应实现见 [UserController.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/user-service/src/main/java/com/chao/user/controller/UserController.java)。
 
@@ -473,9 +482,11 @@ Agent 浮窗不再展示“学习建议/关怀文案”，只保留对话能力�
 - 前端展示：见 [DefaultLayout.vue](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/web-front/src/layouts/DefaultLayout.vue) 与 [notify.js](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/web-front/src/stores/notify.js)
 
 
-### 8.9 Agent：9 个激活 + 4 个禁用的 ToolCallback 驱动的智能对话
+### 8.9 Agent：9 个激活 + 4 个禁用的 ToolCallback 驱动的智能对话（agent-service）
 
 Agent 基于 Spring AI Alibaba ReactAgent + RedisSaver 实现多轮对话，通过 @Tool 方法获取真实数据，不走硬编码短路。当前共 13 个方法定义，其中 9 个激活、4 个写操作已禁用（仅保留方法供内部使用）：
+
+Agent 逻辑位于独立的 `agent-service`（端口 8086），通过网关路由 `/api/agent/**` 访问。user-service 通过 `AgentAdviceClient` 和 `AgentPortraitClient`（Feign）调用 agent-service 的任务建议和画像分析能力。
 
 **数据查询工具（8 个激活 + 1 个禁用）**
 
@@ -497,12 +508,12 @@ Agent 基于 Spring AI Alibaba ReactAgent + RedisSaver 实现多轮对话，通�
 
 **检索工具（1 个）**
 
-- searchPersonalData(query, topK) — 混合检索（RedisStack 向量检索 + 关键词兜底），用 `userId == X OR type == course` 过滤向量库，确保私人数据隔离的同时保留全局课程资源可检索；不足时降级为关键词匹配 + 在线检索
+- searchPersonalData(query, topK) — 混合检索（RedisStack 向量检索 + 关键词兜底），用 `userId == X OR type == course` 过滤向量库，确保私人数据隔离的同时保留全局课程资源可检索；不足时降级为关键词匹配 + 在线检索；课程结果自动匹配用户目标关键词，标注 `matchesYourGoal` 和 `matchingGoalKeyword` 辅助 LLM 优先推荐相关资源
 
 **Agent 行为约束（防止编造/跑偏）**
 
 - 涉及【我有哪些任务/排程/是否完成/天气】等事实类问题，必须先调工具确认，严禁编造
-- 输出使用基本 Markdown 格式（## 标题、- 列表、**加粗**），前端用 marked.js 渲染。每次只能调用 1 个工具，需要多个数据时分步调用（如先调 listPunchRecords 再调 listJournals）。回复使用 taskTitle（任务名）而非 taskId（任务编号）
+- 输出使用基本 Markdown 格式（## 标题、- 列表、**加粗**），前端用 marked.js 渲染。支持多步工具调用（如先调 listPunchRecords 再调 listRecentJournals 后汇总输出），系统提示词内置 5 个工具使用示例（今日日程/周总结/课表查询/资料搜索/目标任务）引导模型行为。回复使用 taskTitle（任务名）而非 taskId（任务编号）
 - 用户问【你是谁/你叫什么】时，返回固定自我介绍，不走模型生成
 - 列出任务时必须同时关注用户问到的其他方面（如心情），不能只答任务列表
 - 建议用户操作时在末尾追加跳转链接（跳转: /path），白名单：/、/plan、/goals、/journals、/schedule、/resources、/punch、/profile、/games/2048
@@ -512,11 +523,29 @@ Agent 基于 Spring AI Alibaba ReactAgent + RedisSaver 实现多轮对话，通�
 
 Agent 流式接口走 `text/plain` 分块输出，链路上任何一层缓冲/压缩/连接提前关闭都会让前端“看起来像一次性返回”。
 
-- 后端：`user-service` 使用 `StreamingResponseBody` 边写边 flush（接口：`POST /api/user/agent/chat/stream`）
+- 后端：`agent-service` 使用 `StreamingResponseBody` 边写边 flush（接口：`POST /api/agent/chat/stream`）
 - 网关：如需补充禁缓冲 header，必须在 `beforeCommit` 阶段设置（见 3.4 说明）
 - 前端：`fetch + ReadableStream.getReader()` 持续读取并更新消息文本（见 [assistant.js](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/web-front/src/stores/assistant.js)）
 - 反代：Nginx 需对该路径关闭 buffering，并建议禁用上游压缩（见 [nginx.conf](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/web-front/nginx.conf)）
 - 前端渲染：AI 消息通过 marked.js 转 HTML 后用 v-html 渲染，支持 Markdown 链接 `[页面名](/路径)` 的 SPA 内跳转。末尾 `跳转: /path` 会被提取为导航 chip 按钮。
+
+### 8.11 Agent 内部架构
+
+**组件关系**
+
+```
+AgentChatService (chat / chatStream / buildAgent)
+  ├── AgentUserContext (ThreadLocal<Long> — 请求级用户上下文)
+  ├── SmartPlannerTools (@Component 单例，9 个激活 @Tool + 4 个禁用写操作)
+  │     └── safeList() — 统一 Feign Result.code 校验
+  ├── MessageTrimmingHook (BEFORE_MODEL，MAX_MESSAGES=24，工具消息对齐)
+  ├── ReactAgent (per-user ConcurrentHashMap 缓存，RedisSaver 持久化)
+  └── AgentRagIndexer (每日凌晨 3 点全量索引 + searchPersonalData 懒索引)
+```
+
+**用户上下文传递**：`AgentUserContext` 基于 `ThreadLocal<Long>` 实现，但 `ReactAgent` 内部通过 graph executor 执行工具调用，可能与主调线程不在同一线程。为此，`buildAgent()` 使用 `UserContextToolCallback` 包裹每个 `ToolCallback`——包裹器在构造时捕获 userId，每次 `call()` 前重新设置 `AgentUserContext`、执行后清理，确保无论工具在哪个线程执行，都能获取正确的用户上下文。
+
+**Agent 构建**：`buildAgent(userId)` 共享单例 `SmartPlannerTools`，通过 `MethodToolCallbackProvider` 生成原始回调后，逐条包装为 `UserContextToolCallback`（捕获 userId），再传入 `ReactAgent.builder()`。Agent 实例按 userId 缓存（`ConcurrentHashMap`），超过 1000 条目时清除半数。
 
 ---
 
@@ -539,7 +568,7 @@ Agent 流式接口走 `text/plain` 分块输出，链路上任何一层缓冲/�
 
 - `GET  /api/user/insights`：近 7 天洞察（准时率、平均延迟、完成率等）
 - `GET  /api/user/portrait`：画像汇总（habits + insights + recommendation + tips）。当画像数据过期/为空时会自动触发一次 AI 分析来补齐建议与推荐参数。
-- `POST /api/user/portrait/recompute`：重新计算画像（强制走 AI 分析，返回 recommendation + tips，并回写 habits 的画像字段）
+- `POST /api/user/portrait/recompute`：重新计算画像（强制走 AI 分析，返回 recommendation + tips，并回写 habits 的画像字段）。响应新增 `computation` 字段（Map），包含 8 项指标的计算明细（公式、输入值、结果），前端"计算明细"面板可直接渲染，便于用户理解每项指标如何得出
 - `GET  /api/user/weather?location=城市名`：天气查询（wttr.in，支持中文/英文城市名；若不传 location 则使用用户保存的城市偏好）。响应使用 `WttrResponse` DTO 反序列化 wttr.in JSON，提取温度/体感温度/风速/湿度/天气描述，英文天气描述自动翻译为中文。前端仪表盘城市选择器通过 `PUT /api/user/weather-location?location=城市名` 保存城市到 Redis（缓存 365 天），Agent 天气 Tool 和仪表盘天气卡片均自动读取
 
 ### 9.3 习惯指标计算原理（user-service）
@@ -687,7 +716,7 @@ SSE 连接维护：后端每 30s 发送一次 heartbeat ping 保持连接活跃�
 
 实现位置：
 
-- 后端：user-service 的 [AgentReminderService.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/user-service/src/main/java/com/chao/user/service/AgentReminderService.java)（定时评估 + 去重推送）
+- 后端：agent-service 的 [AgentReminderService.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/agent-service/src/main/java/com/chao/agent/service/AgentReminderService.java)（定时评估 + 去重推送）
 - 后端：goal-service 的 [GoalService.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/goal-service/src/main/java/com/chao/goal/service/GoalService.java)（新增任务/新增随笔时即时推送提醒）
 - 前端：web-front 的 [DefaultLayout.vue](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/web-front/src/layouts/DefaultLayout.vue) 与 [notify.js](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/web-front/src/stores/notify.js)（铃铛列表 + 未读数 + 点击跳转）
 
@@ -809,6 +838,15 @@ curl -X POST "http://localhost:8088/api/user/schedule/auto" ^
 ### 12.5 资源推荐（异步 job，避免 15s 超时）
 
 > 排程完成后系统自动为已排程任务触发 RAG 资源推荐，无需手动调用。以下接口用于手动触发或查看状态。
+>
+> **Windows curl 注意**：CMD/PowerShell 中 curl 对中文字符的编码处理可能不一致，导致 JSON 解析失败（`Invalid UTF-8`）。推荐使用 Git Bash 的 curl，或通过 `printf` + `--data-binary` 管道方式发送中文 JSON body：
+>
+> ```bash
+> printf '{"topic":"计算机组成原理"}' | curl -X POST "http://localhost:8088/api/user/resources/search/advice/jobs" \
+>   -H "Authorization: Bearer {accessToken}" \
+>   -H "Content-Type: application/json; charset=UTF-8" \
+>   --data-binary @-
+> ```
 
 ```bash
 curl -X POST "http://localhost:8088/api/user/resources/search/advice/jobs" ^
@@ -840,7 +878,7 @@ curl -X POST "http://localhost:8088/api/user/tasks/resources" ^
 ### 12.8 Agent 对话（流式输出）
 
 ```bash
-curl -N -X POST "http://localhost:8088/api/user/agent/chat/stream" ^
+curl -N -X POST "http://localhost:8088/api/agent/chat/stream" ^
   -H "Authorization: Bearer {accessToken}" ^
   -H "Content-Type: text/plain" ^
   --data "帮我总结最近一周随笔里反复出现的学习问题，并给我一个今天能做的改进动作"
@@ -882,12 +920,38 @@ curl -N -X POST "http://localhost:8088/api/user/agent/chat/stream" ^
 
 某些 Dockerfile 或 compose 镜像源可能受网络影响；如果遇到 401，可将基础镜像源替换为可用镜像源后重新 build。
 
-### 13.5 Agent 流式不生效 / 一次性显示 / 断流
+### 13.5 ES 端口被 Cpolar 隧道占用（Windows）
+
+**症状**：`curl http://localhost:9200` 返回 Cpolar 登录页（而非 ES 集群信息），`/_cat/indices` 返回 404。
+
+**原因**：Cpolar 内网穿透工具默认占用 9200 端口，与 ES 的 WSL 端口转发冲突。
+
+**处理**：
+- 方法一：关闭 Cpolar 或修改其监听端口
+- 方法二：通过 Docker Compose 映射的 9201 端口访问 ES（`http://localhost:9201`）
+- 方法三：服务内部通过 Docker 网络（`http://elasticsearch:9200`）访问 ES，不受宿主机端口冲突影响。直接使用 resource-search 的 API（`http://localhost:8083/api/resources/search`）即可正常检索
+
+### 13.6 旧爬虫垃圾数据清理
+
+**症状**：kNN 向量搜索返回不相关内容（如"机器学习"搜出 CPU 评测、汽车评测、电竞桌）。
+
+**原因**：入库质量过滤（`isContentRelevantToTopic`）仅对 `saveIfNew()` 的新数据生效，MySQL 中已存在的旧垃圾数据未被清理。
+
+**处理步骤**：
+1. 通过 Adminer（http://localhost:8085）或 MySQL 客户端连接 `sp_resource` 库
+2. 查看问题主题的数据：`SELECT id, title, content_summary FROM course_resources WHERE topic = '机器学习';`
+3. 删除明显不相关的记录：`DELETE FROM course_resources WHERE topic = '机器学习' AND (title LIKE '%E5%' OR title LIKE '%CPU%' OR title LIKE '%奥迪%');`（根据实际情况调整条件）
+4. 重启 resource-search 服务，触发 `reindex-on-startup` 自动重建 ES 索引
+5. 验证：`curl "http://localhost:8083/api/resources/search?topic=机器学习"` 确认结果质量
+
+**预防**：确保 `smartplanner.crawler.quality-filter.enabled=true`（默认开启），新爬取数据入库前会经过 bigram 相似度 + 中文字符匹配过滤。
+
+### 13.7 Agent 流式不生效 / 一次性显示 / 断流
 
 按优先级从高到低排查：
 
 1) 前端是否真的在增量更新：硬刷新（Ctrl+F5）确保加载到最新 web-front 构建；Pinia 的消息对象必须是响应式引用（见 [assistant.js](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/web-front/src/stores/assistant.js)）
-2) 反向代理是否缓冲：Nginx 对 `location = /api/user/agent/chat/stream` 关闭 `proxy_buffering` / `proxy_request_buffering`，并建议禁用 `Accept-Encoding`（见 [nginx.conf](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/web-front/nginx.conf)）
+2) 反向代理是否缓冲：Nginx 对 `location = /api/agent/chat/stream` 关闭 `proxy_buffering` / `proxy_request_buffering`，并建议禁用 `Accept-Encoding`（见 [nginx.conf](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/web-front/nginx.conf)）
 3) 网关是否在响应已提交后改 header：会触发 reactor 异常并关闭连接（见 3.4 说明与 [RedisRateLimitFilter.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/gateway-service/src/main/java/com/chao/gateway/filter/RedisRateLimitFilter.java)）
 4) 用 `curl -N` 直连验证：分别打到 `http://localhost:8088/...`（网关）与 `http://localhost:5175/...`（前端 Nginx）对比，确认是哪一层聚合/断流
 
@@ -901,7 +965,7 @@ curl -N -X POST "http://localhost:8088/api/user/agent/chat/stream" ^
 
 ---
 
-## 15. 性能优化记录（2026-06-08）
+## 15. 性能优化与功能增强记录（2026-06-08 ~ 2026-06-09）
 
 ### 15.1 统一 HTTP 客户端
 
@@ -919,11 +983,16 @@ curl -N -X POST "http://localhost:8088/api/user/agent/chat/stream" ^
 
 **修改**：改用 `CompletableFuture.runAsync(() -> smartSchedule(userId))`，确保异步执行。（`schedule-engine/.../service/ScheduleService.java`）
 
-### 15.3 消除 ThreadLocal 内存泄漏
+### 15.3 Agent 用户上下文重构
 
-**问题**：`AgentChatService` 使用 `ThreadLocal<Long>` 存储当前 userId，但 Spring Boot 默认使用线程池处理请求，ThreadLocal 未及时清理会导致后续请求读到错误 userId、且无法被 GC。
+**初始问题**：`AgentChatService` 使用 `ThreadLocal<Long>` 存储当前 userId，但 Spring Boot 默认使用线程池处理请求，ThreadLocal 未及时清理会导致后续请求读到错误 userId、且无法被 GC。
 
-**修改**：移除 `ThreadLocal`，改为方法参数显式传递 userId。（`user-service/.../service/AgentChatService.java`）
+**修改**：移除未受管理的 `ThreadLocal`，改为方法参数显式传递 userId。（`user-service/.../service/AgentChatService.java`）
+
+**2026-06-08 重构**：随 agent-service 独立拆分，`SmartPlannerTools` 需感知当前用户才能调用各 Feign 客户端。引入受管理的 `AgentUserContext`（`agent-service/.../util/AgentUserContext.java`）：
+- 基于 `ThreadLocal<Long>` 实现，在 `chat()` 方法中通过 `try/finally` 设置与清理，在 `chatStream()` 中通过 `doFinally` 保证 Reactive 流结束后清理
+- `AgentChatService` 不再为每个用户 `new SmartPlannerTools(...)`，改为注入单例 `@Component`
+- 消除了每次 agent 构建时重复创建工具实例的开销，同时保证用户隔离正确性
 
 ### 15.5 重构 Docker 构建
 
@@ -968,3 +1037,259 @@ curl -N -X POST "http://localhost:8088/api/user/agent/chat/stream" ^
 **问题**：`PunchRecord` 实体映射 `task_title` 列，但 `init.sql` 建表时未包含此列，导致 punch-service 查询抛出 `Unknown column 'task_title'`。
 
 **修改**：`sql/init.sql` 新增 `task_title VARCHAR(500)` 列。
+
+### 15.12 修复 agent-service 启动失败与 502
+
+**问题 1 — FeignClient Bean 冲突**：`AgentAdviceClient` 和 `AgentPortraitClient` 均使用 `@FeignClient(name = "agent-service")` 且无 `contextId`，导致 `FeignClientSpecification` Bean 同名注册失败。
+
+**修改**：两个 Feign 客户端分别添加 `contextId = "agent-advice"` 和 `contextId = "agent-portrait"`（`common/.../client/AgentAdviceClient.java`、`AgentPortraitClient.java`）。
+
+**问题 2 — agent-service 缺少安全配置**：agent-service 依赖 `spring-boot-starter-oauth2-resource-server` 但无 `SecurityConfig`，Spring Security 默认要求所有请求认证（浏览器弹密码框），且缺少 `spring.security.oauth2.resourceserver.jwt.secret-key` 配置导致 JWT 解码器无法创建。
+
+**修改**：
+- 新增 `SecurityConfig`（`agent-service/.../config/SecurityConfig.java`）：双链设计，内部 Feign 调用路径（`/api/agent/portrait/**`、`/api/agent/tasks/**`、`/api/agent/schedule/**`）放行，其余路径 JWT 认证；显式定义 `JwtDecoder` Bean（`NimbusJwtDecoder.withSecretKey`）避免自动配置在 secret 为空时跳过创建
+- `application.yml` 新增 `spring.security.oauth2.resourceserver.jwt.secret-key: ${JWT_SECRET:}`
+
+**问题**：LLM 调用（最长 180s 超时）与用户 CRUD 请求共享 Tomcat 线程池，高并发 Agent 对话可能阻塞登录/注册等轻量请求。
+
+**修改**：
+- 新增 `agent-service`（端口 8086），独立部署 AI Agent 对话、RAG 索引、智能提醒、用户画像分析
+- user-service 通过 `AgentPortraitClient`、`AgentAdviceClient`（Feign）调用 agent-service
+- Agent 流式接口路径改为 `/api/agent/chat/stream`（网关 `Path=/api/agent/**` 路由到 agent-service）
+- user-service 移除 VectorStore、DashScope API、EmbeddingModel 等 AI 基础设施依赖，专注用户认证与接口聚合
+
+### 15.13 Agent 构建质量全面优化（2026-06-08）
+
+**系统提示词重写（P0）**：移除「每次只能调用 1 个工具」的矛盾约束（与「先调 A 再调 B」的多步指引冲突），新增 5 个工具使用示例（今日日程/周总结/课表查询/资料搜索/目标任务），引导模型在合适的场景下进行多步工具调用。
+
+**流式输出优化（P0+P1）**：
+- `sanitizeStreamChunk` 移除 `chunk.replace("```", "")`——不再删除所有反引号，保留代码块和行内代码的正确渲染
+- 流式去重算法从基于 85% 模糊匹配的脆弱实现简化为纯 `startsWith` 检测，消除边界情况下的吞字/重复问题
+
+**SmartPlannerTools 单例化（P1）**：`SmartPlannerTools` 从每次构建 Agent 时 `new` 创建改为 Spring `@Component` 单例 Bean，通过 `AgentUserContext`（受管理的 ThreadLocal）注入用户上下文。9 个构造函数参数通过标准 DI 注入，消除了 agent 重建时的对象分配开销，同时保证用户隔离正确性。
+
+**Feign 调用结果校验（P1）**：新增 `safeList(Result<List<T>>)` 静态辅助方法统一检查 `res.code == 200`，所有 10+ 处工具方法的 Feign 调用结果均通过该方法获取数据，避免在远程调用失败时静默返回空列表。
+
+**课程检索个性化（P2）**：`searchPersonalData` 的关键词兜底检索新增目标关键词匹配——拉取用户的目标标题并提取关键词，课程结果命中时标注 `matchesYourGoal: true` 和 `matchingGoalKeyword`，辅助 LLM 优先推荐与用户学习目标相关的课程资源。
+
+**关键 Bug 修复（P0）**：
+- `SecurityConfig`：JWT 密钥为空或长度不足 32 字节时启动即抛 `IllegalStateException`（明确错误信息），避免运行时静默失败
+- `AgentAiConfig`：`JedisPooled` 构造函数补充 Redis 密码参数（与原 `RedissonClient` 配置对齐），修复有密码的 Redis 环境下向量库连接失败
+
+**ThreadLocal 跨线程传播修复（P0）**：`AgentUserContext` 基于 `ThreadLocal` 存储 userId，但 `ReactAgent` 内部 graph executor 在不同线程上执行工具调用，导致 `requireUserId()` 抛出 `IllegalStateException`（LLM 回显"提示 userId not set"）。修复方案：`buildAgent()` 新增 `UserContextToolCallback` 包裹器类，在构造时捕获 userId，每次 `call()` / `call(toolInput, toolContext)` 前重新设置 ThreadLocal、执行后清理，确保工具调用无论在线程池中哪个线程运行都能获取正确的用户上下文。
+
+### 15.14 前端 UI 优化（2026-06-09）
+
+**排程天数选择移除**：`GoalsView.vue` 移除「排程天数」下拉选择器（1/3/7 天），排程请求固定 `days=1`。因后端 `commitDailyPlan()` 从未读取 `request.getDays()` 字段，多天排程功能实际无效。
+
+**日期选择器统一为 Vuetify 风格**：三个页面（`GoalsView.vue`、`PlanView.vue`、`ScheduleView.vue`）中 `v-text-field type="date"` 替换为 `v-date-input`。`VDateInput` 是 Vuetify 3.7 Labs 组件，需从 `vuetify/labs/VDateInput` 单独导入并注册到 `createVuetify` 的 components 中，提供 Material Design 风格的日历面板（支持深/浅色主题）。全局设置 `locale: 'zhHans'` 使日历面板显示中文月份，`VDateInput` 添加 `rounded: 'lg'` 默认圆角。
+
+**侧边栏收起模式重构**：`DefaultLayout.vue` 菜单收起（rail 76px）时不再使用 `v-list-item` 的 `prepend-icon`（受限于 `v-list-item__spacer` 和 `v-list-item__content` 内部弹性布局导致图标不居中），改用纯 `v-btn` 图标按钮 + `flexbox` 居中（`flex-direction: column; align-items: center`），展开/收起两种状态独立渲染。顶部增加 84px 灯泡品牌图标容器与展开模式 SmartPlanner 卡片等高对齐，菜单项切换时不再跳动。汉堡按钮收起时容器设为 76px 宽、图标居中，与下方菜单图标垂直对齐。
+
+**画像计算明细**：`ProfileView.vue` 新增可折叠「计算明细」面板（默认收起），展示 8 项指标（准时率、平均延迟、完成率、连续打卡、晨型倾向、平均专注时长、拖延指数、排程推荐）的计算公式、原始输入值和最终结果。后端 `UserInsightDto` 新增 `onTimeCount`、`lateCount`、`totalSchedules` 中间字段，`UserPortraitDto` 新增 `computation` Map（`LinkedHashMap`），`InfoController.buildComputation()` 统一构建计算详情。点击「重新分析」后动态更新。
+
+### 15.15 Agent 基础设施升级（2026-06-09）
+
+#### 15.15.1 消息管理升级：Summarization Hook 替代硬截断
+
+**问题**：`MessageTrimmingHook` 在消息超过 24 条时直接丢弃旧消息（仅保留第一条），导致长期对话中丢失上下文。
+
+**修改**：引入 Spring AI Alibaba 1.1 内置 `SummarizationHook`（`com.alibaba.cloud.ai.graph.agent.hook.summarization`），当上下文 token 超限时自动将历史消息压缩为摘要，保留在 System Message 中，而非简单丢弃。
+
+- 配置：`messagesToKeep(8)` 保留最近 8 条完整消息，其余压缩；`keepFirstUserMessage(true)` 始终保留用户最初的问题
+- 新增 `ModelCallLimitHook`：`threadLimit(10)` 单次对话最多 10 轮模型调用，`runLimit(20)` 总计 20 次，防止 Agent 循环失控
+- 删除自定义 `MessageTrimmingHook.java`（约 105 行），替换为框架标准组件
+
+#### 15.15.2 LLM 调用可观测性（OpenTelemetry）
+
+**问题**：所有 LLM 调用的延迟、token 消耗、调用频率完全不可见，排查问题只能看日志。
+
+**修改**：Spring AI 1.1.2 已内置 `spring-ai-autoconfigure-model-chat-observation` 自动配置，仅需添加依赖即可。
+
+- `agent-service/pom.xml` 新增 `micrometer-tracing-bridge-otel` + `opentelemetry-exporter-otlp`，通过 Micrometer Observation API 自动记录每次 ChatClient/ChatModel 调用
+- 无需代码改动，Spring AI 自动为所有 LLM 调用创建 Observation（span），记录延迟、模型名、token 使用量
+- 新增 `spring.ai.chat.client.observations.include-prompt=true` 配置项，可选记录完整 prompt 内容（仅限开发环境）
+
+#### 15.15.3 Agent 系统提示词增强
+
+**问题**：Agent 在多步工具调用场景下偶尔出现调用顺序错误（例如先查随笔再查打卡，而非先打卡后随笔）。
+
+**修改**：系统提示词新增「工具调用规划」指引，要求 Agent 在调用多个工具前先在 `thought` 中列出执行计划（1→2→3），再按计划执行。利用 Spring AI Alibaba ReactAgent 内置的 ReAct 推理循环（Thought→Action→Observation），无需额外 Hook。
+
+#### 15.15.4 画像计算明细准确性修复
+
+**问题**：`buildComputation()` 返回给前端的计算明细存在数据不一致——
+- 平均延迟：只显示 `lateCount`，缺少 `totalDelayMinutes`，无法验证 `总延迟÷迟到次数`
+- 完成率：`doneCount` 由 `completionRate × totalSchedules` 反推，存在舍入误差
+- 晨型/专注/拖延：输入显示本地公式参数，但结果可能已被 AI 微调，链条对不上
+
+**修改**：
+- `UserInsightDto` 新增 `totalDelayMinutes`、`doneCount` 字段，`computeInsights()` 直接记录原始值
+- `buildComputation()` 补全输入数据；AI 微调过的指标在 formula 中标注 `→ AI微调`，并在 inputs 中附加 `localResult` 展示本地原始值
+- 前端 `ProfileView.vue` 新增 `totalDelayMinutes`、`localResult` 的中文标签和提示
+
+### 15.16 Agent 对话增强（2026-06-09）
+
+四项增强覆盖预热、工具可视化、动态上下文、工具缓存，后端 agent-service 与前端的 SSE 流处理均已实现。
+
+#### 15.16.1 Agent 预热
+
+**问题**：首个用户首次打开对话时，`ReactAgent` 需完整构建（创建 RedisSaver、加载 Hook、初始化工具回调），耗时 2-5 秒，体感卡顿。
+
+**修改**：
+- `AgentChatService.warmup(userId)`：通过 `CompletableFuture.runAsync(..., aiTaskExecutor)` 异步预构建 Agent，完成后缓存至 `ConcurrentHashMap`
+- `AgentController` 新增 `POST /api/agent/warmup` 端点（需要 JWT 认证）
+- 前端 `assistant.js` 在 `openChat()` 首次调用时 fire-and-forget 触发 `/api/agent/warmup`，不阻塞 UI
+
+#### 15.16.2 工具调用可视化
+
+**问题**：Agent 调用工具（如查询今日排程、拉取打卡记录）期间前端无任何反馈，用户只能等待文本出现，不清楚系统在做什么。
+
+**修改**——后端标记：
+- `AgentChatService.chatStream()` 的 `raw.handle()` 中检测 `OutputType.AGENT_TOOL_STREAMING`，emit `__SP_TOOL:CALL:工具信息__`
+- `OutputType.AGENT_TOOL_FINISHED` 时 emit `__SP_TOOL:DONE__`
+- `extractToolInfo()` 从 `StreamingOutput.chunk()` / `.message().getText()` 提取工具名
+
+**修改**——前端拦截：
+- `assistant.js` 新增 `toolStatus` 状态字段
+- SSE 处理循环 `processSSE()` 中检查 chunk 前缀：`__SP_TOOL:CALL:` 开头的设置 `toolStatus`，`__SP_TOOL:DONE__` 清除 `toolStatus`，均不拼入显示文本
+- `TOOL_FRIENDLY_NAME` 映射表将 10 个工具名转为中文描述（如 `listTodaySchedules` → "正在查询今日排程"），`mapToolName()` 解析原始工具信息（取第一个词作为工具名）并查表返回友好文案
+- `finally` 块中同时清理 `toolStatus` 和 `chatLoading`
+
+**修改**——前端 UI：
+- `DefaultLayout.vue` 消息列表底部新增工具进度指示器：`v-progress-circular`（14px 旋转动画）+ 中文提示文字，仅在 `toolStatus` 非空时显示，固定在 AI 气泡下方，透明度 0.75 保持低调
+
+#### 15.16.3 动态系统提示词
+
+**问题**：Agent 的系统提示词是写死的，不知道用户当前状态（连续打卡天数、今日待完成数、本周完成率），导致回答空洞、缺少针对性。
+
+**修改**：
+- `AgentChatService` 注入 `PunchClient` + `ScheduleClient`
+- 新增 `buildStatusPrefix(userId)`：每次 chat/chatStream 调用前实时查询：
+  - 连续打卡天数（`punchClient.getStreak`）
+  - 今日待完成排程数（`scheduleClient.listTaskSchedules` 当天，status != 1 计数）
+  - 本周完成率（近 7 天排程中已完成的比例）
+- 格式：`[当前状态] 连续打卡5天 | 今日待完成3项 | 本周完成率60%\n\n`
+- 拼接在用户问题之前，模型可据此给出个性化建议。异常静默忽略，不阻塞对话
+
+#### 15.16.4 工具结果缓存
+
+**问题**：单次 Agent 对话中工具可能被重复调用（如 LLM 先调 `listTodaySchedules` 获取上下文，回答追问时又调一次），导致不必要的 Feign 远程调用延迟。
+
+**修改**：
+- `AgentChatService` 新增 `ThreadLocal<Map<String, String>> toolCache`，请求级别缓存
+- `UserContextToolCallback` 改为内部类（非静态），新增 `callWithCache(toolInput)` 方法：以 `工具名:输入参数` 为 key，优先读缓存、缓存未命中时执行并写入
+- `chat()` 在 `finally` 中清理，`chatStream()` 在 `doFinally` 中清理，确保不跨请求泄漏
+- 典型场景收益：周总结场景（先调打卡再调随笔），追问"再详细说说"时跳过 2 次 Feign 调用
+
+### 15.17 Agent 流式输出优化（2026-06-09）
+
+#### 15.17.1 Markdown 实时渲染
+
+**问题**：流式输出过程中只更新纯文本 `aiMsg.text`，`aiMsg.html` 在流结束后才设置，导致 `**加粗**`、代码块等格式化标记在流式过程中以原始语法显示，体验割裂。
+
+**修改**：
+- `assistant.js` 的 `flush()` 同步更新 `aiMsg.html = renderAiHtml(buf)`，利用模板 `v-html="m.html || m.text"` 实时渲染
+- 新增未闭合格式标记平衡逻辑：流式 chunk 边界可能导致 `**`（bold）、`*`（italic）、`` ` ``（行内代码）被截断，渲染前检测奇数个标记并移除末尾未闭合的那个，下一 chunk 到达后完整格式正常渲染
+
+#### 15.17.2 工具调用内联显示
+
+**问题**：工具调用进度指示器（带转圈的 `v-progress-circular`）显示在消息列表底部，不够直观且转圈动画多余。
+
+**修改**：
+- 移除 `DefaultLayout.vue` 中底部独立进度条
+- `processSSE()` 检测到 `__SP_TOOL:CALL:` 时，向 `buf` 插入带样式的 HTML 行：蓝色左边框 + 脉冲圆点 + 中文工具名
+- 检测到 `__SP_TOOL:DONE__` 时直接移除该行，不留残留
+- CSS 新增 `.sp-tool-call` 样式（左侧 3px 主色边框 + 浅色背景 + `sp-pulse` 圆点动画）
+- `TOOL_FRIENDLY_NAME` 映射 10 个工具名到中文描述（如 `listTodaySchedules` → "正在查询今日排程"）
+
+#### 15.17.3 原始 JSON 工具调用过滤
+
+**问题**：qwen-max 模型在 ReAct 框架下偶发将工具调用以原始 JSON 文本输出（如 `{"name": "listTodaySchedules", "arguments": {}}`），而非通过框架正常调用，导致用户看到乱码。
+
+**修改**：
+- **后端**：`AgentChatService` 系统提示词新增 `严禁在回复文本中输出任何 JSON 格式的工具调用（如 {"name": "..."}），工具调用由系统内部处理`
+- **前端兜底**：`processSSE()` 中 `chunk` 匹配正则 `/^\{"name"\s*:\s*"\w+"\s*,\s*"arguments"\s*:/` 时直接丢弃，不拼入显示文本
+
+#### 15.17.4 代码块自动换行
+
+**问题**：Agent 生成代码时 `<pre><code>` 默认 `white-space: pre`，长代码行产生水平滚动条。
+
+**修改**：`DefaultLayout.vue` 新增 `<pre>` 和 `<code>` 样式：
+- `white-space: pre-wrap` — 保留缩进同时允许自动换行
+- `word-break: break-word` — 长单词/路径可断行
+- `max-width: 100%` — 不超出气泡容器
+- `overflow-x: auto` — 极窄屏兜底滚动条
+- 添加内边距和圆角，深色/浅色主题下均可读
+
+### 15.18 Agent 预热时机优化（2026-06-09）
+
+**问题**：Agent 预热在 `openChat()`（用户点击打开聊天窗口时）触发，若用户快速发送第一条消息，Agent 可能尚未构建完成，首次对话仍需等待 2-5 秒。
+
+**修改**：
+- 预热调用从 `openChat()` 移至 `init()`（页面加载、用户登录后立即触发）
+- 从登录到用户输入第一条消息通常有数秒到数十秒间隔，Agent 大概率已就绪
+- `assistant.js` 中 `openChat()` 恢复为简单的状态切换，不再包含预热逻辑
+
+### 15.19 目标拆解动画面板（2026-06-09）
+
+**问题**：用户提交目标 AI 拆解后，仅有一条 toast 提示"AI任务拆解已完成"，等待过程无视觉反馈。
+
+**修改**——后端：
+- `GoalAiWorker.handleGoalAiTask()` 新增两个中间通知：LLM 调用前发送 `GOAL_DECOMPOSE_STARTED`，解析任务后发送 `GOAL_DECOMPOSE_PROGRESS`（含任务标题列表）
+- 新增 `sendDecomposeProgress()` 辅助方法，通过现有 RabbitMQ → SSE 管道推送
+- 通知 payload 包含 `goal`、`taskCount`、`taskTitles` 字段
+
+**修改**——前端：
+- 新建 `stores/decompose.js`（Pinia store）：管理五阶段流水线状态（intent → llm → saving → resources → done），任务列表自动逐条揭示（220ms 间隔），`onTasksGenerated()` 立即设任务数据 + 800ms/1600ms 分阶段推进动画，`onAllDone()` 取消未完成计时器并快速收尾（400ms × 2），5 秒自动消失
+- 新建 `components/DecomposePanel.vue`：玻璃拟态浮动面板（右上角 top:80px），五阶段纵向步骤条 —— pending（灰色节点）、active（主色节点 + 发光脉冲动画 + "进行中"标签）、done（绿色对勾），节点间连接线随进度变色，任务列表在生成阶段逐条从右侧滑入（TransitionGroup），完成后显示任务总数 + 关闭按钮
+- `DefaultLayout.vue`：新增 `GOAL_DECOMPOSE_STARTED`、`GOAL_DECOMPOSE_PROGRESS`、`GOAL_DECOMPOSE_SAVING` SSE 监听器，`GOAL_TASK_READY` 调用 `decompose.onAllDone()`
+- `PlanView.vue`：`createGoalByAi()` 成功后调用 `decompose.start(goalText)`
+- `GoalsView.vue`：`regenerateTasksForGoal()` 调用前触发 `decompose.start(goalTitle)`
+
+**Bug 修复**——后端：
+- `GOAL_DECOMPOSE_PROGRESS` 的 `taskTitles` 计算挪到兜底逻辑之后，修复 AI 返回结果被 `sanitizeTasks` 全过滤后 PROGRESS 事件携带 `taskCount=0` 的问题
+
+### 15.20 PlanView 向导加载性能优化（2026-06-09）
+
+**问题**：PlanView 学习计划页 `initWizard()` 串行调用 `fetchMe` → `dashboard` → `goals` → `tasks`，其中 `/user/dashboard` 跨 5 个微服务（goal/schedule/punch/resource），且 `buildGoalProgress` 对每个 goal 串行查询 tasks（N 个 goal = N 次网络往返）。整个页面被 `initializing` loading 条阻塞直到所有 API 返回。
+
+**修改**——前端：
+- `initializing = false` 立即执行：wizard 页面秒开，不再等待任何数据
+- 删除 `api.get('/user/dashboard')` 调用：该接口在 PlanView 中从未被读取（`dashboard.value` 仅赋值无消费）
+- Wizard 步骤从 localStorage 直接恢复（零延迟）
+- goals 列表用 `.then()` 异步加载，到达后自动填充当前 goal 和 tasks
+- `pollTasksUntilReady` 从 `await` 改为 fire-and-forget，后台轮询不阻塞页面渲染
+- 跳过 `auth.fetchMe()`（`auth.me` 登录时已设置）
+
+**修改**——后端：
+- `UserService.buildGoalProgress()`：每个 goal 的任务查询从串行改为 `CompletableFuture.supplyAsync` 并行（N 个 goal = 1 次网络往返）
+
+### 15.21 ES 向量语义检索 + 入库质量过滤（2026-06-09）
+
+**问题**：`searchFromEs()` 使用 `multiMatch` 纯文本匹配（BM25），无法语义关联（"机器学习"搜不到"深度学习"）。B站爬虫无内容过滤，"机器学习"15条全是汽车评测。AI 生成资源写入 DB（`persistAiResources` / `upsertFromModel`）污染数据库。
+
+**修改**（第一轮）：
+- **新增 `ResourceAiConfig`**（`resource-search/.../config/ResourceAiConfig.java`）：创建 `DashScopeApi` + `EmbeddingModel`（`text-embedding-v2`，1536维）Bean
+- **`CourseResourceDocument` 加 `dense_vector` 字段**：`float[] embedding`，1536维，`@JsonInclude(NON_NULL)`
+- **`searchFromEs()` 重写为 kNN 向量检索优先**
+- **写入路径自动生成 embedding**：`upsertToEs()` / `saveIfNew()` 写 ES 前生成向量
+- **`ResourceSearchIndexInitializer` 索引迁移**：启动时检测并重建含 `dense_vector` 的索引
+- **移除 AI→DB 写入**：`persistAiResources()` / `upsertFromModel()` 已删除
+- **入库质量过滤**：bigram 相似度 + CJK 字符匹配，可配开关
+
+**修改**（第二轮——kNN 修复 + 质量增强）：
+- **kNN 反序列化修复**：ES Java Client 8.10 的 `SearchResponse<CourseResourceDocument>` 无法解码 kNN 响应（`Failed to decode response`，状态码 200）。改用 `org.elasticsearch.client.RestClient` 发送原生 kNN JSON 请求，通过 `ObjectMapper` 手动解析 `_source`，`_source` 过滤排除 embedding 字段减少传输体积
+- **标题质量门禁**（`isValidTitle`）：正则匹配纯哈希值（`HEX_HASH` 32位+）、哈希后缀（`HEX_HASH_SUFFIX` `_16位hex`）、纯数字、%开头、CJK主题下无汉字的过长英文标题
+- **多查询词扩展**（`buildSearchQueries`）：CJK 主题自动拼接后缀（`教程`/`入门`/`基础`，`bilibili.query-suffixes` 可配），多个查询词独立请求 B站 API（间隔 400ms），扩充候选池后统一质量过滤
+- **相似度阈值收紧**：CJK 0.03→0.06，非 CJK 0.08→0.10，减少误判通过
+- **兜底平台仅限国内**：`defaultResources()` 和 AI prompt 移除 Google/Coursera/edX/Medium，替换为 B站/慕课网/知乎/GitHub 搜索链接
+- **每主题抓取量**：从 3 条提升至 8 条（`per-topic-limit`），配合多查询词扩展确保质量过滤后仍有足够候选
+
+**测试结果**（2026-06-09）：
+- kNN 语义搜索正常："深度学习" → "Python零基础教程…AI人工智能必备" ✅，"Java" → 19条 Java 相关资源 ✅
+- 质量过滤器实战验证：
+  - 标题门禁成功拦截：`8b549e65424853c005a4f0ce2a0eac38.H_40_3.mp4_20260609202856`（哈希后缀）、`a7452e0389cdb2c9a7ba1d8cdfe6047a`（纯哈希）、`%E5%82%B2%E9%A3%8E...`（URL编码垃圾）
+  - 内容过滤成功拦截："B3 2 6.9"、"东哥Y2JB更新"、"Odyssey JAILBREAK RELEASED"、"奥迪a6l"
+- 全链路通畅：B站 API → 多查询词 → 标题门禁 → 内容过滤 → MySQL → embedding → ES → kNN 检索 ✅
+- **已知限制**：Docker 容器 IP 访问 B站时，部分中文主题（如"数据结构"）返回的 Top 8 结果中掺杂大量哈希文件名视频，质量过滤器正确拦截了这些垃圾，但也导致该主题 0 条入库。英文字母主题（Java/Python/Go/Rust 等）不受影响，正常入库

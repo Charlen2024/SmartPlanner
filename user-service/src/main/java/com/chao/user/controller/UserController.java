@@ -8,17 +8,11 @@ import com.chao.common.client.ScheduleClient;
 import com.chao.common.dto.*;
 import com.chao.user.dto.DashboardDto;
 import com.chao.user.service.UserService;
-import com.chao.user.service.TaskAdviceAiService;
+import com.chao.common.client.AgentAdviceClient;
 import com.chao.user.util.JwtUtils;
-import com.chao.user.util.VectorStoreUtils;
 import lombok.RequiredArgsConstructor;
 import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
-import org.springframework.ai.document.Document;
-import org.springframework.ai.vectorstore.SearchRequest;
-import org.springframework.ai.vectorstore.VectorStore;
-import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.cloud.client.loadbalancer.LoadBalanced;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.*;
@@ -53,14 +47,12 @@ public class UserController {
     private final PunchClient punchClient;
     private final ResourceClient resourceClient;
     private final com.chao.user.service.AppUserService appUserService;
-    private final TaskAdviceAiService taskAdviceAiService;
+    private final AgentAdviceClient agentAdviceClient;
     private final RedissonClient redissonClient;
-    private final ObjectProvider<VectorStore> vectorStoreProvider;
     private final ObjectMapper objectMapper;
     private final RestTemplate restTemplate;
 
     private static final String TASK_RESOURCES_KEY_PREFIX = "sp:task:resources:v2:";
-    private static final String COURSES_INDEXED_KEY = "sp:rag:indexed:courses";
     private static final String TASK_ADVICE_KEY_PREFIX = "sp:task:advice:v1:";
 
     private SchedulePreferenceDto buildSchedulePreference(Long userId) {
@@ -179,7 +171,7 @@ public class UserController {
         if (!uncached.isEmpty()) {
             List<GoalTaskDto> tasks = goalClient.getTasksByIds(uncached).getData();
             if (tasks != null && !tasks.isEmpty()) {
-                Map<Long, String> fresh = taskAdviceAiService.advise(tasks);
+                Map<Long, String> fresh = agentAdviceClient.adviseTasks(tasks).getData();
                 if (fresh != null) {
                     if (redissonClient != null) {
                         for (Map.Entry<Long, String> e : fresh.entrySet()) {
@@ -231,28 +223,31 @@ public class UserController {
             if (t != null && t.getId() != null) taskMap.put(t.getId(), t);
         }
 
-        List<TaskAdviceAiService.ScheduleAdviceItem> items = new ArrayList<>();
+        List<ScheduleAdviceItem> items = new ArrayList<>();
         for (TaskScheduleDto s : schedules) {
             if (s == null || s.getTaskId() == null) continue;
             GoalTaskDto t = taskMap.get(s.getTaskId());
-            TaskAdviceAiService.ScheduleAdviceItem it = new TaskAdviceAiService.ScheduleAdviceItem();
-            it.taskId = s.getTaskId();
-            it.title = safeText(s.getTaskTitle() != null ? s.getTaskTitle() : (t != null ? t.getTitle() : null));
-            it.description = safeText(t != null ? t.getDescription() : null);
-            it.startTime = s.getStartTime() != null ? s.getStartTime().toString() : null;
-            it.endTime = s.getEndTime() != null ? s.getEndTime().toString() : null;
-            it.timeBudgetMinutes = budgetMinutes(s.getStartTime(), s.getEndTime());
+            ScheduleAdviceItem it = new ScheduleAdviceItem();
+            it.setTaskId(s.getTaskId());
+            it.setTitle(safeText(s.getTaskTitle() != null ? s.getTaskTitle() : (t != null ? t.getTitle() : null)));
+            it.setDescription(safeText(t != null ? t.getDescription() : null));
+            it.setStartTime(s.getStartTime() != null ? s.getStartTime().toString() : null);
+            it.setEndTime(s.getEndTime() != null ? s.getEndTime().toString() : null);
+            it.setTimeBudgetMinutes(budgetMinutes(s.getStartTime(), s.getEndTime()));
             items.add(it);
         }
 
         String moodHint = buildMoodHint(uid);
-        TaskAdviceAiService.ScheduleAdviceResponse advice = taskAdviceAiService.adviseSchedules(items, moodHint);
-        String header = safeText(advice != null ? advice.header : null);
+        ScheduleAdviceRequest req = new ScheduleAdviceRequest();
+        req.setItems(items);
+        req.setMoodHint(moodHint);
+        ScheduleAdviceResponse advice = agentAdviceClient.adviseSchedules(req).getData();
+        String header = safeText(advice != null ? advice.getHeader() : null);
         if (header.isBlank()) {
-            header = "今天的小建议：先把每个任务的第一步做完；每项完成到“能复述/能交付”就算达标。";
+            header = "今天的小建议：先把每个任务的第一步做完；每项完成到[能复述/能交付]就算达标。";
         }
 
-        Map<Long, TaskAdviceAiService.TaskAdvice> perTask = advice != null && advice.items != null ? advice.items : Map.of();
+        Map<Long, TaskAdviceDto> perTask = advice != null && advice.getItems() != null ? advice.getItems() : Map.of();
         StringBuilder out = new StringBuilder();
         out.append(header);
 
@@ -268,9 +263,9 @@ public class UserController {
 
             out.append("\n\n").append(i).append(") ").append(title).append("（").append(range).append("）");
 
-            TaskAdviceAiService.TaskAdvice a = perTask.get(tid);
-            String start = safeText(a != null ? a.start : null);
-            String done = safeText(a != null ? a.done : null);
+            TaskAdviceDto a = perTask.get(tid);
+            String start = safeText(a != null ? a.getStart() : null);
+            String done = safeText(a != null ? a.getDone() : null);
             if (start.isBlank()) start = "先用 10 分钟把第一步做完（只做最小可推进的动作）。";
             if (done.isBlank()) done = "在这个时间段内完成一个可验收产出（笔记/小测/代码/总结）。";
 
@@ -485,162 +480,42 @@ public class UserController {
                 bucket.expire(Duration.ofDays(2));
             } catch (Exception ignored) {
             }
+        } else {
+            try {
+                bucket.set("[]");
+                bucket.expire(Duration.ofHours(6));
+            } catch (Exception ignored) {
+            }
         }
         return rec != null ? rec : List.of();
     }
 
     private List<CourseResourceDto> recommendCourseResources(Long userId, GoalTaskDto task, int topK) {
         String title = task != null && task.getTitle() != null ? task.getTitle().trim() : "";
-        String desc = task != null && task.getDescription() != null ? task.getDescription().trim() : "";
-        String query = stripTaskPrefix(title);
-        if (!desc.isBlank() && !desc.equalsIgnoreCase(title)) {
-            String cleanDesc = stripTaskPrefix(desc);
-            query = query + " " + cleanDesc;
-        }
-        query = query.trim();
-        if (query.isBlank()) return List.of();
-
-        VectorStore vectorStore = vectorStoreProvider != null ? vectorStoreProvider.getIfAvailable() : null;
         List<CourseResourceDto> out = new ArrayList<>();
+        if (title.isBlank()) return out;
 
-        if (vectorStore != null && ensureCoursesIndexed(vectorStore)) {
-            try {
-                FilterExpressionBuilder fb = new FilterExpressionBuilder();
-                var expr = fb.eq("type", "course").build();
-                List<Document> docs = vectorStore.similaritySearch(
-                        SearchRequest.builder()
-                                .query(query)
-                                .topK(topK * 2)
-                                .filterExpression(expr)
-                                .build()
-                );
-                if (docs != null) {
-                    Set<String> seen = new java.util.HashSet<>();
-                    for (Document d : docs) {
-                        if (d == null) continue;
-                        Map<String, Object> m = d.getMetadata() != null ? d.getMetadata() : Map.of();
-                        String t = m.get("title") != null ? String.valueOf(m.get("title")) : "";
-                        String url = m.get("url") != null ? String.valueOf(m.get("url")) : "";
-                        String platform = m.get("platform") != null ? String.valueOf(m.get("platform")) : "";
-                        String topic = m.get("topic") != null ? String.valueOf(m.get("topic")) : title;
-                        String sig = (url.isBlank() ? t : url).trim();
-                        if (sig.isBlank() || seen.contains(sig)) continue;
-                        seen.add(sig);
-
-                        CourseResourceDto dto = new CourseResourceDto();
-                        dto.setTopic(topic);
-                        dto.setTitle(t);
-                        dto.setSourceUrl(url);
-                        dto.setPlatform(platform);
-                        dto.setContentSummary(safeSnippet(d.getText()));
-                        out.add(dto);
-                        if (out.size() >= topK) break;
-                    }
-                }
-            } catch (Exception ignored) {
-            }
-        }
-
-        if (out.size() < topK) {
-            try {
-                Result<ResourceClient.ResourceAdviceResponse> r = resourceClient.searchOnlineCoursesWithAdvice(title);
-                ResourceClient.ResourceAdviceResponse body = r != null ? r.getData() : null;
-                List<ResourceClient.CourseResource> list = body != null && body.getResources() != null ? body.getResources() : List.of();
-                if (list != null) {
-                    Set<String> seenUrl = out.stream()
-                            .map(CourseResourceDto::getSourceUrl)
-                            .filter(s -> s != null && !s.isBlank())
-                            .collect(Collectors.toSet());
-                    for (ResourceClient.CourseResource x : list) {
-                        if (x == null) continue;
-                        String url = x.getUrl() != null ? x.getUrl().trim() : "";
-                        if (!url.isBlank() && seenUrl.contains(url)) continue;
-                        if (!url.isBlank()) seenUrl.add(url);
-                        CourseResourceDto dto = new CourseResourceDto();
-                        dto.setTopic(title);
-                        dto.setTitle(x.getTitle());
-                        dto.setPlatform(x.getPlatform());
-                        dto.setSourceUrl(url);
-                        dto.setContentSummary(x.getSummary());
-                        out.add(dto);
-                        if (out.size() >= topK) break;
-                    }
-                }
-            } catch (Exception ignored) {
-            }
-        }
-
-        return out.size() > topK ? out.subList(0, topK) : out;
-    }
-
-    private boolean ensureCoursesIndexed(VectorStore vectorStore) {
         try {
-            RBucket<String> b = redissonClient.getBucket(COURSES_INDEXED_KEY);
-            if ("1".equals(b.get())) return true;
-
-            Result<List<CourseResourceDto>> rr = resourceClient.listResources(null);
-            List<CourseResourceDto> resources = rr != null ? rr.getData() : List.of();
-            if (resources == null || resources.isEmpty()) {
-                b.set("0");
-                b.expire(Duration.ofHours(6));
-                return false;
+            Result<ResourceClient.ResourceAdviceResponse> r = resourceClient.searchOnlineCoursesWithAdvice(title);
+            ResourceClient.ResourceAdviceResponse body = r != null ? r.getData() : null;
+            List<ResourceClient.CourseResource> list = body != null && body.getResources() != null ? body.getResources() : List.of();
+            if (list != null) {
+                for (ResourceClient.CourseResource x : list) {
+                    if (x == null) continue;
+                    CourseResourceDto dto = new CourseResourceDto();
+                    dto.setTopic(title);
+                    dto.setTitle(x.getTitle());
+                    dto.setPlatform(x.getPlatform());
+                    dto.setSourceUrl(x.getUrl());
+                    dto.setContentSummary(x.getSummary());
+                    out.add(dto);
+                    if (out.size() >= topK) break;
+                }
             }
-
-            List<Document> docs = new ArrayList<>();
-            int limit = 800;
-            for (CourseResourceDto r : resources) {
-                if (r == null) continue;
-                String text = (r.getTitle() == null ? "" : r.getTitle()) + "\n" + (r.getContentSummary() == null ? "" : r.getContentSummary());
-                text = text.trim();
-                if (text.isBlank()) continue;
-                Map<String, Object> meta = new HashMap<>();
-                meta.put("type", "course");
-                meta.put("resourceId", r.getId());
-                meta.put("title", r.getTitle());
-                meta.put("platform", r.getPlatform());
-                meta.put("url", r.getSourceUrl());
-                meta.put("topic", r.getTopic());
-                String id = r.getId() != null ? "course:" + r.getId() : "course:" + docs.size();
-                docs.add(new Document(id, text, meta));
-                if (docs.size() >= limit) break;
-            }
-            if (!docs.isEmpty()) {
-                VectorStoreUtils.addDocsInBatches(vectorStore, docs, 20);
-            }
-            if (docs.isEmpty()) {
-                b.set("0");
-                b.expire(Duration.ofHours(6));
-                return false;
-            }
-            b.set("1");
-            b.expire(Duration.ofDays(1));
-            return true;
-        } catch (Exception e) {
-            return false;
+        } catch (Exception ignored) {
         }
-    }
 
-    private String safeSnippet(String s) {
-        if (s == null) return "";
-        String x = s.replace("\n", " ").replace("\r", " ").trim();
-        if (x.length() <= 160) return x;
-        return x.substring(0, 160);
-    }
-
-    private static final java.util.Set<String> TASK_TITLE_PREFIXES = java.util.Set.of(
-        "阅读：", "阅读:", "总结：", "总结:", "练习：", "练习:",
-        "复习：", "复习:", "完成：", "完成:", "学习：", "学习:",
-        "观看：", "观看:", "撰写：", "撰写:", "整理：", "整理:"
-    );
-
-    private String stripTaskPrefix(String text) {
-        if (text == null) return "";
-        for (String prefix : TASK_TITLE_PREFIXES) {
-            if (text.startsWith(prefix)) {
-                return text.substring(prefix.length()).trim();
-            }
-        }
-        return text;
+        return out;
     }
 
     private boolean allAreDefaultFallback(List<CourseResourceDto> resources) {
@@ -864,6 +739,11 @@ public class UserController {
     @GetMapping("/resources/search")
     public Result<List<ResourceClient.CourseResource>> searchResources(@RequestParam String topic) {
         return resourceClient.searchOnlineCourses(topic);
+    }
+
+    @PostMapping("/resources/crawl")
+    public Result<String> crawlResources(@RequestParam String topic) {
+        return resourceClient.crawlTopic(topic);
     }
 
     @GetMapping("/resources/search/advice")
@@ -1103,5 +983,10 @@ public class UserController {
             return userId;
         }
         throw new IllegalArgumentException("userId required");
+    }
+
+    @GetMapping("/internal/users/ids")
+    public Result<List<Long>> getAllUserIds() {
+        return Result.success(appUserService.listAllUserIds());
     }
 }

@@ -30,17 +30,27 @@ spring:
       chat:
         options:
           model: ${MODEL:qwen-max}
+      embedding:
+        options:
+          model: text-embedding-v2
 
 smartplanner:
   ai:
     rag-timeout-seconds: 45
+  search:
+    vector:
+      enabled: true
+      reindex-on-startup: true
   crawler:
+    quality-filter:
+      enabled: true
     bilibili:
       enabled: true
       topics: "Java,Spring Boot,Python,Vue,数据结构,算法,计算机网络,操作系统,数据库,机器学习,前端,Linux,Go,Rust,分布式,微服务,设计模式,计算机组成原理"
       interval-ms: 21600000
       per-topic-limit: 8
       initial-delay-ms: 120000
+      query-suffixes: "教程,入门,基础"
 
 mybatis-plus:
   configuration:

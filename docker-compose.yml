@@ -200,6 +200,31 @@ services:
     networks:
       - sp-net
 
+  agent-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: agent-service
+        SERVICE_PORT: "8086"
+        JVM_OPTS: "-Djava.net.preferIPv4Stack=true"
+    container_name: agent-service
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    depends_on:
+      - nacos
+      - redis
+      - rabbitmq
+    environment:
+      <<: [*env-nacos, *env-rabbitmq, *env-ai]
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: "6379"
+      JWT_SECRET: dev-jwt-secret-change-me-please-32bytes
+      JWT_ISSUER: http://sp
+    networks:
+      - sp-net
+
   user-service:
     build:
       context: .
@@ -266,6 +291,7 @@ services:
       - nacos
       - redis
       - user-service
+      - agent-service
       - rabbitmq
     environment:
       <<: [*env-nacos, *env-rabbitmq, *env-ai]

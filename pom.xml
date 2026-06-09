@@ -28,6 +28,7 @@
         <module>resource-search</module>
         <module>punch-service</module>
         <module>user-service</module>
+        <module>agent-service</module>
         <module>gateway-service</module>
         <module>admin-server</module>
     </modules>

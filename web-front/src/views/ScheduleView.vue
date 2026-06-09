@@ -380,13 +380,14 @@ async function clearClasses() {
   }
 }
 
-onMounted(async () => {
+onMounted(() => {
   if (!date.value) {
     const t = new Date()
     date.value = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`
   }
-  await Promise.all([loadSchedules(), loadClasses()])
-  if (date.value) await loadClasses(date.value)
+  Promise.all([loadSchedules(), loadClasses()]).then(() => {
+    if (date.value) loadClasses(date.value)
+  })
 })
 
 watch(
@@ -400,6 +401,10 @@ watch(
 
 const firstWeekMonday = ref(auth.me?.firstWeekMonday || localStorage.getItem('firstWeekMonday') || '')
 watch(() => auth.me?.firstWeekMonday, (v) => { if (v) { firstWeekMonday.value = v; localStorage.setItem('firstWeekMonday', v) } })
+const firstWeekMondayDate = computed({
+  get: () => firstWeekMonday.value ? new Date(firstWeekMonday.value + 'T00:00:00') : undefined,
+  set: (v) => { setFirstWeekMonday(v ? `${v.getFullYear()}-${String(v.getMonth()+1).padStart(2,'0')}-${String(v.getDate()).padStart(2,'0')}` : '') }
+})
 async function setFirstWeekMonday(val) {
   firstWeekMonday.value = val
   localStorage.setItem('firstWeekMonday', val)
@@ -710,11 +715,9 @@ function fmtHm(dt) {
             <!-- 日期选择 + 周数 -->
             <v-row dense class="mb-3">
               <v-col cols="12" sm="6">
-                <v-text-field
-                  :model-value="firstWeekMonday"
-                  @update:model-value="setFirstWeekMonday"
+                <v-date-input
+                  v-model="firstWeekMondayDate"
                   label="第一周周一"
-                  type="date"
                   variant="outlined"
                   density="comfortable"
                   hint="选学期第一个周一"

@@ -12,6 +12,7 @@ import com.chao.common.dto.Result;
 import com.chao.common.dto.WeatherData;
 import com.chao.common.util.WeatherClient;
 import com.chao.user.service.AppUserService;
+import com.chao.user.service.PortraitComputeService;
 import com.chao.user.util.JwtUtils;
 import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -45,6 +46,7 @@ public class NotificationController {
     private final PunchClient punchClient;
     private final GoalClient goalClient;
     private final AppUserService appUserService;
+    private final PortraitComputeService portraitComputeService;
     private final WeatherClient weatherClient;
     private final Executor aiTaskExecutor;
 
@@ -113,6 +115,11 @@ public class NotificationController {
 
     public Set<Long> activeUserIds() {
         return java.util.Set.copyOf(emitters.keySet());
+    }
+
+    @GetMapping("/active-user-ids/internal")
+    public List<Long> getActiveUserIdsInternal() {
+        return List.copyOf(emitters.keySet());
     }
 
     public void pushNotification(NotificationMessage message) {
@@ -257,6 +264,13 @@ public class NotificationController {
             rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, notif);
         } catch (Exception ignored) {
         }
+
+        CompletableFuture.runAsync(() -> {
+            try {
+                portraitComputeService.recompute(userId);
+            } catch (Exception ignored) {
+            }
+        }, aiTaskExecutor);
     }
 
     private String chooseLoginCareNav(Integer pending) {

@@ -139,16 +139,25 @@ async function pollTasksUntilReady(goalId) {
   tasksPolling.value = true
   tasksPollingMessage.value = '任务拆解进行中（你可以先去写随笔/看别的，稍后回来）'
   const startedAt = Date.now()
+  let failCount = 0
   const loop = async () => {
     if (!tasksPolling.value) return
     try {
       await loadGoalTasks(gid)
+      failCount = 0
       if (isTasksReady(tasks.value)) {
         tasksPollingMessage.value = '任务已生成'
         tasksPollTimer.value = setTimeout(() => stopTasksPolling(), 800)
         return
       }
-    } catch (e) {}
+    } catch (e) {
+      failCount++
+      if (failCount >= 3) {
+        tasksPollingMessage.value = '网络异常，请稍后点击刷新按钮重试'
+        stopTasksPolling()
+        return
+      }
+    }
     const elapsed = Date.now() - startedAt
     if (elapsed > 120000) {
       tasksPollingMessage.value = '任务拆解耗时较长，可稍后点击刷新'
@@ -261,31 +270,31 @@ function finishWizardAndGo(to) {
 }
 
 async function initWizard() {
-  initializing.value = true
-  try {
-    await auth.fetchMe()
-  } catch (e) {}
-  await refreshAll()
-
-  // 新用户清除残留向导状态，从步骤1开始
-  if (needsImport.value) {
-    safeClearWizardState()
-  }
-
+  // Resolve step from localStorage immediately — no need to wait for API
+  let desiredStep = 1
   const saved = safeLoadWizardState()
   const savedStep = Number(saved?.step)
   const savedGoalId = Number(saved?.currentGoalId)
-  let desiredStep = 1
   if (Number.isFinite(savedStep) && savedStep >= 1 && savedStep <= 4) desiredStep = savedStep
   if (Number.isFinite(savedGoalId) && savedGoalId > 0) {
     currentGoalId.value = savedGoalId
-    await loadGoals(false)
-    if (desiredStep === 3 && !isTasksReady(tasks.value)) {
-      await pollTasksUntilReady(savedGoalId)
-    }
+    topic.value = saved?.topic || topic.value
+    goalText.value = saved?.goalText || goalText.value
   }
   step.value = desiredStep
   initializing.value = false
+
+  // Load everything in background
+  try { await auth.fetchMe() } catch (e) {}
+  if (needsImport.value && desiredStep > 1) {
+    safeClearWizardState()
+    step.value = 1
+  }
+  await loadGoals(false)
+  // If on step 3 with a saved goal but tasks aren't ready, start background polling
+  if (step.value === 3 && currentGoalId.value && !isTasksReady(tasks.value)) {
+    pollTasksUntilReady(currentGoalId.value) // fire-and-forget, no await
+  }
 }
 
 onMounted(initWizard)
@@ -296,7 +305,11 @@ watch(
     if (initializing.value) return
     const n = Number(v)
     if (Number.isFinite(n) && n >= 1 && n <= 4) safeSaveWizardState({ step: n })
-    if (n !== 3) stopTasksPolling()
+    if (n !== 3) {
+      stopTasksPolling()
+    } else if (currentGoalId.value && !isTasksReady(tasks.value) && !tasksPolling.value) {
+      pollTasksUntilReady(currentGoalId.value)
+    }
   },
 )
 
@@ -506,9 +519,11 @@ onBeforeUnmount(() => {
                 <v-list-item v-for="t in displayTasks" :key="t.id" :title="t.title" :subtitle="t.description" />
               </v-list>
             </div>
-            <div v-if="tasksPolling || !tasks?.length" class="d-flex justify-end mt-3">
-              <v-btn variant="tonal" class="mr-2" @click="router.push('/journals')">去写随笔</v-btn>
-              <v-btn variant="tonal" :loading="busy" @click="refreshAll">刷新</v-btn>
+            <div v-if="tasksPolling || !tasks?.length" class="d-flex flex-wrap justify-end mt-3" style="gap:8px">
+              <v-btn variant="tonal" @click="router.push('/journals')">去写随笔</v-btn>
+              <v-btn variant="tonal" @click="stopTasksPolling(); loadGoalTasks(currentGoalId)">停止等待</v-btn>
+              <v-btn variant="tonal" :loading="busy" @click="refreshAll(); pollTasksUntilReady(currentGoalId)">刷新并轮询</v-btn>
+              <v-btn v-if="currentGoalId" color="primary" @click="finishWizardAndGo('/goals')">去目标页</v-btn>
             </div>
           </v-card>
         </v-stepper-window-item>

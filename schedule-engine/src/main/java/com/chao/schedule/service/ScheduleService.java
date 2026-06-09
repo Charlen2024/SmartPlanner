@@ -84,7 +84,7 @@ public class ScheduleService {
     private static final int SESSION_MINUTES_SHORT = 25;
     private static final int MAX_STUDY_MINUTES_CONSERVATIVE = 180;
 
-    private static SchedulePreferenceDto resolvePreference(SchedulePreferenceDto pref) {
+    public static SchedulePreferenceDto resolvePreference(SchedulePreferenceDto pref) {
         if (pref == null) {
             pref = new SchedulePreferenceDto();
         }

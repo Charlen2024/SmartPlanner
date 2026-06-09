@@ -5,6 +5,10 @@ import { useRouter, useRoute } from 'vue-router'
 import { useDisplay, useTheme } from 'vuetify'
 import { useNotifyStore } from '../stores/notify'
 import { useAssistantStore } from '../stores/assistant'
+import { useDecomposeStore } from '../stores/decompose'
+import { useScheduleStore } from '../stores/schedule'
+import DecomposePanel from '../components/DecomposePanel.vue'
+import SchedulePanel from '../components/SchedulePanel.vue'
 
 
 const auth = useAuthStore()
@@ -22,6 +26,8 @@ watch(() => assistant.chatMessages?.length, () => {
 })
 const notify = useNotifyStore()
 const assistant = useAssistantStore()
+const decompose = useDecomposeStore()
+const schedule = useScheduleStore()
 const slots = useSlots()
 
 function dismissNotify(id) {
@@ -74,12 +80,53 @@ function startSse(token) {
   stopSse()
   sseRetryCount = 0
   sseSource = new EventSource(`/api/user/notifications/stream?access_token=${encodeURIComponent(t)}`)
+  sseSource.addEventListener('GOAL_DECOMPOSE_STARTED', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      const goal = data?.payload?.goal || ''
+      if (!decompose.active) decompose.start(goal)
+    } catch (err) { console.warn('SSE event parse error:', err) }
+  })
+  sseSource.addEventListener('GOAL_DECOMPOSE_PROGRESS', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      decompose.onTasksGenerated(data?.payload?.taskTitles || [])
+    } catch (err) { console.warn('SSE event parse error:', err) }
+  })
+  sseSource.addEventListener('GOAL_DECOMPOSE_SAVING', (e) => {
+    // Phase advance is handled by onTasksGenerated's internal timers
+  })
+  sseSource.addEventListener('GOAL_DECOMPOSE_FAILED', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      notify.addReminder(data)
+      decompose.onFailed(data?.payload?.message || data.content || '拆解失败')
+    } catch (err) { console.warn('SSE event parse error:', err) }
+  })
   sseSource.addEventListener('GOAL_TASK_READY', (e) => {
     try {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
       notify.signal('GOAL_TASK_READY', data)
-      notify.success(data.content || 'AI任务拆解已完成！')
+      const titles = data?.payload?.taskTitles || []
+      const count = data?.payload?.taskCount || 0
+      decompose.onAllDone(titles, count)
+    } catch (err) { console.warn('SSE event parse error:', err) }
+  })
+  sseSource.addEventListener('SCHEDULE_STARTED', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      const date = data?.payload?.date || ''
+      schedule.start(date)
+    } catch (err) { console.warn('SSE event parse error:', err) }
+  })
+  sseSource.addEventListener('SCHEDULE_PROGRESS', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      const stage = data?.payload?.stage || ''
+      const progress = data?.payload?.progress || 0
+      const message = data?.payload?.message || ''
+      schedule.onProgress(stage, progress, message)
     } catch (err) { console.warn('SSE event parse error:', err) }
   })
   sseSource.addEventListener('SCHEDULE_DONE', (e) => {
@@ -87,7 +134,8 @@ function startSse(token) {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
       notify.signal('SCHEDULE_DONE', data)
-      notify.success(data.content || '智能排程已完成！')
+      const payload = data?.payload || {}
+      schedule.onDone(payload)
     } catch (err) { console.warn('SSE event parse error:', err) }
   })
   sseSource.addEventListener('SCHEDULE_FAILED', (e) => {
@@ -95,7 +143,7 @@ function startSse(token) {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
       notify.signal('SCHEDULE_FAILED', data)
-      notify.error(data.content || '智能排程失败！')
+      schedule.onFailed(data?.payload?.message || data.content || '排程失败')
     } catch (err) { console.warn('SSE event parse error:', err) }
   })
   sseSource.addEventListener('AGENT_REMINDER', (e) => {
@@ -378,7 +426,9 @@ function onResizeEnd() {
 <template>
   <v-layout class="sp-shell">
     <v-app-bar elevation="0" height="64" class="sp-appbar">
-      <v-app-bar-nav-icon @click="drawer = !drawer" />
+      <div class="sp-hamburger" :class="{ 'sp-hamburger-rail': rail }">
+        <v-app-bar-nav-icon @click="drawer = !drawer" />
+      </div>
       <v-app-bar-title class="font-weight-semibold">
         {{ title }}
         <span v-if="userLabel" class="sp-user">{{ userLabel }}</span>
@@ -437,15 +487,20 @@ function onResizeEnd() {
         rail-width="76"
         class="sp-drawer"
     >
+      <!-- 展开：品牌卡片 -->
       <div v-if="!rail" class="px-3 pt-3 pb-2">
         <v-card variant="tonal" color="primary" class="pa-3 rounded-lg">
           <div class="text-subtitle-2 font-weight-semibold">SmartPlanner</div>
           <div class="text-caption">学习 · 计划 · 打卡</div>
         </v-card>
       </div>
+      <!-- 收起：品牌图标（与展开卡片等高对齐） -->
+      <div v-else class="sp-rail-brand">
+        <v-icon color="primary" size="24">mdi-lightbulb-outline</v-icon>
+      </div>
 
-      <v-list nav density="compact" class="mt-1">
-
+      <!-- 展开：文字菜单 -->
+      <v-list v-if="!rail" nav density="compact" class="mt-1">
         <v-list-item
             v-for="m in menu"
             :key="m.to"
@@ -454,9 +509,23 @@ function onResizeEnd() {
             :prepend-icon="m.icon"
             rounded="lg"
         >
-          <v-list-item-title v-if="!rail" class="text-body-2">{{ m.title }}</v-list-item-title>
+          <v-list-item-title class="text-body-2">{{ m.title }}</v-list-item-title>
         </v-list-item>
       </v-list>
+
+      <!-- 收起：纯图标菜单 -->
+      <div v-else class="sp-rail-icons mt-1">
+        <v-btn
+            v-for="m in menu"
+            :key="m.to"
+            :to="m.to"
+            :exact="m.to === '/'"
+            :icon="m.icon"
+            variant="text"
+            size="36"
+            class="sp-rail-btn"
+        />
+      </div>
 
       <template #append>
         <div class="pa-2">
@@ -486,6 +555,9 @@ function onResizeEnd() {
           @click:close="dismissNotify(n.id)"
       />
     </TransitionGroup>
+
+    <DecomposePanel />
+    <SchedulePanel />
 
     <div
         v-show="assistant.x !== null"
@@ -598,6 +670,30 @@ function onResizeEnd() {
 }
 .sp-drawer {
   border-right: 1px solid rgba(var(--v-theme-on-surface), 0.08);
+}
+/* 收起模式：纯图标按钮居中 */
+.sp-rail-icons {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 4px;
+}
+.sp-rail-brand {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	height: 84px;
+}
+.sp-rail-btn {
+	border-radius: 12px;
+}
+.sp-hamburger {
+	transition: width 0.2s;
+}
+.sp-hamburger-rail {
+	width: 76px;
+	display: flex;
+	justify-content: center;
 }
 .sp-main {
   background:
@@ -840,6 +936,55 @@ function onResizeEnd() {
 .sp-chat-markdown :deep(h1:first-child), .sp-chat-markdown :deep(h2:first-child), .sp-chat-markdown :deep(h3:first-child) {
   margin-top: 0;
 }
+.sp-chat-markdown :deep(pre) {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(var(--v-theme-on-surface), 0.06);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.sp-chat-markdown :deep(code) {
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* Tool call inline lines */
+.sp-chat-markdown :deep(.sp-tool-call) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin: 6px 0;
+  border-radius: 8px;
+  background: rgba(var(--v-theme-primary), 0.08);
+  border-left: 3px solid rgba(var(--v-theme-primary), 0.45);
+  font-size: 12px;
+  opacity: 0.9;
+  user-select: none;
+}
+.sp-chat-markdown :deep(.sp-tool-call.sp-tool-done) {
+  background: rgba(var(--v-theme-success), 0.07);
+  border-left-color: rgba(var(--v-theme-success), 0.5);
+  opacity: 0.7;
+}
+.sp-chat-markdown :deep(.sp-tool-dot) {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgb(var(--v-theme-primary));
+  animation: sp-pulse 1.2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+.sp-chat-markdown :deep(.sp-tool-done .sp-tool-dot) {
+  background: rgb(var(--v-theme-success));
+  animation: none;
+}
 .sp-chat-scroll {
   scroll-behavior: smooth;
 }
@@ -882,5 +1027,10 @@ function onResizeEnd() {
 .sp-agent-card::before {
   backdrop-filter: blur(20px) saturate(160%) !important;
   -webkit-backdrop-filter: blur(20px) saturate(160%) !important;
+}
+
+@keyframes sp-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.3; transform: scale(0.75); }
 }
 </style>

@@ -2,8 +2,10 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import api from '../plugins/api'
 import { useNotifyStore } from '../stores/notify'
+import { useDecomposeStore } from '../stores/decompose'
 
 const loading = ref(false)
+const initialLoad = ref(true)
 const error = ref('')
 const goals = ref([])
 const schedules = ref([])
@@ -14,13 +16,13 @@ const expanded = ref([])
 const pendingTasks = ref([])
 const planningBusy = ref(false)
 const notify = useNotifyStore()
+const decompose = useDecomposeStore()
 const planDialogOpen = ref(false)
 const regenerateBusy = ref(null)
 const planGoalId = ref(null)
 const planGoalTasks = ref([])
 const planTaskIds = ref([])
-const planDate = ref(dateStr(new Date()))
-const planDays = ref(1)
+const planDate = ref(new Date())
 const scheduleWaiting = ref(false)
 const scheduleWaitingGoalId = ref(null)
 let scheduleWaitingTimer = null
@@ -78,7 +80,7 @@ async function loadTaskResourcesForSchedules() {
     taskResources.value = {}
     return
   }
-  const res = await api.post('/user/tasks/resources', { taskIds, topK: 3, refresh: true })
+  const res = await api.post('/user/tasks/resources', { taskIds, topK: 3 })
   const body = res?.data ?? null
   if (body?.code !== 200) {
     throw new Error(body?.message || '加载课程资源失败')
@@ -122,8 +124,9 @@ function openUrl(url) {
   window.open(u, '_blank')
 }
 
-async function load() {
-  loading.value = true
+async function load(opts = {}) {
+  const { showLoading = true } = opts
+  if (showLoading) loading.value = true
   error.value = ''
   try {
     const [g, p] = await Promise.all([
@@ -146,7 +149,7 @@ async function load() {
   } catch (e) {
     error.value = e?.response?.data?.message || e?.message || '加载失败'
   } finally {
-    loading.value = false
+    if (showLoading) loading.value = false
   }
 }
 
@@ -254,6 +257,8 @@ async function regenerateTasksForGoal(goalId) {
   if (!Number.isFinite(gid) || gid <= 0) return
   regenerateBusy.value = gid
   try {
+    const goal = goals.value.find(g => Number(g?.id) === gid)
+    decompose.start(goal?.title || '目标')
     await api.post(`/user/goals/${gid}/tasks/regenerate`, {}, { timeout: 30000 })
     notify.success('已触发AI重新生成任务，稍后刷新查看')
     setTimeout(() => loadGoalTasksForPlan(gid), 2000)
@@ -269,14 +274,14 @@ async function confirmPlanning() {
   try {
     const goalId = Number(planGoalId.value)
     if (!Number.isFinite(goalId) || goalId <= 0) throw new Error('请选择要生成排程的目标')
-    const d = planDate.value || dateStr(new Date())
+    const d = planDate.value ? dateStr(planDate.value) : dateStr(new Date())
     const taskIds = Array.isArray(planTaskIds.value) ? planTaskIds.value.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0) : []
     const payload = {
       date: d,
       mode: 'merge',
       goalId,
       taskIds: taskIds.length ? taskIds : null,
-      days: planDays.value || 1,
+      days: 1,
     }
     const startRes = await api.post('/user/schedule/daily-plan/jobs', payload, { timeout: 15000 })
     const jobId = startRes?.data?.data?.jobId
@@ -466,7 +471,7 @@ onBeforeUnmount(() => {
   if (scheduleWaitingTimer) clearTimeout(scheduleWaitingTimer)
 })
 
-onMounted(load)
+onMounted(async () => { await load({ showLoading: false }); initialLoad.value = false })
 </script>
 
 <template>
@@ -502,8 +507,8 @@ onMounted(load)
         />
         <v-select v-if="planGoalId" v-model="planTaskIds" :items="planGoalTasks" item-title="title" item-value="id" label="请选择任务（可多选；不选则为该目标全部未完成任务）" variant="outlined" density="comfortable" multiple :no-data-text="planGoalTasks.length ? `暂无未完成任务` : `加载中...`" class="mt-3" />
         <div v-if="planGoalId" class="d-flex justify-end mt-1"><v-btn variant="text" size="small" color="primary" :loading="regenerateBusy === planGoalId" @click="regenerateTasksForGoal(planGoalId)"><v-icon icon="mdi-refresh" size="small" class="mr-1" />重新生成该目标的学习任务</v-btn></div>
-        <v-text-field v-model="planDate" type="date" label="排程日期" variant="outlined" density="comfortable" class="mt-1" />
-        <v-select v-model="planDays" :items="[{title:'仅当天 (1天)',value:1},{title:'未来3天',value:3},{title:'未来1周 (7天)',value:7}]" item-title="title" item-value="value" label="排程天数" variant="outlined" density="comfortable" class="mt-1" />
+        <v-date-input v-model="planDate" label="排程日期" variant="outlined" density="comfortable" class="mt-1" />
+        
       </v-card-text>
       <v-divider />
       <v-card-actions>
@@ -539,6 +544,7 @@ onMounted(load)
       目标与排程
     </v-card-title>
     <v-divider />
+    <v-progress-linear v-if="initialLoad" indeterminate color="primary" class="mb-0" />
     <v-card-text v-if="!grouped.length" class="text-body-2" style="opacity:0.75">
       <div v-if="pendingTasks?.length">暂无已排程任务（可能排程尚未写入）。可点击上方“生成排程”直接触发排程写库。</div>
       <div v-else>暂无已排程任务。可点击上方“生成排程”自动生成任务并排程。</div>

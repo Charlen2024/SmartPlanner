@@ -8,6 +8,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
+import java.util.List;
+import java.util.stream.Collectors;
+
 @Service
 @RequiredArgsConstructor
 public class AppUserService {
@@ -74,6 +77,10 @@ public class AppUserService {
         }
         user.setFirstWeekMonday(firstWeekMonday);
         appUserMapper.updateById(user);
+    }
+
+    public List<Long> listAllUserIds() {
+        return appUserMapper.selectList(null).stream().map(AppUser::getId).collect(Collectors.toList());
     }
 
     @Transactional
