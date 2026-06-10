@@ -52,6 +52,7 @@ public class AgentChatService {
     private final ChatModel chatModel;
     private final RedissonClient redissonClient;
     private final SmartPlannerTools smartPlannerTools;
+    private final com.chao.common.client.GoalClient goalClient;
     private final PunchClient punchClient;
     private final ScheduleClient scheduleClient;
     private final Executor aiTaskExecutor;
@@ -165,7 +166,48 @@ public class AgentChatService {
         return "";
     }
 
+    private String buildJournalPrefix(Long userId, String query) {
+        if (userId == null || query == null) return "";
+        String q = query.trim();
+        boolean listing = q.length() <= 50 &&
+                (q.contains("随笔") || q.contains("日记") || q.contains("复盘") ||
+                 q.contains("journal"));
+        if (!listing) return "";
+        try {
+            com.chao.common.dto.Result<java.util.List<com.chao.common.dto.UserJournalDto>> result = goalClient.listJournals(userId, null);
+            if (result == null || result.getCode() != 200) return "";
+            java.util.List<com.chao.common.dto.UserJournalDto> journals = result.getData();
+            if (journals == null || journals.isEmpty()) return "\n[系统] 用户暂无随笔记录。\n";
+            StringBuilder sb = new StringBuilder();
+            sb.append("\n[系统] 用户最近的随笔记录如下（已按时间倒序排列）：\n");
+            java.util.List<com.chao.common.dto.UserJournalDto> sorted = new java.util.ArrayList<>(journals);
+            sorted.sort((a, b) -> {
+                java.time.LocalDateTime x = a != null ? a.getCreatedAt() : null;
+                java.time.LocalDateTime y = b != null ? b.getCreatedAt() : null;
+                if (x == null && y == null) return 0;
+                if (x == null) return 1;
+                if (y == null) return -1;
+                return y.compareTo(x);
+            });
+            int count = 0;
+            for (com.chao.common.dto.UserJournalDto j : sorted) {
+                if (j == null || j.getId() == null) continue;
+                sb.append("- ").append(j.getCreatedAt() != null ? j.getCreatedAt().toString() : "");
+                sb.append(" | ").append(j.getMood() != null ? j.getMood() : "无");
+                sb.append(" | ").append(j.getContent() != null ? j.getContent() : "");
+                sb.append("\n");
+                if (++count >= 20) break;
+            }
+            log.info("buildJournalPrefix userId={}, injected journalCount={}", userId, count);
+            return sb.toString();
+        } catch (Exception e) {
+            log.debug("buildJournalPrefix failed userId={}: {}", userId, e.getMessage());
+            return "";
+        }
+    }
+
     public String chat(Long userId, String question) {
+        log.info("chat() called userId={}, qLen={}", userId, question != null ? question.length() : 0);
         String q = question != null ? question.trim() : "";
         if (q.isBlank()) {
             return "你可以问我：今天先做哪个任务？/ 这周目标怎么拆？/ 我最近拖延吗？";
@@ -182,7 +224,7 @@ public class AgentChatService {
         try {
             ReactAgent a = ensureAgent(userId);
             RunnableConfig config = RunnableConfig.builder().threadId("u:" + userId).build();
-            String prompt = buildStatusPrefix(userId) + ChatTextUtils.todayPrefix() + q;
+            String prompt = buildStatusPrefix(userId) + buildJournalPrefix(userId, q) + ChatTextUtils.todayPrefix() + q;
             AssistantMessage msg = a.call(prompt, config);
             return ChatTextUtils.extractAnswer(msg != null ? msg.getText() : null);
         } catch (Throwable e) {
@@ -195,6 +237,7 @@ public class AgentChatService {
     }
 
     public Flux<String> chatStream(Long userId, String question) {
+        log.info("chatStream() called userId={}, qLen={}", userId, question != null ? question.length() : 0);
         String q = question != null ? question.trim() : "";
         if (q.isBlank()) {
             return Flux.just("你可以问我：今天先做哪个任务？/ 这周目标怎么拆？/ 我最近拖延吗？");
@@ -224,7 +267,7 @@ public class AgentChatService {
             try { return Flux.just(chat(userId, q)); } finally { AgentUserContext.clear(); }
         }
         RunnableConfig config = RunnableConfig.builder().threadId("u:" + userId).build();
-        String prompt = buildStatusPrefix(userId) + ChatTextUtils.todayPrefix() + q;
+        String prompt = buildStatusPrefix(userId) + buildJournalPrefix(userId, q) + ChatTextUtils.todayPrefix() + q;
         long startNs = System.nanoTime();
         AtomicReference<String> maxPrevious = new AtomicReference<>("");
         AtomicReference<String> lastToolEvent = new AtomicReference<>("");

@@ -268,10 +268,12 @@ public class SmartPlannerTools {
         int d = days == null ? 7 : Math.max(1, Math.min(days, 30));
         int lim = limit == null ? 30 : Math.max(1, Math.min(limit, 80));
         LocalDateTime from = LocalDateTime.now(ChatTextUtils.ZONE_SHANGHAI).minusDays(d);
+        log.info("listRecentJournals CALLED userId={}, days={}, goalId={}, from={}", userId, d, goalId, from);
 
         List<UserJournalDto> list;
         try {
             list = safeList(goalClient.listJournals(userId, goalId));
+            log.info("listRecentJournals Feign returned {} journals for userId={}", list.size(), userId);
         } catch (Exception e) {
             log.warn("listRecentJournals Feign call failed for userId={}: {}", userId, e.getMessage());
             return List.of();
@@ -281,7 +283,10 @@ public class SmartPlannerTools {
         for (UserJournalDto j : list) {
             if (j == null || j.getId() == null) continue;
             LocalDateTime at = j.getCreatedAt();
-            if (at == null || at.isBefore(from)) continue;
+            if (at == null || at.isBefore(from)) {
+                log.info("listRecentJournals FILTERED OUT id={}, createdAt={}, from={}", j.getId(), at, from);
+                continue;
+            }
             filtered.add(j);
         }
         filtered.sort((a, b) -> {
@@ -304,9 +309,7 @@ public class SmartPlannerTools {
             out.add(m);
             if (out.size() >= lim) break;
         }
-        if (out.isEmpty()) {
-            log.info("listRecentJournals returned 0 journals for userId={}, totalFetched={}, days={}", userId, list.size(), d);
-        }
+        log.info("listRecentJournals RESULT userId={}, totalFetched={}, afterFilter={}, returned={}", userId, list.size(), filtered.size(), out.size());
         return out;
     }
 
@@ -321,6 +324,7 @@ public class SmartPlannerTools {
 
         List<Map<String, Object>> out = new ArrayList<>();
 
+        log.info("searchPersonalData CALLED userId={}, q={}, topK={}, vectorStore={}", userId, q, k, vectorStore != null ? "present" : "NULL");
         if (vectorStore != null) {
             try {
                 agentRagIndexer.ensureUserRagIndexed(userId);
@@ -505,6 +509,7 @@ public class SmartPlannerTools {
 
     private List<Map<String, Object>> keywordFallback(Long userId, String q, int limit) {
         if (limit <= 0) return List.of();
+        log.info("keywordFallback CALLED userId={}, q={}, limit={}", userId, q, limit);
         List<Map<String, Object>> out = new ArrayList<>();
 
         // Journal fallback: first try content match, then list recent if the query looks like a listing request
