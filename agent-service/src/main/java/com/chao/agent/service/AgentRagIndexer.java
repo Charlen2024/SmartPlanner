@@ -5,6 +5,7 @@ import com.chao.agent.util.VectorStoreUtils;
 import com.chao.common.client.GoalClient;
 import com.chao.common.client.PunchClient;
 import com.chao.common.client.UserInternalClient;
+import com.chao.common.config.RabbitMqConfig;
 import com.chao.common.dto.*;
 import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
@@ -12,6 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -72,7 +74,10 @@ public class AgentRagIndexer {
         if (ragIndexedLocal.getOrDefault(userId, false)) return;
         if (redissonClient == null) return;
         VectorStore vs = vectorStoreProvider != null ? vectorStoreProvider.getIfAvailable() : null;
-        if (vs == null) return;
+        if (vs == null) {
+            log.info("RAG index skipped for userId={}: VectorStore bean not available", userId);
+            return;
+        }
         String key = "sp:rag:indexed:u:" + userId;
         RBucket<String> bucket = redissonClient.getBucket(key);
         String v = bucket.get();
@@ -138,6 +143,8 @@ public class AgentRagIndexer {
                     meta.put("journalId", j.getId());
                     meta.put("goalId", j.getGoalId());
                     meta.put("title", "随笔");
+                    meta.put("createdAt", j.getCreatedAt() != null ? j.getCreatedAt().toString() : "");
+                    meta.put("mood", j.getMood() != null ? j.getMood() : "");
                     docs.add(new Document("journal:" + userId + ":" + j.getId(), text, meta));
                     if (docs.size() >= 200) break;
                 }
@@ -203,5 +210,52 @@ public class AgentRagIndexer {
         }
         bucket.set("0");
         bucket.expire(Duration.ofHours(6));
+    }
+
+    @SuppressWarnings("unchecked")
+    @RabbitListener(queues = RabbitMqConfig.AGENT_JOURNAL_INDEX_QUEUE)
+    public void onJournalCreated(NotificationMessage msg) {
+        if (msg == null || msg.getUserId() == null) return;
+        Long userId = msg.getUserId();
+        Object payload = msg.getPayload();
+        if (!(payload instanceof Map)) return;
+        Map<String, Object> data = (Map<String, Object>) payload;
+
+        String content = data.get("content") instanceof String s ? s : "";
+        if (content.isBlank()) return;
+
+        Long goalId = null;
+        Object gid = data.get("goalId");
+        if (gid instanceof Number n && n.longValue() > 0) goalId = n.longValue();
+
+        VectorStore vs = vectorStoreProvider != null ? vectorStoreProvider.getIfAvailable() : null;
+        if (vs == null) {
+            log.info("Journal RAG index skipped for userId={}: VectorStore bean not available", userId);
+            return;
+        }
+
+        try {
+            Map<String, Object> meta = new HashMap<>();
+            meta.put("type", "journal");
+            meta.put("userId", userId);
+            meta.put("goalId", goalId);
+            meta.put("title", "随笔");
+            meta.put("mood", data.get("mood") instanceof String s ? s : "");
+            meta.put("createdAt", java.time.LocalDateTime.now().toString());
+            String docId = "journal:" + userId + ":" + (data.get("journalId") != null ? data.get("journalId") : System.currentTimeMillis());
+            vs.add(List.of(new Document(docId, content, meta)));
+            log.info("Journal RAG indexed: userId={}, journalId={}", userId, data.get("journalId"));
+
+            // Invalidate RAG cache so next ensureUserRagIndexed re-indexes with this journal
+            ragIndexedLocal.remove(userId);
+            if (redissonClient != null) {
+                try {
+                    redissonClient.getBucket("sp:rag:indexed:u:" + userId).delete();
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Journal RAG index failed for userId={}: {}", userId, e.getMessage());
+        }
     }
 }

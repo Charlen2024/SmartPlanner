@@ -120,6 +120,7 @@ public class AgentAiConfig {
     @ConditionalOnClass(RedisVectorStore.class)
     @ConditionalOnBean(EmbeddingModel.class)
     public VectorStore vectorStore(JedisPooled jedisPooled, EmbeddingModel embeddingModel) {
+        log.info("Creating RedisVectorStore with index=smartplanner-rag, prefix=sp:emb:");
         return RedisVectorStore.builder(jedisPooled, embeddingModel)
                 .indexName("smartplanner-rag")
                 .prefix("sp:emb:")

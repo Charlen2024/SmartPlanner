@@ -30,6 +30,9 @@ public class RabbitMqConfig {
     public static final String RESOURCE_ADVICE_QUEUE = "resource.advice.queue";
     public static final String RESOURCE_ADVICE_ROUTING_KEY = "resource.advice.route";
 
+    public static final String AGENT_JOURNAL_INDEX_QUEUE = "agent.journal.index.queue";
+    public static final String AGENT_JOURNAL_INDEX_ROUTING_KEY = "agent.journal.index.route";
+
     @Bean
     public DirectExchange goalExchange() {
         return new DirectExchange(GOAL_EXCHANGE);
@@ -73,5 +76,15 @@ public class RabbitMqConfig {
     @Bean
     public Binding resourceAdviceBinding(Queue resourceAdviceQueue, DirectExchange resourceExchange) {
         return BindingBuilder.bind(resourceAdviceQueue).to(resourceExchange).with(RESOURCE_ADVICE_ROUTING_KEY);
+    }
+
+    @Bean
+    public Queue agentJournalIndexQueue() {
+        return new Queue(AGENT_JOURNAL_INDEX_QUEUE, true);
+    }
+
+    @Bean
+    public Binding agentJournalIndexBinding(Queue agentJournalIndexQueue, DirectExchange notificationExchange) {
+        return BindingBuilder.bind(agentJournalIndexQueue).to(notificationExchange).with(AGENT_JOURNAL_INDEX_ROUTING_KEY);
     }
 }

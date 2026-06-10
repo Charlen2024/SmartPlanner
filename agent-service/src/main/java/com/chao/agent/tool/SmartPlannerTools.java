@@ -10,6 +10,8 @@ import com.chao.common.client.ScheduleClient;
 import com.chao.common.dto.*;
 import com.chao.common.util.WeatherClient;
 import org.redisson.api.RedissonClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
@@ -26,6 +28,7 @@ import java.util.*;
 
 @Component
 public class SmartPlannerTools {
+    private static final Logger log = LoggerFactory.getLogger(SmartPlannerTools.class);
     private final GoalClient goalClient;
     private final ScheduleClient scheduleClient;
     private final PunchClient punchClient;
@@ -256,7 +259,7 @@ public class SmartPlannerTools {
         return out;
     }
 
-    @Tool(description = "查询最近 N 天的随笔列表（包含心情 mood）。用于复盘/总结/找出情绪与学习模式。返回 JSON 数组，每个元素包含 id、goalId、createdAt、mood、text。")
+    @Tool(description = "查询最近 N 天的随笔列表（包含心情 mood）。用于复盘/总结/找出情绪与学习模式。当用户询问【我的随笔/日记/复盘/最近记录了什么】时必须调用此工具。返回 JSON 数组，每个元素包含 id、goalId、createdAt、mood、text。")
     public List<Map<String, Object>> listRecentJournals(
             @ToolParam(description = "最近天数，1-30，可空，默认 7", required = false) @Nullable Integer days,
             @ToolParam(description = "目标ID，可空", required = false) @Nullable Long goalId,
@@ -264,9 +267,15 @@ public class SmartPlannerTools {
         Long userId = requireUserId();
         int d = days == null ? 7 : Math.max(1, Math.min(days, 30));
         int lim = limit == null ? 30 : Math.max(1, Math.min(limit, 80));
-        LocalDateTime from = LocalDateTime.now().minusDays(d);
+        LocalDateTime from = LocalDateTime.now(ChatTextUtils.ZONE_SHANGHAI).minusDays(d);
 
-        List<UserJournalDto> list = safeList(goalClient.listJournals(userId, goalId));
+        List<UserJournalDto> list;
+        try {
+            list = safeList(goalClient.listJournals(userId, goalId));
+        } catch (Exception e) {
+            log.warn("listRecentJournals Feign call failed for userId={}: {}", userId, e.getMessage());
+            return List.of();
+        }
 
         List<UserJournalDto> filtered = new ArrayList<>();
         for (UserJournalDto j : list) {
@@ -294,6 +303,9 @@ public class SmartPlannerTools {
             m.put("text", ChatTextUtils.safeSnippet(j.getContent()));
             out.add(m);
             if (out.size() >= lim) break;
+        }
+        if (out.isEmpty()) {
+            log.info("listRecentJournals returned 0 journals for userId={}, totalFetched={}, days={}", userId, list.size(), d);
         }
         return out;
     }
@@ -329,18 +341,25 @@ public class SmartPlannerTools {
                             m.put("platform", d.getMetadata().get("platform"));
                             m.put("topic", d.getMetadata().get("topic"));
                             m.put("goalId", d.getMetadata().get("goalId"));
+                            m.put("createdAt", d.getMetadata().get("createdAt"));
+                            m.put("mood", d.getMetadata().get("mood"));
                         }
                         out.add(m);
                         if (out.size() >= k) break;
                     }
                 }
-            } catch (Exception ignored) {
+                log.info("searchPersonalData vectorSearch userId={}, q={}, found={}", userId, q, out.size());
+            } catch (Exception e) {
+                log.warn("searchPersonalData vectorSearch failed userId={}, q={}: {}", userId, q, e.getMessage());
             }
+        } else {
+            log.info("searchPersonalData vectorStore is null, skipping to keywordFallback userId={}", userId);
         }
 
         if (out.size() < k) {
             int remain = k - out.size();
-            out.addAll(keywordFallback(userId, q, remain));
+            List<Map<String, Object>> fallback = keywordFallback(userId, q, remain);
+            out.addAll(fallback);
         }
         return out;
     }
@@ -488,21 +507,42 @@ public class SmartPlannerTools {
         if (limit <= 0) return List.of();
         List<Map<String, Object>> out = new ArrayList<>();
 
+        // Journal fallback: first try content match, then list recent if the query looks like a listing request
+        boolean journalListing = q.length() <= 30 && (q.contains("随笔") || q.contains("日记") || q.contains("复盘") || q.contains("journal"));
         try {
             List<UserJournalDto> journals = safeList(goalClient.listJournals(userId, null));
+            // Sort by createdAt desc for listing
+            if (journalListing) {
+                journals = new ArrayList<>(journals);
+                journals.sort((a, b) -> {
+                    java.time.LocalDateTime x = a != null ? a.getCreatedAt() : null;
+                    java.time.LocalDateTime y = b != null ? b.getCreatedAt() : null;
+                    if (x == null && y == null) return 0;
+                    if (x == null) return 1;
+                    if (y == null) return -1;
+                    return y.compareTo(x);
+                });
+            }
             for (UserJournalDto j : journals) {
                 if (j == null) continue;
                 String text = j.getContent();
-                if (text != null && text.contains(q)) {
+                boolean match = text != null && text.toLowerCase().contains(q.toLowerCase());
+                if (match || journalListing) {
                     Map<String, Object> m = new HashMap<>();
                     m.put("type", "journal");
                     m.put("goalId", j.getGoalId());
+                    m.put("createdAt", j.getCreatedAt());
+                    m.put("mood", j.getMood());
                     m.put("text", ChatTextUtils.safeSnippet(text));
                     out.add(m);
                     if (out.size() >= limit) return out;
                 }
             }
-        } catch (Exception ignored) {
+            if (journalListing) {
+                log.info("keywordFallback journalListing userId={}, totalJournals={}, returned={}", userId, journals.size(), Math.min(out.size(), limit));
+            }
+        } catch (Exception e) {
+            log.warn("keywordFallback journal fetch failed userId={}: {}", userId, e.getMessage());
         }
 
         Set<String> userGoalKeywords = Collections.emptySet();

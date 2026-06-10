@@ -443,6 +443,22 @@ public class GoalService {
         journal.setCreatedAt(LocalDateTime.now());
         userJournalMapper.insert(journal);
 
+        // Notify agent-service to index this journal into the vector store
+        try {
+            NotificationMessage syncMsg = new NotificationMessage();
+            syncMsg.setUserId(userId);
+            syncMsg.setType("JOURNAL_CREATED");
+            syncMsg.setTs(System.currentTimeMillis());
+            syncMsg.setPayload(Map.of(
+                    "journalId", journal.getId(),
+                    "goalId", goalId != null ? goalId : 0,
+                    "content", content != null ? content : "",
+                    "mood", mood != null ? mood : ""
+            ));
+            rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.AGENT_JOURNAL_INDEX_ROUTING_KEY, syncMsg);
+        } catch (Exception ignored) {
+        }
+
         try {
             String c = content != null ? content : "";
             String m = mood != null ? mood : "";

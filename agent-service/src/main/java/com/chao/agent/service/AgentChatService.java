@@ -86,6 +86,7 @@ public class AgentChatService {
             - 问"今天做什么/日程/排程"：调 listTodaySchedules（无参数），按时间段列出。排程任务≠学校课程
             - 问"课表/课程/上课安排"：调 listClasses，必须传 date 参数（今天日期），直接呈现返回文本
             - 问"本周总结/进度"：先调 listPunchRecords，再调 listRecentJournals(days=7)，数据齐后按周总结格式输出
+            - 问"随笔/日记/复盘"或想查看用户的随笔记录时：调 listRecentJournals 获取随笔列表，不要用 searchPersonalData 查随笔列表
             - 问"学习建议"：先调工具拿排程和随笔数据，基于实际情况给建议，不空泛说教
             - 查询类问题必须先调工具拿到真实数据再回答，绝不编造
             - 今天没有排程就说"今天暂无排程"
