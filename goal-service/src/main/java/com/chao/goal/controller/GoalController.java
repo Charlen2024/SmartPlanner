@@ -64,6 +64,11 @@ public class GoalController {
         return Result.success("删除成功");
     }
 
+    @GetMapping("/{goalId}/unfinished-count")
+    public Result<java.util.Map<String, Long>> countUnfinishedTasks(@PathVariable Long goalId) {
+        return Result.success(java.util.Map.of("unfinished", goalService.countUnfinishedTasks(goalId)));
+    }
+
     @PostMapping("/{goalId}/tasks")
     public Result<GoalTask> createTask(
             @PathVariable Long goalId,

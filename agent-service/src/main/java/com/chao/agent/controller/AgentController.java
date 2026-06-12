@@ -35,9 +35,16 @@ public class AgentController {
     private final UserPortraitAiService userPortraitAiService;
     private final TaskAdviceAiService taskAdviceAiService;
 
+    private static String extractMessage(Map<String, Object> body) {
+        if (body == null) return null;
+        Object msg = body.get("message");
+        return msg instanceof String s ? s : null;
+    }
+
     @PostMapping("/chat")
-    public Result<AgentChatResponse> chat(@AuthenticationPrincipal Jwt jwt, @RequestBody(required = false) String question) {
+    public Result<AgentChatResponse> chat(@AuthenticationPrincipal Jwt jwt, @RequestBody(required = false) Map<String, Object> body) {
         Long userId = JwtUtils.getUserId(jwt);
+        String question = extractMessage(body);
         String answer = agentChatService.chat(userId, question);
         AgentChatResponse resp = new AgentChatResponse();
         resp.setAnswer(answer);
@@ -47,10 +54,11 @@ public class AgentController {
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public ResponseEntity<StreamingResponseBody> chatStream(
             @AuthenticationPrincipal Jwt jwt,
-            @RequestBody(required = false) String question) {
+            @RequestBody(required = false) Map<String, Object> body) {
         Long userId = JwtUtils.getUserId(jwt);
+        String question = extractMessage(body);
 
-        StreamingResponseBody body = outputStream -> {
+        StreamingResponseBody streamBody = outputStream -> {
             java.util.concurrent.atomic.AtomicReference<String> lastSent = new java.util.concurrent.atomic.AtomicReference<>("");
             agentChatService.chatStream(userId, question)
                     .doOnComplete(() -> {
@@ -89,7 +97,7 @@ public class AgentController {
                 .header("X-Accel-Buffering", "no")
                 .header("Cache-Control", "no-cache")
                 .contentType(MediaType.TEXT_EVENT_STREAM)
-                .body(body);
+                .body(streamBody);
     }
 
     @PostMapping("/warmup")

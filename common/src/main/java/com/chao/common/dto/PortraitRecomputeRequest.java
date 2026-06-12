@@ -5,6 +5,7 @@ import java.util.List;
 
 @Data
 public class PortraitRecomputeRequest {
+    private Long userId;
     private List<PunchRecordDto> punchRecords;
     private List<TaskScheduleDto> schedules;
     private int streak;

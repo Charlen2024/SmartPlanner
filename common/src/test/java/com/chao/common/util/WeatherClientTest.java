@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 public class WeatherClientTest {
 
-    private final WeatherClient client = new WeatherClient(new RestTemplate());
+    private final WeatherClient client = new WeatherClient(new RestTemplate(), null);
 
     @Test
     void translateDesc_exactMatches() {

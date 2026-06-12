@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onActivated, onMounted, ref } from 'vue'
 import api from '../plugins/api'
 
 const loading = ref(false)
@@ -32,7 +32,9 @@ async function updateStatus(taskId, status) {
   }
 }
 
+let _ready = false
 onMounted(load)
+onActivated(() => { if (_ready) load(); _ready = true })
 </script>
 
 <template>

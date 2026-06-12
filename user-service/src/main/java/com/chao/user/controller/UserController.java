@@ -915,6 +915,11 @@ public class UserController {
         return goalClient.updateGoal(goalId, title, description, status, deadline);
     }
 
+    @GetMapping("/goals/{goalId}/unfinished-count")
+    public Result<java.util.Map<String, Long>> countUnfinishedTasks(@PathVariable Long goalId) {
+        return goalClient.countUnfinishedTasks(goalId);
+    }
+
     @DeleteMapping("/goals/{goalId}")
     public Result<String> deleteGoal(@PathVariable Long goalId) {
         return goalClient.deleteGoal(goalId);

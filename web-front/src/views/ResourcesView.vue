@@ -1,6 +1,7 @@
 <script setup>
-import { ref, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onActivated, onBeforeUnmount, onDeactivated } from 'vue'
 import api from '../plugins/api'
+import { renderMarkdown } from '../plugins/markdown'
 
 const topic = ref('')
 const title = ref('')
@@ -21,6 +22,17 @@ const feedbackDialog = ref(false)
 const feedbackNotes = ref('')
 const feedbackDone = ref(false)
 const feedbackTopic = ref('')
+const showAddForm = ref(false)
+
+const quickTopics = ['Java 多线程', 'Spring Boot', 'MySQL 索引', 'Redis 缓存', '分布式系统', '数据结构', 'Python 爬虫', '微服务']
+
+const adviceHtml = computed(() => {
+  if (!advice.value) return ''
+  const fixed = advice.value
+    .replace(/^(#{1,6})([^\s#])/gm, '$1 $2')
+    .replace(/^(\s*)([-*])([^\s])/gm, '$1$2 $3')
+  return renderMarkdown(fixed)
+})
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
@@ -28,7 +40,27 @@ function sleep(ms) {
 
 let topicDebounce = null
 
-// 快速搜索：直接调用 kNN 向量检索 + multiMatch 降级
+function platformIcon(platform) {
+  const p = (platform || '').toLowerCase()
+  if (p.includes('bilibili') || p.includes('b站')) return 'mdi-video-box'
+  if (p.includes('zhihu') || p.includes('知乎')) return 'mdi-forum'
+  if (p.includes('github')) return 'mdi-github'
+  if (p.includes('course') || p.includes('mooc') || p.includes('慕课')) return 'mdi-school'
+  if (p.includes('youtube') || p.includes('b站')) return 'mdi-youtube'
+  if (p.includes('csdn')) return 'mdi-language-css3'
+  if (p.includes('掘金') || p.includes('juejin')) return 'mdi-gold'
+  return 'mdi-open-in-new'
+}
+
+function platformColor(platform) {
+  const p = (platform || '').toLowerCase()
+  if (p.includes('bilibili') || p.includes('b站')) return '#fb7299'
+  if (p.includes('zhihu') || p.includes('知乎')) return '#0066ff'
+  if (p.includes('github')) return '#333333'
+  if (p.includes('youtube')) return '#ff0000'
+  return undefined
+}
+
 async function searchFast() {
   if (!topic.value?.trim()) return
   searchMode.value = 'fast'
@@ -57,7 +89,6 @@ async function searchFast() {
   }
 }
 
-// AI 推荐：异步 RAG job，返回 AI 学习建议 + 课程资源
 async function searchRag() {
   if (!topic.value?.trim()) {
     advice.value = ''
@@ -73,7 +104,7 @@ async function searchRag() {
   crawlMsg.value = ''
   list.value = []
   try {
-    const startRes = await api.post('/user/resources/search/advice/jobs', { topic: topic.value.trim() }, { timeout: 15000 })
+    const startRes = await api.post('/user/resources/search/advice/jobs', { topic: topic.value.trim() }, { timeout: 30000 })
     const jobId = startRes?.data?.data?.jobId
     if (!jobId) throw new Error('启动检索任务失败')
 
@@ -81,7 +112,7 @@ async function searchRag() {
       await sleep(1000)
       if (aborted.value) return
       if (seq !== jobSeq.value) return
-      const st = await api.get(`/user/resources/search/advice/jobs/${jobId}`, { timeout: 15000 })
+      const st = await api.get(`/user/resources/search/advice/jobs/${jobId}`, { timeout: 30000 })
       const data = st?.data?.data ?? null
       if (data?.status === 'DONE') {
         const r = data?.result ?? null
@@ -151,6 +182,7 @@ async function createResource() {
     platform.value = ''
     url.value = ''
     summary.value = ''
+    showAddForm.value = false
     await loadLocal()
   } catch (e) {
     error.value = e?.response?.data?.message || e?.message || '保存失败'
@@ -195,32 +227,241 @@ onBeforeUnmount(() => {
   aborted.value = true
   clearTimeout(topicDebounce)
 })
+onDeactivated(() => {
+  aborted.value = true
+  clearTimeout(topicDebounce)
+})
+onActivated(() => {
+  aborted.value = false
+})
 </script>
 
 <template>
-  <v-row class="mb-2">
-    <v-col cols="12" md="3">
-      <v-text-field v-model="topic" label="主题" variant="outlined" @keyup.enter="searchFast" />
-    </v-col>
-    <v-col cols="12" md="auto">
-      <v-btn color="primary" variant="elevated" :loading="loading" :disabled="!topic?.trim()" @click="searchFast">
-        快速搜索
-      </v-btn>
-    </v-col>
-    <v-col cols="12" md="auto">
-      <v-btn variant="tonal" :loading="aiLoading" :disabled="!topic?.trim()" @click="searchRag">
-        AI 推荐
-      </v-btn>
-    </v-col>
-  </v-row>
+  <!-- ====== Search Bar ====== -->
+  <v-card class="mb-4 pa-4">
+    <div class="text-h6 font-weight-bold mb-3 d-flex align-center">
+      <v-icon icon="mdi-magnify" class="mr-2" color="primary" />
+      资源检索
+    </div>
 
-  <v-alert v-if="advice" type="info" variant="tonal" class="mb-4" style="white-space: pre-wrap;">
-    <template #title>AI 学习建议</template>
-    {{ advice }}
+    <v-row dense align="center">
+      <v-col cols="12" md="8">
+        <v-text-field
+          v-model="topic"
+          label="输入你想学的主题..."
+          variant="outlined"
+          density="comfortable"
+          hide-details
+          @keyup.enter="searchFast"
+        >
+          <template #prepend-inner>
+            <v-icon icon="mdi-text-search" size="20" class="mt-1" />
+          </template>
+        </v-text-field>
+      </v-col>
+      <v-col cols="12" md="4" class="d-flex ga-2">
+        <v-btn
+          color="primary"
+          variant="elevated"
+          :loading="loading"
+          :disabled="!topic?.trim()"
+          @click="searchFast"
+          class="flex-grow-1"
+        >
+          <v-icon icon="mdi-lightning-bolt" size="18" class="mr-1" />
+          快速搜索
+        </v-btn>
+        <v-btn
+          variant="tonal"
+          :loading="aiLoading"
+          :disabled="!topic?.trim()"
+          @click="searchRag"
+          class="flex-grow-1"
+        >
+          <v-icon icon="mdi-robot" size="18" class="mr-1" />
+          AI 推荐
+        </v-btn>
+      </v-col>
+    </v-row>
+
+    <!-- Quick topic chips -->
+    <div class="mt-3 d-flex flex-wrap align-center ga-1">
+      <span class="text-caption text-medium-emphasis mr-1">试试：</span>
+      <v-chip
+        v-for="qt in quickTopics"
+        :key="qt"
+        size="small"
+        variant="outlined"
+        :color="topic === qt ? 'primary' : undefined"
+        @click="topic = qt; searchFast()"
+        class="cursor-pointer"
+      >
+        {{ qt }}
+      </v-chip>
+    </div>
+  </v-card>
+
+  <!-- ====== Messages ====== -->
+  <v-alert v-if="error" type="error" variant="tonal" class="mb-4" density="compact">{{ error }}</v-alert>
+  <v-alert v-if="crawlMsg" type="success" variant="tonal" class="mb-4" density="compact">
+    {{ crawlMsg }}
   </v-alert>
-  <v-alert v-if="crawlMsg" type="success" variant="tonal" class="mb-4">{{ crawlMsg }}</v-alert>
-  <v-alert v-if="error" type="error" variant="tonal" class="mb-4">{{ error }}</v-alert>
 
+  <!-- ====== AI Advice Card ====== -->
+  <v-card v-if="advice" class="mb-4 advice-card">
+    <v-card-title class="d-flex align-center pb-0">
+      <v-icon icon="mdi-robot-outline" class="mr-2" color="primary" />
+      AI 学习建议
+      <v-spacer />
+      <v-chip size="x-small" variant="tonal" color="primary">AI 生成</v-chip>
+    </v-card-title>
+    <v-card-text>
+      <div class="advice-content" v-html="adviceHtml" />
+    </v-card-text>
+  </v-card>
+
+  <!-- ====== Results ====== -->
+  <v-card>
+    <v-card-title class="d-flex align-center">
+      <v-icon icon="mdi-book-open-page-variant" class="mr-2" />
+      学习资源
+      <v-chip v-if="searchMode === 'fast' && !loading && list.length" size="small" color="primary" variant="tonal" class="ml-2">
+        <v-icon icon="mdi-lightning-bolt" size="14" class="mr-1" />快速
+      </v-chip>
+      <v-chip v-if="searchMode === 'rag' && !aiLoading && list.length" size="small" variant="tonal" class="ml-2">
+        <v-icon icon="mdi-robot" size="14" class="mr-1" />AI
+      </v-chip>
+      <v-spacer />
+      <span v-if="list.length" class="text-caption text-medium-emphasis">{{ list.length }} 条结果</span>
+    </v-card-title>
+    <v-divider />
+
+    <!-- Loading skeleton -->
+    <div v-if="loading || aiLoading" class="pa-4">
+      <div v-for="n in 3" :key="n" class="d-flex ga-3 mb-3">
+        <v-skeleton-loader type="list-item-avatar-two-line" class="flex-grow-1" />
+      </div>
+    </div>
+
+    <!-- Empty state -->
+    <div v-else-if="list.length === 0" class="text-center py-10">
+      <v-icon icon="mdi-book-search" size="64" class="mb-3 text-medium-emphasis" style="opacity:0.35" />
+      <div class="text-h6 font-weight-medium text-medium-emphasis mb-1">探索你的学习资源</div>
+      <div class="text-body-2 text-medium-emphasis" style="opacity:0.7">
+        输入主题关键词，选择「快速搜索」即时匹配<br/>或「AI 推荐」获取深度学习建议与资源
+      </div>
+    </div>
+
+    <!-- Resource cards -->
+    <div v-else class="pa-2">
+      <div
+        v-for="(r, i) in list"
+        :key="r.id || i"
+        class="resource-item pa-3 mb-1 rounded"
+      >
+        <div class="d-flex align-start ga-3">
+          <!-- Rank badge -->
+          <div class="resource-rank">
+            <span class="text-caption font-weight-bold">{{ i + 1 }}</span>
+          </div>
+
+          <!-- Content -->
+          <div class="flex-grow-1" style="min-width:0">
+            <div class="d-flex align-center ga-2 mb-1">
+              <span class="text-body-1 font-weight-semibold resource-title">{{ r.title || r?.title || '未命名资源' }}</span>
+              <v-icon
+                v-if="r.platform || r?.platform"
+                :icon="platformIcon(r.platform || r?.platform)"
+                size="16"
+                :color="platformColor(r.platform || r?.platform)"
+              />
+              <v-chip
+                v-if="r.platform || r?.platform"
+                size="x-small"
+                variant="flat"
+                class="resource-platform-chip"
+                :style="{ background: (platformColor(r.platform || r?.platform) || 'rgb(var(--v-theme-primary))') + '18', color: platformColor(r.platform || r?.platform) || 'rgb(var(--v-theme-primary))' }"
+              >
+                {{ r.platform || r?.platform }}
+              </v-chip>
+            </div>
+            <div
+              v-if="r.summary || r.contentSummary"
+              class="text-body-2 text-medium-emphasis resource-summary"
+            >
+              {{ r.summary || r.contentSummary }}
+            </div>
+          </div>
+
+          <!-- Actions -->
+          <div class="d-flex ga-1 flex-shrink-0">
+            <v-btn
+              v-if="r.url || r.sourceUrl"
+              size="small"
+              variant="tonal"
+              color="primary"
+              :href="r.url || r.sourceUrl"
+              target="_blank"
+              density="compact"
+            >
+              <v-icon icon="mdi-open-in-new" size="16" class="mr-1" />
+              打开
+            </v-btn>
+            <v-btn
+              v-if="r.id"
+              size="small"
+              variant="text"
+              color="error"
+              icon="mdi-delete-outline"
+              density="compact"
+              @click="remove(r.id)"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <v-divider />
+    <v-card-actions class="justify-space-between pa-3 flex-wrap ga-2">
+      <v-btn variant="text" size="small" class="text-medium-emphasis" @click="openFeedback">
+        <v-icon icon="mdi-message-text-outline" size="16" class="mr-1" />
+        找不到想要的？反馈给我们
+      </v-btn>
+      <v-btn variant="text" size="small" class="text-medium-emphasis" @click="showAddForm = !showAddForm">
+        <v-icon :icon="showAddForm ? 'mdi-chevron-up' : 'mdi-plus-circle-outline'" size="16" class="mr-1" />
+        {{ showAddForm ? '收起' : '手动添加资源' }}
+      </v-btn>
+    </v-card-actions>
+
+    <!-- Manual add form (collapsible) -->
+    <v-expand-transition>
+      <div v-if="showAddForm">
+        <v-divider />
+        <div class="pa-4">
+          <div class="text-subtitle-2 font-weight-semibold mb-3">手动添加资源</div>
+          <v-row dense>
+            <v-col cols="12" md="5">
+              <v-text-field v-model="title" label="标题" variant="outlined" density="comfortable" hide-details />
+            </v-col>
+            <v-col cols="12" md="2">
+              <v-text-field v-model="platform" label="平台" variant="outlined" density="comfortable" hide-details />
+            </v-col>
+            <v-col cols="12" md="4">
+              <v-text-field v-model="url" label="链接" variant="outlined" density="comfortable" hide-details />
+            </v-col>
+            <v-col cols="12" md="1" class="d-flex">
+              <v-btn color="primary" variant="tonal" :disabled="!topic || !title" @click="createResource" block density="comfortable">
+                保存
+              </v-btn>
+            </v-col>
+          </v-row>
+          <v-text-field v-model="summary" label="摘要（选填）" variant="outlined" density="comfortable" class="mt-2" hide-details />
+        </div>
+      </div>
+    </v-expand-transition>
+  </v-card>
+
+  <!-- ====== Feedback Dialog ====== -->
   <v-dialog v-model="feedbackDialog" max-width="480" transition="dialog-bottom-transition" persistent>
     <v-card>
       <v-card-title class="text-h6">补充资源</v-card-title>
@@ -251,51 +492,86 @@ onBeforeUnmount(() => {
       </v-card-actions>
     </v-card>
   </v-dialog>
-
-  <v-row class="mb-2">
-    <v-col cols="12" md="3"><v-text-field v-model="title" label="标题" variant="outlined" /></v-col>
-    <v-col cols="12" md="2"><v-text-field v-model="platform" label="平台" variant="outlined" /></v-col>
-    <v-col cols="12" md="3"><v-text-field v-model="url" label="链接" variant="outlined" /></v-col>
-    <v-col cols="12" md="3"><v-text-field v-model="summary" label="摘要" variant="outlined" /></v-col>
-    <v-col cols="12" md="1"><v-btn @click="createResource">保存</v-btn></v-col>
-  </v-row>
-
-  <v-card>
-    <v-card-title class="d-flex align-center">
-      学习资源
-      <v-chip v-if="searchMode === 'fast' && !loading" size="small" color="primary" variant="tonal" class="ml-2">快速</v-chip>
-      <v-chip v-if="searchMode === 'rag' && !aiLoading" size="small" variant="tonal" class="ml-2">AI</v-chip>
-    </v-card-title>
-    <v-divider />
-    <div v-if="list.length === 0 && !loading && !aiLoading" class="text-center py-8 text-medium-emphasis text-body-2">
-      输入主题，点击快速搜索或 AI 推荐
-    </div>
-    <v-list v-else lines="two">
-      <v-list-item
-        v-for="(r, i) in list"
-        :key="r.id || i"
-        :title="r.title || r?.title"
-      >
-        <template #prepend>
-          <span class="text-caption text-medium-emphasis" style="min-width:24px">{{ i + 1 }}</span>
-        </template>
-        <template #subtitle>
-          <div class="d-flex align-center ga-2">
-            <span>{{ r.platform || r?.platform }}</span>
-            <span v-if="r.summary || r.contentSummary" class="text-caption">- {{ r.summary || r.contentSummary }}</span>
-          </div>
-        </template>
-        <template #append>
-          <v-btn size="small" variant="text" v-if="r.url || r.sourceUrl" :href="r.url || r.sourceUrl" target="_blank">打开</v-btn>
-          <v-btn size="small" variant="text" v-if="r.id" color="error" @click="remove(r.id)">删除</v-btn>
-        </template>
-      </v-list-item>
-    </v-list>
-    <v-divider />
-    <v-card-actions class="justify-center py-2">
-      <v-btn variant="text" size="small" class="text-medium-emphasis" @click="openFeedback">
-        找不到想要的？反馈给我们
-      </v-btn>
-    </v-card-actions>
-  </v-card>
 </template>
+
+<style scoped>
+.advice-card {
+  border-left: 4px solid rgb(var(--v-theme-primary));
+}
+.advice-content :deep(h1),
+.advice-content :deep(h2),
+.advice-content :deep(h3) {
+  font-size: 1.05rem;
+  margin: 0.75em 0 0.4em;
+  font-weight: 700;
+}
+.advice-content :deep(h2) { font-size: 1rem; }
+.advice-content :deep(h3) { font-size: 0.95rem; }
+.advice-content :deep(p) {
+  margin: 0.4em 0;
+  line-height: 1.7;
+}
+.advice-content :deep(ul),
+.advice-content :deep(ol) {
+  padding-left: 1.3em;
+  margin: 0.35em 0;
+}
+.advice-content :deep(li) {
+  margin-bottom: 0.25em;
+  line-height: 1.6;
+}
+.advice-content :deep(strong) {
+  font-weight: 700;
+  color: rgb(var(--v-theme-primary));
+}
+.advice-content :deep(code) {
+  background: rgba(var(--v-theme-on-surface), 0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+.advice-content :deep(blockquote) {
+  border-left: 3px solid rgba(var(--v-theme-primary), 0.3);
+  padding-left: 12px;
+  margin: 0.5em 0;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+}
+
+.resource-item {
+  transition: background 0.15s;
+}
+.resource-item:hover {
+  background: rgba(var(--v-theme-on-surface), 0.03);
+}
+.resource-rank {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(var(--v-theme-primary), 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: rgb(var(--v-theme-primary));
+}
+.resource-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.resource-summary {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.55;
+}
+.resource-platform-chip {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.cursor-pointer {
+  cursor: pointer;
+}
+</style>

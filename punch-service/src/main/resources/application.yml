@@ -4,6 +4,10 @@ server:
 spring:
   application:
     name: punch-service
+  boot:
+    admin:
+      client:
+        url: http://admin-server:9090
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/sp_punch?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true}
     username: root

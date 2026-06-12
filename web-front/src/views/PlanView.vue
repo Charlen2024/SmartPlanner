@@ -1,7 +1,8 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onMounted, ref, watch } from 'vue'
 import api from '../plugins/api'
 import { useNotifyStore } from '../stores/notify'
+import { useDecomposeStore } from '../stores/decompose'
 import { useAuthStore } from '../stores/auth'
 import { useRouter } from 'vue-router'
 
@@ -11,6 +12,7 @@ const busy = ref(false)
 const error = ref('')
 const importResult = ref(null)
 const notify = useNotifyStore()
+const decompose = useDecomposeStore()
 const auth = useAuthStore()
 const router = useRouter()
 
@@ -25,7 +27,6 @@ watch(() => auth.me?.firstWeekMonday, (v) => {
   }
 })
 const goalText = ref('学习分布式系统')
-const topic = ref('分布式')
 
 const dashboard = ref(null)
 const tasks = ref([])
@@ -34,9 +35,8 @@ const currentGoalTitle = ref('')
 const goalsList = ref([])
 const feedbackOpen = ref(false)
 const feedbackText = ref('')
-const tasksPolling = ref(false)
-const tasksPollingMessage = ref('')
-const tasksPollTimer = ref(null)
+const tasksLoading = ref(false)
+const tasksAccepted = ref(false)
 
 const today = computed(() => new Date().toISOString().slice(0, 10))
 const currentWeekNum = computed(() => {
@@ -54,8 +54,8 @@ const step1Title = computed(() => {
   return '课表（可选）'
 })
 const wizardSubtitle = computed(() => {
-  if (needsImport.value) return '导入课表 → 添加新目标 → 拆解任务 → 去目标页排程 → 打卡'
-  return '课表已导入 → 添加新目标 → 拆解任务 → 去目标页排程 → 打卡'
+  if (needsImport.value) return '导入课表 → 添加新目标 → AI 拆解任务 → 确认并排程'
+  return '课表已导入 → 添加新目标 → AI 拆解任务 → 确认并排程'
 })
 
 const displayTasks = computed(() => tasks.value?.slice?.(0, 80) ?? [])
@@ -89,7 +89,7 @@ function safeClearWizardState() {
 }
 
 async function refreshAll() {
-  const d = await api.get('/user/dashboard', { params: { topic: topic.value } })
+  const d = await api.get('/user/dashboard')
   dashboard.value = d?.data?.data ?? null
   await loadGoals(false)
 }
@@ -118,55 +118,10 @@ async function loadGoalTasks(goalId) {
   tasks.value = res?.data?.data ?? []
 }
 
-function stopTasksPolling() {
-  tasksPolling.value = false
-  tasksPollingMessage.value = ''
-  if (tasksPollTimer.value) clearTimeout(tasksPollTimer.value)
-  tasksPollTimer.value = null
-}
-
-function isTasksReady(list) {
+function hasRealTasks(list) {
   const arr = Array.isArray(list) ? list : []
   if (!arr.length) return false
-  const hasReal = arr.some((t) => t?.id && !String(t?.title || '').startsWith('[AI降级]'))
-  return hasReal
-}
-
-async function pollTasksUntilReady(goalId) {
-  stopTasksPolling()
-  const gid = Number(goalId)
-  if (!Number.isFinite(gid) || gid <= 0) return
-  tasksPolling.value = true
-  tasksPollingMessage.value = '任务拆解进行中（你可以先去写随笔/看别的，稍后回来）'
-  const startedAt = Date.now()
-  let failCount = 0
-  const loop = async () => {
-    if (!tasksPolling.value) return
-    try {
-      await loadGoalTasks(gid)
-      failCount = 0
-      if (isTasksReady(tasks.value)) {
-        tasksPollingMessage.value = '任务已生成'
-        tasksPollTimer.value = setTimeout(() => stopTasksPolling(), 800)
-        return
-      }
-    } catch (e) {
-      failCount++
-      if (failCount >= 3) {
-        tasksPollingMessage.value = '网络异常，请稍后点击刷新按钮重试'
-        stopTasksPolling()
-        return
-      }
-    }
-    const elapsed = Date.now() - startedAt
-    if (elapsed > 120000) {
-      tasksPollingMessage.value = '任务拆解耗时较长，可稍后点击刷新'
-      tasksPollTimer.value = setTimeout(() => stopTasksPolling(), 1500)
-      return
-    }
-    tasksPollTimer.value = setTimeout(loop, 2000)
-  }
-  await loop()
+  return arr.some((t) => t?.id && !String(t?.title || '').startsWith('[AI降级]'))
 }
 
 async function onSelectGoal(goalId) {
@@ -177,7 +132,8 @@ async function onSelectGoal(goalId) {
 }
 
 function acceptTasks() {
-  notify.success('已标记为满意')
+  tasksAccepted.value = true
+  notify.success('已确认任务，现在可以去目标页生成排程了')
   safeSaveWizardState({ tasksAcceptedGoalId: currentGoalId.value || null })
 }
 
@@ -185,14 +141,18 @@ async function submitFeedback() {
   if (!currentGoalId.value) return
   busy.value = true
   error.value = ''
+  // Set loading before API call so SSE GOAL_TASK_READY can be caught
+  tasksLoading.value = true
+  tasks.value = []
+  tasksAccepted.value = false
   try {
-    await api.post(`/user/goals/${currentGoalId.value}/tasks/regenerate`, feedbackText.value, { headers: { 'Content-Type': 'text/plain' } })
+    await api.post(`/user/goals/${currentGoalId.value}/tasks/regenerate`, feedbackText.value, { headers: { 'Content-Type': 'text/plain;charset=UTF-8' } })
     feedbackOpen.value = false
     feedbackText.value = ''
     notify.info('已提交意见，后台正在重新生成任务')
-    await pollTasksUntilReady(currentGoalId.value)
   } catch (e) {
     error.value = e?.response?.data?.message || '提交失败'
+    tasksLoading.value = false
   } finally {
     busy.value = false
   }
@@ -240,14 +200,16 @@ async function createGoalByAi() {
   busy.value = true
   error.value = ''
   try {
-    const created = await api.post('/user/goals/ai', goalText.value, { headers: { 'Content-Type': 'text/plain' } })
+    const created = await api.post('/user/goals/ai', goalText.value, { headers: { 'Content-Type': 'text/plain;charset=UTF-8' } })
     const goal = created?.data?.data ?? null
     currentGoalId.value = goal?.id ?? null
     currentGoalTitle.value = goal?.title ?? ''
-    notify.info('目标已提交，后台正在拆解任务（完成后右上角会提示）')
+    // DecomposePanel will pick up SSE events automatically via DefaultLayout
+    tasksLoading.value = true
+    tasks.value = []
+    tasksAccepted.value = false
     step.value = 3
-    safeSaveWizardState({ step: 3, currentGoalId: currentGoalId.value, topic: topic.value, goalText: goalText.value })
-    await pollTasksUntilReady(currentGoalId.value)
+    safeSaveWizardState({ step: 3, currentGoalId: currentGoalId.value, goalText: goalText.value })
   } catch (e) {
     error.value = e?.response?.data?.message || '提交目标失败'
   } finally {
@@ -256,14 +218,12 @@ async function createGoalByAi() {
 }
 
 function finishWizard() {
-  stopTasksPolling()
   safeClearWizardState()
   notify.success('已完成本次向导')
   router.push('/')
 }
 
 function finishWizardAndGo(to) {
-  stopTasksPolling()
   safeClearWizardState()
   notify.success('已结束本页流程，请在目标页完成排程')
   router.push(to)
@@ -275,10 +235,9 @@ async function initWizard() {
   const saved = safeLoadWizardState()
   const savedStep = Number(saved?.step)
   const savedGoalId = Number(saved?.currentGoalId)
-  if (Number.isFinite(savedStep) && savedStep >= 1 && savedStep <= 4) desiredStep = savedStep
+  if (Number.isFinite(savedStep) && savedStep >= 1 && savedStep <= 3) desiredStep = savedStep
   if (Number.isFinite(savedGoalId) && savedGoalId > 0) {
     currentGoalId.value = savedGoalId
-    topic.value = saved?.topic || topic.value
     goalText.value = saved?.goalText || goalText.value
   }
   step.value = desiredStep
@@ -291,25 +250,23 @@ async function initWizard() {
     step.value = 1
   }
   await loadGoals(false)
-  // If on step 3 with a saved goal but tasks aren't ready, start background polling
-  if (step.value === 3 && currentGoalId.value && !isTasksReady(tasks.value)) {
-    pollTasksUntilReady(currentGoalId.value) // fire-and-forget, no await
+  // If on step 3 with a saved goal, try loading tasks
+  if (step.value === 3 && currentGoalId.value) {
+    await loadGoalTasks(currentGoalId.value)
+    tasksLoading.value = !hasRealTasks(tasks.value)
   }
 }
 
+let _ready5 = false
 onMounted(initWizard)
+onActivated(() => { if (_ready5) loadGoals(false); _ready5 = true })
 
 watch(
   () => step.value,
   (v) => {
     if (initializing.value) return
     const n = Number(v)
-    if (Number.isFinite(n) && n >= 1 && n <= 4) safeSaveWizardState({ step: n })
-    if (n !== 3) {
-      stopTasksPolling()
-    } else if (currentGoalId.value && !isTasksReady(tasks.value) && !tasksPolling.value) {
-      pollTasksUntilReady(currentGoalId.value)
-    }
+    if (Number.isFinite(n) && n >= 1 && n <= 3) safeSaveWizardState({ step: n })
   },
 )
 
@@ -321,15 +278,19 @@ watch(
 )
 
 watch(
-  () => topic.value,
-  (v) => {
-    safeSaveWizardState({ topic: v })
+  () => notify.signalSeq?.GOAL_TASK_READY,
+  async (seq) => {
+    if (!seq || !currentGoalId.value || !tasksLoading.value) return
+    try {
+      await loadGoalTasks(currentGoalId.value)
+      if (hasRealTasks(tasks.value)) {
+        tasksLoading.value = false
+      }
+    } catch (e) { /* ignore, user can manually refresh */ }
   },
 )
 
-onBeforeUnmount(() => {
-  stopTasksPolling()
-})
+
 </script>
 
 <template>
@@ -357,9 +318,7 @@ onBeforeUnmount(() => {
         <v-divider />
         <v-stepper-item :value="2" title="添加新目标" />
         <v-divider />
-        <v-stepper-item :value="3" title="任务拆解" />
-        <v-divider />
-        <v-stepper-item :value="4" title="去目标页排程/完成" />
+        <v-stepper-item :value="3" title="确认任务" />
       </v-stepper-header>
 
       <v-stepper-window>
@@ -486,71 +445,118 @@ onBeforeUnmount(() => {
         </v-stepper-window-item>
 
         <v-stepper-window-item :value="2">
-          <v-card class="pa-4" elevation="0">
-            <div class="text-subtitle-1 font-weight-semibold mb-2">添加新目标</div>
-            <v-textarea v-model="goalText" label="例如：学习分布式系统" variant="outlined" rows="3" auto-grow />
-            <v-text-field v-model="topic" label="资源主题（用于推荐）" variant="outlined" />
-            <div class="d-flex justify-end">
-              <v-btn color="primary" :loading="busy" @click="createGoalByAi">提交目标并拆解</v-btn>
+          <v-card class="pa-8" elevation="0">
+            <!-- Header with icon -->
+            <div class="text-center mb-6">
+              <v-icon icon="mdi-target" size="48" color="primary" class="mb-3" style="opacity:0.6" />
+              <div class="text-h6 font-weight-bold mb-2">添加新目标</div>
+              <div class="text-body-1 text-medium-emphasis" style="max-width:480px;margin:0 auto">
+                描述你想学习的内容，AI 将自动拆解为可执行的子任务，并从资源库匹配学习资料
+              </div>
+            </div>
+
+            <!-- Form area -->
+            <div style="max-width: 640px; margin: 0 auto;">
+              <v-textarea
+                v-model="goalText"
+                label="目标描述"
+                hint="尽量具体，例如：「两个月内掌握分布式系统核心概念，能独立设计一个分布式 KV 存储」"
+                persistent-hint
+                variant="outlined"
+                rows="4"
+                auto-grow
+                class="mb-4"
+              />
+
+
+              <v-alert type="info" variant="tonal" class="mb-6">
+                <div>
+                  <div class="font-weight-medium text-body-2">提交后会发生什么？</div>
+                  <div class="text-caption mt-1">AI 在后台拆解任务，进度显示在右上角浮动面板，完成后自动刷新本页。你可以先去写随笔或浏览其他页面。</div>
+                </div>
+              </v-alert>
+
+              <div class="d-flex justify-space-between align-center">
+                <v-btn variant="text" size="small" prepend-icon="mdi-arrow-left" @click="step = 1">上一步</v-btn>
+                <v-btn color="primary" size="large" :loading="busy" :disabled="!goalText.trim()" @click="createGoalByAi">
+                  <v-icon icon="mdi-brain" size="20" class="mr-1" />提交目标并拆解
+                </v-btn>
+              </div>
             </div>
           </v-card>
         </v-stepper-window-item>
 
         <v-stepper-window-item :value="3">
           <v-card class="pa-4" elevation="0">
-            <v-alert v-if="tasksPolling" type="info" variant="tonal" class="mb-3">
-              {{ tasksPollingMessage || '任务拆解进行中…' }}
-            </v-alert>
-            <v-alert v-else-if="!tasks?.length" type="info" variant="tonal" class="mb-3">暂无待办任务，稍后刷新重试</v-alert>
-            <div v-else class="sp-scroll">
-              <div class="sp-scroll-header">
+            <!-- Loading state: tasks not ready yet, DecomposePanel shows progress -->
+            <template v-if="tasksLoading && !hasRealTasks(tasks)">
+              <v-alert type="info" variant="tonal" class="mb-4">
                 <div class="d-flex align-center">
-                  <div class="text-subtitle-1 font-weight-semibold">任务列表</div>
-                  <v-btn variant="tonal" class="mr-2" :disabled="!currentGoalId" @click="acceptTasks">满意</v-btn>
-                  <v-btn variant="tonal" color="warning" class="mr-2" :disabled="!currentGoalId" @click="feedbackOpen = true">不满意</v-btn>
-                  <v-btn variant="tonal" class="mr-2" :loading="busy" @click="refreshAll">刷新</v-btn>
-                  <v-btn color="primary" @click="finishWizardAndGo('/goals')">去目标页排程</v-btn>
+                  <v-progress-circular indeterminate size="16" width="2" class="mr-3" />
+                  <div>
+                    <div class="font-weight-medium">AI 正在拆解任务</div>
+                    <div class="text-caption mt-1">进度见右上角浮动面板，完成后自动刷新本页</div>
+                  </div>
                 </div>
-                <div class="text-caption mt-1" style="opacity:0.75">
-                  当前目标：{{ currentGoalTitle || '-' }}（ID {{ currentGoalId || '-' }}）｜当前显示 {{ displayTasks.length }} / {{ tasks.length }}（仅展示前 80 条）
-                </div>
+              </v-alert>
+              <div class="text-center text-body-2 text-medium-emphasis mb-3">
+                目标「{{ currentGoalTitle || goalText }}」已提交，可以先做别的
               </div>
-              <v-list density="comfortable">
-                <v-list-item v-for="t in displayTasks" :key="t.id" :title="t.title" :subtitle="t.description" />
-              </v-list>
-            </div>
-            <div v-if="tasksPolling || !tasks?.length" class="d-flex flex-wrap justify-end mt-3" style="gap:8px">
-              <v-btn variant="tonal" @click="router.push('/journals')">去写随笔</v-btn>
-              <v-btn variant="tonal" @click="stopTasksPolling(); loadGoalTasks(currentGoalId)">停止等待</v-btn>
-              <v-btn variant="tonal" :loading="busy" @click="refreshAll(); pollTasksUntilReady(currentGoalId)">刷新并轮询</v-btn>
-              <v-btn v-if="currentGoalId" color="primary" @click="finishWizardAndGo('/goals')">去目标页</v-btn>
-            </div>
-          </v-card>
-        </v-stepper-window-item>
+              <div class="d-flex flex-wrap justify-center" style="gap:8px">
+                <v-btn variant="tonal" prepend-icon="mdi-book-open-page-variant" @click="router.push('/journals')">去写随笔</v-btn>
+                <v-btn variant="tonal" prepend-icon="mdi-target" @click="finishWizardAndGo('/goals')">去目标页</v-btn>
+                <v-btn variant="tonal" :loading="busy" @click="loadGoalTasks(currentGoalId).then(() => { if (hasRealTasks(tasks)) tasksLoading = false })">
+                  <v-icon icon="mdi-refresh" size="18" class="mr-1" />手动刷新
+                </v-btn>
+              </div>
+            </template>
 
-        <v-stepper-window-item :value="4">
-          <v-row>
-            <v-col cols="12" md="6">
-              <v-card class="pa-4" elevation="0">
-                <div class="text-subtitle-1 font-weight-semibold mb-2">排程</div>
-                <v-alert type="info" variant="tonal" class="mb-3">
-                  课表提交统一在本页完成。智能排程统一在「目标」页生成（异步执行，完成后会通知）。
-                </v-alert>
-                <div class="d-flex justify-end">
-                  <v-btn variant="tonal" class="mr-2" @click="finishWizardAndGo('/goals')">去目标页</v-btn>
-                  <v-btn variant="tonal" @click="finishWizardAndGo('/schedule')">查看日程</v-btn>
+            <!-- Empty / error state: not loading but no tasks -->
+            <template v-else-if="!hasRealTasks(tasks)">
+              <v-alert type="warning" variant="tonal" class="mb-3">
+                任务尚未生成。可能是后台处理较慢，或目标描述不够具体。
+              </v-alert>
+              <div class="d-flex flex-wrap justify-center" style="gap:8px">
+                <v-btn variant="tonal" @click="router.push('/journals')">去写随笔</v-btn>
+                <v-btn variant="tonal" :loading="busy" @click="loadGoalTasks(currentGoalId)">刷新</v-btn>
+                <v-btn variant="tonal" color="warning" @click="feedbackOpen = true">改进目标描述</v-btn>
+                <v-btn v-if="currentGoalId" color="primary" @click="finishWizardAndGo('/goals')">去目标页</v-btn>
+              </div>
+            </template>
+
+            <!-- Tasks ready -->
+            <template v-else>
+              <div class="sp-scroll">
+                <div class="sp-scroll-header">
+                  <div class="d-flex align-center flex-wrap ga-2">
+                    <div class="text-subtitle-1 font-weight-semibold">任务列表</div>
+                    <v-spacer />
+                    <v-btn variant="tonal" size="small" color="success" :disabled="!currentGoalId || tasksAccepted" @click="acceptTasks">
+                      <v-icon :icon="tasksAccepted ? 'mdi-check-circle' : 'mdi-check'" size="16" class="mr-1" />{{ tasksAccepted ? '已确认' : '满意' }}
+                    </v-btn>
+                    <v-btn variant="tonal" size="small" color="warning" :disabled="!currentGoalId" @click="feedbackOpen = true">
+                      <v-icon icon="mdi-pencil" size="16" class="mr-1" />不满意
+                    </v-btn>
+                    <v-btn variant="tonal" size="small" :loading="busy" @click="refreshAll">
+                      <v-icon icon="mdi-refresh" size="16" class="mr-1" />刷新
+                    </v-btn>
+                  </div>
+                  <div class="text-caption mt-1" style="opacity:0.75">
+                    当前目标：{{ currentGoalTitle || '-' }} ｜ 共 {{ tasks.length }} 个任务（展示前 {{ displayTasks.length }} 条）
+                  </div>
                 </div>
-              </v-card>
-            </v-col>
-            <v-col cols="12" md="6">
-              <v-card class="pa-4" elevation="0">
-                <div class="text-subtitle-1 font-weight-semibold mb-2">完成</div>
-                <div class="d-flex justify-end">
-                  <v-btn color="primary" @click="finishWizard">完成</v-btn>
-                </div>
-              </v-card>
-            </v-col>
-          </v-row>
+                <v-list density="comfortable">
+                  <v-list-item v-for="t in displayTasks" :key="t.id" :title="t.title" :subtitle="t.description" />
+                </v-list>
+              </div>
+              <div class="d-flex flex-wrap justify-end mt-3" style="gap:8px">
+                <v-btn variant="tonal" @click="finishWizard">回到首页</v-btn>
+                <v-btn color="primary" @click="finishWizardAndGo('/goals')">
+                  <v-icon icon="mdi-calendar-clock" size="18" class="mr-1" />去目标页排程
+                </v-btn>
+              </div>
+            </template>
+          </v-card>
         </v-stepper-window-item>
       </v-stepper-window>
     </v-stepper>

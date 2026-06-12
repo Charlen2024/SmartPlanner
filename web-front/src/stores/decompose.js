@@ -17,7 +17,6 @@ export const useDecomposeStore = defineStore('decompose', {
     phases: {},
     error: '',
     autoplayTimer: null,
-    dismissTimer: null,
     stageTimers: [],
   }),
   getters: {
@@ -74,12 +73,6 @@ export const useDecomposeStore = defineStore('decompose', {
       this.stageTimers = []
     },
 
-    advancePhase(key) {
-      for (const p of PHASES) {
-        if (p.key === key) { this.phases[key] = 'active'; break }
-        if (this.phases[p.key] === 'active') this.phases[p.key] = 'done'
-      }
-    },
     completePhase(key) {
       this.phases[key] = 'done'
       const idx = PHASES.findIndex(p => p.key === key)
@@ -115,18 +108,13 @@ export const useDecomposeStore = defineStore('decompose', {
         if (this.phases[key] === 'pending') this.phases[key] = 'done'
       }
       this.phases.done = 'done'
-      if (this.dismissTimer) clearTimeout(this.dismissTimer)
-      this.dismissTimer = setTimeout(() => this.dismiss(), 8000)
     },
     complete() {
       if (this.autoplayTimer) { clearInterval(this.autoplayTimer); this.autoplayTimer = null }
       this.tasks.forEach(t => { t.revealed = true })
       for (const p of PHASES) this.phases[p.key] = 'done'
-      if (this.dismissTimer) clearTimeout(this.dismissTimer)
-      this.dismissTimer = setTimeout(() => { this.dismiss() }, 5000)
     },
     dismiss() {
-      if (this.dismissTimer) { clearTimeout(this.dismissTimer); this.dismissTimer = null }
       this._reset()
     },
     _reset() {

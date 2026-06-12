@@ -10,6 +10,10 @@ server:
 spring:
   application:
     name: resource-search
+  boot:
+    admin:
+      client:
+        url: http://admin-server:9090
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/sp_resource?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true}
     username: root
@@ -35,6 +39,9 @@ spring:
           model: text-embedding-v2
 
 smartplanner:
+  http:
+    proxy-host: ${SMARTPLANNER_HTTP_PROXY_HOST:}
+    proxy-port: ${SMARTPLANNER_HTTP_PROXY_PORT:0}
   ai:
     rag-timeout-seconds: 45
   search:
@@ -50,7 +57,7 @@ smartplanner:
       interval-ms: 21600000
       per-topic-limit: 8
       initial-delay-ms: 120000
-      query-suffixes: "教程,入门,基础"
+      query-suffixes: "教程,入门,基础,实战,考试,备考,面试,项目"
 
 mybatis-plus:
   configuration:

@@ -9,6 +9,7 @@ import com.chao.common.client.ResourceClient;
 import com.chao.common.client.ScheduleClient;
 import com.chao.common.dto.*;
 import com.chao.common.util.WeatherClient;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,6 +38,7 @@ public class SmartPlannerTools {
     private final VectorStore vectorStore;
     private final WeatherClient weatherClient;
     private final AgentRagIndexer agentRagIndexer;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public SmartPlannerTools(
             GoalClient goalClient,
@@ -371,11 +373,28 @@ public class SmartPlannerTools {
     @Tool(description = "查询指定城市的实时天气。返回温度、天气状况、体感温度、湿度、风速等信息。若不指定城市，会自动使用用户在仪表盘选择的城市。可查询中文城市名（如：北京、上海、广州）或英文城市名。")
     public Map<String, Object> getWeather(
             @ToolParam(description = "城市名称，中文或英文，例如：深圳、北京、Shanghai。留空则使用用户保存的城市", required = false) String location) {
-        String loc = (location != null && !location.isBlank()) ? location.trim() : getUserSavedLocation();
-        if (loc.isBlank()) loc = "Shenzhen";
-        WeatherData wd = weatherClient.fetch(loc);
+        WeatherData wd;
+        String displayLocation;
+
+        if (location != null && !location.isBlank()) {
+            // User specified a city — use it directly
+            displayLocation = location.trim();
+            wd = weatherClient.fetch(displayLocation);
+        } else {
+            // Try Redis-cached coordinates first, fall back to name
+            WeatherLocInfo wli = getUserSavedLocationInfo();
+            if (wli.hasCoords()) {
+                wd = weatherClient.fetch(wli.lat, wli.lon);
+                displayLocation = !wli.name.isBlank() ? wli.name : wd.getLocation();
+            } else {
+                String loc = !wli.name.isBlank() ? wli.name : "Shenzhen";
+                wd = weatherClient.fetch(loc);
+                displayLocation = loc;
+            }
+        }
+
         Map<String, Object> out = new HashMap<>();
-        out.put("location", loc);
+        out.put("location", displayLocation);
         out.put("temperature_C", wd.getTemperature());
         out.put("feelsLike_C", wd.getFeelsLike());
         out.put("humidity", wd.getHumidity());
@@ -470,16 +489,41 @@ public class SmartPlannerTools {
         return out;
     }
 
-    private String getUserSavedLocation() {
+    private record WeatherLocInfo(Double lat, Double lon, String name) {
+        boolean hasCoords() { return lat != null && lon != null; }
+    }
+
+    private WeatherLocInfo getUserSavedLocationInfo() {
         try {
             Long userId = AgentUserContext.get();
-            if (userId == null) return "";
+            if (userId == null) return new WeatherLocInfo(null, null, "");
             if (redissonClient != null) {
-                String loc = String.valueOf(redissonClient.getBucket("sp:weather:loc:" + userId).get());
-                return loc != null && !"null".equals(loc) ? loc.trim() : "";
+                String raw = String.valueOf(redissonClient.getBucket("sp:weather:loc:" + userId).get());
+                if (raw == null || "null".equals(raw)) return new WeatherLocInfo(null, null, "");
+                if (raw.startsWith("{")) {
+                    Map m = objectMapper.readValue(raw, Map.class);
+                    Double lat = toDouble(m.get("lat"));
+                    Double lon = toDouble(m.get("lon"));
+                    String name = String.valueOf(m.getOrDefault("name", ""));
+                    return new WeatherLocInfo(lat, lon, "null".equals(name) ? "" : name.trim());
+                }
+                // Legacy: plain city name
+                return new WeatherLocInfo(null, null, raw.trim());
             }
         } catch (Exception ignored) {}
-        return "";
+        return new WeatherLocInfo(null, null, "");
+    }
+
+    private Double toDouble(Object v) {
+        if (v instanceof Number n) return n.doubleValue();
+        if (v instanceof String s) {
+            try { return Double.parseDouble(s); } catch (NumberFormatException ignored) {}
+        }
+        return null;
+    }
+
+    private String getUserSavedLocation() {
+        return getUserSavedLocationInfo().name;
     }
 
     private Long requireUserId() {

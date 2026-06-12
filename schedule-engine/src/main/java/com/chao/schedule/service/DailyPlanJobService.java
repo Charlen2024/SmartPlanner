@@ -14,9 +14,6 @@ import lombok.extern.slf4j.Slf4j;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.*;
-import java.util.stream.Collectors;
-import com.chao.common.client.ResourceClient;
-import com.chao.common.dto.ResourceAdviceJobStartRequest;
 import java.util.UUID;
 import com.chao.common.config.RabbitMqConfig;
 import com.chao.common.dto.NotificationMessage;
@@ -32,14 +29,12 @@ public class DailyPlanJobService {
     private final ScheduleService scheduleService;
     private final Executor executor;
     private final RabbitTemplate rabbitTemplate;
-    private final ResourceClient resourceClient;
     private final Map<String, JobState> jobs = new ConcurrentHashMap<>();
 
-    public DailyPlanJobService(ScheduleService scheduleService, @Qualifier("applicationTaskExecutor") Executor executor, RabbitTemplate rabbitTemplate, ResourceClient resourceClient) {
+    public DailyPlanJobService(ScheduleService scheduleService, @Qualifier("applicationTaskExecutor") Executor executor, RabbitTemplate rabbitTemplate) {
         this.scheduleService = scheduleService;
         this.executor = executor;
         this.rabbitTemplate = rabbitTemplate;
-        this.resourceClient = resourceClient;
     }
 
     public DailyPlanJobStartResponse start(Long userId, DailyPlanJobStartRequest request) {
@@ -101,7 +96,6 @@ public class DailyPlanJobService {
                 });
             update(state, "DONE", "DONE", 100, "已完成排程并写入日程");
             state.result = resp;
-            triggerResourceAdviceForSchedules(userId, resp);
             // Send SCHEDULE_DONE with scheduling params for the frontend panel
             int scheduleCount = resp != null && resp.getSchedules() != null ? resp.getSchedules().size() : 0;
             SchedulePreferenceDto pref = request != null ? scheduleService.resolvePreference(request.getPreference()) : scheduleService.resolvePreference(null);
@@ -136,33 +130,6 @@ public class DailyPlanJobService {
             rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, notif);
         } catch (Exception e) {
             log.warn("Schedule progress notification FAILED: userId={}, type={}, err={}", userId, type, e.getMessage());
-        }
-    }
-
-    private void triggerResourceAdviceForSchedules(Long userId, DailyPlanCommitResponse resp) {
-        if (resp == null || resp.getSchedules() == null || resp.getSchedules().isEmpty()) {
-            log.info("Schedule done, no tasks for advice: userId={}", userId);
-            return;
-        }
-        try {
-            Set<String> topics = resp.getSchedules().stream()
-                    .filter(s -> s.getTaskTitle() != null && !s.getTaskTitle().isBlank())
-                    .map(s -> s.getTaskTitle().trim())
-                    .limit(5)
-                    .collect(Collectors.toCollection(LinkedHashSet::new));
-            if (topics.isEmpty()) return;
-            log.info("Schedule done, auto-trigger RAG: userId={}, topics={}", userId, topics);
-            for (String topic : topics) {
-                try {
-                    ResourceAdviceJobStartRequest req = new ResourceAdviceJobStartRequest();
-                    req.setTopic(topic);
-                    resourceClient.startResourceAdviceJob(userId, req);
-                } catch (Exception e) {
-                    log.warn("Auto advice trigger FAILED (resource-search not running?): userId={}, topic={}, err={}", userId, topic, e.getMessage());
-                }
-            }
-        } catch (Exception e) {
-            log.warn("Failed to extract schedule topics: userId={}, err={}", userId, e.getMessage());
         }
     }
 

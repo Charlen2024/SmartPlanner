@@ -1,6 +1,6 @@
 package com.chao.resource.actuator;
 
-import com.chao.resource.service.ResourceService;
+import com.chao.resource.service.BilibiliCrawlerService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
@@ -19,23 +19,23 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class CrawlerEndpoint {
 
-    private final ResourceService resourceService;
+    private final BilibiliCrawlerService bilibiliCrawlerService;
 
     @ReadOperation
     public Map<String, Object> status() {
         Map<String, Object> m = new LinkedHashMap<>();
-        m.put("enabled", resourceService.isBilibiliCrawlerEnabled());
-        m.put("running", resourceService.isCrawlerRunning());
-        m.put("paused", resourceService.isCrawlerPaused());
-        m.put("totalCrawled", resourceService.getTotalCrawled());
-        m.put("lastRunTopicsCount", resourceService.getLastRunTopicsCount());
-        m.put("lastRunNewCount", resourceService.getLastRunNewCount());
-        m.put("consecutiveFailures", resourceService.getConsecutiveFailures());
-        m.put("consecutiveZeroNew", resourceService.getConsecutiveZeroNew());
-        m.put("intervalMs", resourceService.getBilibiliCrawlerIntervalMs());
-        m.put("topicDelayMs", resourceService.getBilibiliCrawlerTopicDelayMs());
-        m.put("perTopicLimit", resourceService.getBilibiliCrawlerPerTopicLimit());
-        long t = resourceService.getLastRunTime();
+        m.put("enabled", bilibiliCrawlerService.isBilibiliCrawlerEnabled());
+        m.put("running", bilibiliCrawlerService.isCrawlerRunning());
+        m.put("paused", bilibiliCrawlerService.isCrawlerPaused());
+        m.put("totalCrawled", bilibiliCrawlerService.getTotalCrawled());
+        m.put("lastRunTopicsCount", bilibiliCrawlerService.getLastRunTopicsCount());
+        m.put("lastRunNewCount", bilibiliCrawlerService.getLastRunNewCount());
+        m.put("consecutiveFailures", bilibiliCrawlerService.getConsecutiveFailures());
+        m.put("consecutiveZeroNew", bilibiliCrawlerService.getConsecutiveZeroNew());
+        m.put("intervalMs", bilibiliCrawlerService.getBilibiliCrawlerIntervalMs());
+        m.put("topicDelayMs", bilibiliCrawlerService.getBilibiliCrawlerTopicDelayMs());
+        m.put("perTopicLimit", bilibiliCrawlerService.getBilibiliCrawlerPerTopicLimit());
+        long t = bilibiliCrawlerService.getLastRunTime();
         if (t > 0) {
             m.put("lastRunTime", DateTimeFormatter.ISO_LOCAL_DATE_TIME
                     .withZone(ZoneId.systemDefault())
@@ -49,17 +49,17 @@ public class CrawlerEndpoint {
     @WriteOperation
     public Map<String, Object> trigger() {
         Map<String, Object> m = new LinkedHashMap<>();
-        if (!resourceService.isBilibiliCrawlerEnabled()) {
+        if (!bilibiliCrawlerService.isBilibiliCrawlerEnabled()) {
             m.put("success", false);
             m.put("message", "Crawler is disabled");
             return m;
         }
-        if (resourceService.isCrawlerRunning()) {
+        if (bilibiliCrawlerService.isCrawlerRunning()) {
             m.put("success", false);
             m.put("message", "Crawler is already running");
             return m;
         }
-        new Thread(() -> resourceService.scheduledBilibiliCrawl()).start();
+        new Thread(() -> bilibiliCrawlerService.scheduledBilibiliCrawl()).start();
         m.put("success", true);
         m.put("message", "Crawler triggered");
         return m;
@@ -69,11 +69,11 @@ public class CrawlerEndpoint {
     public Map<String, Object> toggle(@Selector String action) {
         Map<String, Object> m = new LinkedHashMap<>();
         if ("pause".equalsIgnoreCase(action)) {
-            resourceService.pauseCrawler();
+            bilibiliCrawlerService.pauseCrawler();
             m.put("success", true);
             m.put("message", "Crawler paused");
         } else if ("resume".equalsIgnoreCase(action)) {
-            resourceService.resumeCrawler();
+            bilibiliCrawlerService.resumeCrawler();
             m.put("success", true);
             m.put("message", "Crawler resumed");
         } else {

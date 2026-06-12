@@ -16,8 +16,8 @@ SmartPlanner 是一个面向个人学习场景的微服务应用：从“目标 
 - 5. LLM 接入原理（DashScope/Spring AI Alibaba、超时与重试）
 - 6. 目标拆解（goal-service：AI 拆解、幂等、降级任务）
 - 7. 智能排程（schedule-engine：空闲时间、排程、候选方案、日计划 job）
-- 8. 资源检索与 RAG（resource-search：ES 检索 + LLM 建议 + 爬虫；user-service：RedisStack 向量检索 + task 推荐 + Agent 复盘）
-- 9. 打卡与画像（punch-service + user-service：习惯/洞察/画像）
+- 8. 资源检索与 RAG（resource-search：ES 检索 + LLM 建议 + 爬虫；agent-service：RedisStack 向量检索 + Agent 复盘 + 用户画像分析）
+- 9. 打卡与画像（punch-service + user-service + agent-service：习惯/洞察/画像/AI分析）
 - 10. 通知系统（RabbitMQ + SSE）
 - 11. 运行与部署（Docker Compose / 本地开发）
 - 12. API 使用手册（curl 示例）
@@ -66,6 +66,7 @@ SmartPlanner 是一个面向个人学习场景的微服务应用：从“目标 
 | RabbitMQ | 5672 / 15672 | 异步任务与通知 |
 | Elasticsearch | 9201 | 资源检索索引（容器内 9200 映射到宿主 9201） |
 | Adminer | 8085 | 轻量数据库管理（~500KB 单文件，类 phpMyAdmin） |
+| B站代理 | 18888 | `bilibili_proxy.py`，宿主机运行，转发 B站 API 请求绕过 Docker IP 限制 |
 ### 2.3 架构拓扑图
 
 ```mermaid
@@ -240,7 +241,7 @@ web-front -> gateway-service (/api/**) -> user-service (/api/user/**)
 - `SPRING_AI_DASHSCOPE_READ_TIMEOUT=180`：HTTP read-timeout
 - `SPRING_AI_RETRY_MAX_ATTEMPTS=1`：关闭重试放大等待
 - `SMARTPLANNER_AI_SCHEDULE_TIMEOUT_SECONDS=170`：排程业务层 AI 超时（schedule-engine）
-- `SMARTPLANNER_AI_ADVICE_TIMEOUT_SECONDS`：资源建议生成超时（resource-search，默认 90）
+- `SMARTPLANNER_AI_ADVICE_TIMEOUT_SECONDS`：资源建议生成超时（resource-search，默认 120）
 
 ### 5.3 超时的分层（你排查 timeout 时要看哪一层）
 
@@ -305,7 +306,7 @@ weekNumber = floor(daysBetween / 7) + 1
 
 ### 7.2 智能排程（统一在「目标」页发起）
 
-排程算法由 AI 驱动（DashScope），结合任务优先级（priority）、预估耗时（estimatedMinutes）以及用户画像数据（userProfile）。默认节奏为 45 分钟学习 + 10 分钟休息、每天深度任务（≥60min）不超过 3 个、总学习时长不超过 240 分钟。当用户有足够打卡数据后，系统会自动根据 `procrastinationIndex`、`focusDurationAvg` 等指标动态调整这些参数（详见 9.5 节）。AI 不可用时自动降级为规则排程（优先级降序 + 耗时降序贪心填充，规则排程同样感知用户画像偏好）。
+排程算法由 AI 驱动（DashScope），结合任务优先级（priority）、预估耗时（estimatedMinutes）以及用户画像数据（userProfile）。默认节奏为 45 分钟学习 + 10 分钟休息、每天深度任务（≥60min）不超过 3 个、总学习时长不超过 240 分钟。当用户有足够打卡数据后，系统会根据 `procrastinationIndex`、`focusDurationAvg`、`completionRate` 等指标动态调整这些参数（详见 9.5 节）。AI 不可用时自动降级为规则排程（优先级降序 + 耗时降序贪心填充，规则排程同样感知用户画像偏好）。
 
 - 推荐：`POST /api/user/schedule/daily-plan/jobs`：以 job 形式启动排程（支持指定 goalId/taskIds），完成后通过 SSE 通知
 - 结果：`GET /api/user/schedule/task-schedules?from=&to=`：查询排程结果
@@ -343,15 +344,20 @@ Elasticsearch：kNN 向量检索（`text-embedding-v2`，1536维）+ multiMatch 
 - 种子主题：18 个（Java/Spring Boot/Python/Vue/数据结构/算法/计算机网络/操作系统/数据库/机器学习/前端/Linux/Go/Rust/分布式/微服务/设计模式/计算机组成原理）
 - 动态主题：从已有资源和用户目标中自动扩展
 - 每主题抓取：8 条结果（可配 `per-topic-limit`），含 UP主、播放量、时长、简介摘要
-- 多查询词扩展：CJK 主题自动拼接后缀（`教程`/`入门`/`基础`），多个查询词独立请求 B站 API（间隔 400ms），扩充候选池后统一质量过滤
+- 多查询词扩展：CJK 主题自动拼接后缀（`教程`/`入门`/`基础`/`实战`/`考试`/`备考`/`面试`/`项目`），多个查询词独立请求 B站 API（间隔 400ms），扩充候选池后统一质量过滤
 - 主题间延迟：800ms（可配 `topic-delay-ms`），避免被 B 站限流
 - 去重：URL 归一化 + DB 已有判断
 - 三层质量过滤：
   - **标题门禁**（`isValidTitle`）：过滤纯哈希值（`HEX_HASH` 32位+）、哈希后缀（`_16位hex`）、纯数字、% 开头、无 CJK 的过长英文标题
-  - **内容相关性**（`isContentRelevantToTopic`）：bigram 相似度 + CJK 字符匹配，中文阈值 0.06、非中文阈值 0.10
+  - **内容相关性**（`isContentRelevantToTopic`）：bigram 相似度 + CJK 字符匹配，中文阈值 0.04、非中文阈值 0.10；短 CJK 主题（≤4字）字符重叠 ≥50% 也放行
   - **入库写 embedding**：仅通过质量过滤的资源才写入 DB 并生成 1536 维向量存入 ES
 - 统计追踪：lastRunTime / lastRunTopicsCount / lastRunNewCount / totalCrawled / consecutiveFailures / consecutiveZeroNew
 - 实现入口：`ResourceService.scheduledBilibiliCrawl()`
+- **HTTP 代理**：B站 API 限制 Docker 容器 IP，通过宿主机 `bilibili_proxy.py`（`ThreadingTCPServer`，端口 18888）转发请求。`resource-search` 通过 `SMARTPLANNER_HTTP_PROXY_HOST`/`SMARTPLANNER_HTTP_PROXY_PORT` 环境变量配置代理地址（默认 `host.docker.internal:18888`），`RestTemplate.exchange(URI.create(url))` 使用 `URI.create()` 避免 `UriTemplate` 对已编码 URL 的二次编码
+- **已知限制**：
+  - 英文主题（Java/Python/Go 等）无后缀扩展，仅 1 个基础 query，候选量远低于中文主题
+  - `scrapeBilibiliWebSearch()` 网页搜索降级抓取始终返回 0（B站搜索页需要 cookie）
+  - 热门主题增量收益递减：多次爬取后重复率 90%+，B站热门排行变化缓慢
 
 **SBA 爬虫管理（Actuator 端点）**：
 
@@ -461,7 +467,8 @@ agent-service 使用 Spring AI 的 `RedisVectorStore`（DashScope embedding）�
 
 **公共工具**
 
-- `VectorStoreUtils`（`user-service/.../util/VectorStoreUtils.java`）：`addDocsInBatches(vs, docs, batchSize)` 分批写入 + `deleteByUserId(vs, userId)` 按 userId 清理
+- `VectorStoreUtils`（`agent-service/.../util/VectorStoreUtils.java`）：`addDocsInBatches(vs, docs, batchSize)` 分批写入 + `deleteByUserId(vs, userId)` 按 userId 清理
+- `AgentAiConfig`（`agent-service/.../config/AgentAiConfig.java`）：启动时通过 Jedis `ftCreate()` 手动创建 Redis FT 索引完整 Schema——1 个 TEXT（`$.content`）+ 6 个 TAG（`userId`、`type`、`goalId`、`taskId`、`journalId`、`punchId`）+ 1 个 VECTOR（`$.embedding`，HNSW/1536维/FLOAT32/COSINE）。`RedisVectorStore` 设置 `initializeSchema(false)` 避免覆盖已有索引。所有元数据 ID 字段统一 `String.valueOf()` 转换，确保 TAG 字段兼容（Redis TAG 仅接受字符串，Long/Integer 数字类型会导致 "Invalid JSON type" 错误）
 
 ### 8.7 user-service：任务 → 课程资源推荐（在线检索 + 缓存 + 兜底）
 
@@ -562,14 +569,16 @@ AgentChatService (chat / chatStream / buildAgent)
 - `GET /api/punch/habits`：读取习惯画像（morningPersonScore、focusDurationAvg、procrastinationIndex）
 - `PUT /api/punch/habits`：更新习惯画像字段（由画像分析流程调用）
 
-### 9.2 画像与洞察（user-service）
+### 9.2 画像与洞察（user-service → agent-service）
 
-见 [InfoController.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/user-service/src/main/java/com/chao/user/controller/InfoController.java)：
+user-service 的 `InfoController` 负责习惯指标计算与接口聚合，AI 画像分析（tips + recommendation 生成）委托给 agent-service 的 `UserPortraitAiService`，通过 Feign（`AgentPortraitClient`）调用。agent-service 的画像分析在原有打卡/排程数据基础上，增加了 **RAG 向量检索随笔片段**：从 Redis 向量库中检索用户近期随笔（过滤 `userId == X AND type == journal`），提取情绪（mood）和创建时间（createdAt），作为 AI 分析的上下文，使生成的学习建议更加个性化。
+
+见 [InfoController.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/user-service/src/main/java/com/chao/user/controller/InfoController.java) 与 [UserPortraitAiService.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/agent-service/src/main/java/com/chao/agent/service/UserPortraitAiService.java)：
 
 - `GET  /api/user/insights`：近 7 天洞察（准时率、平均延迟、完成率等）
 - `GET  /api/user/portrait`：画像汇总（habits + insights + recommendation + tips）。当画像数据过期/为空时会自动触发一次 AI 分析来补齐建议与推荐参数。
 - `POST /api/user/portrait/recompute`：重新计算画像（强制走 AI 分析，返回 recommendation + tips，并回写 habits 的画像字段）。响应新增 `computation` 字段（Map），包含 8 项指标的计算明细（公式、输入值、结果），前端"计算明细"面板可直接渲染，便于用户理解每项指标如何得出
-- `GET  /api/user/weather?location=城市名`：天气查询（wttr.in，支持中文/英文城市名；若不传 location 则使用用户保存的城市偏好）。响应使用 `WttrResponse` DTO 反序列化 wttr.in JSON，提取温度/体感温度/风速/湿度/天气描述，英文天气描述自动翻译为中文。前端仪表盘城市选择器通过 `PUT /api/user/weather-location?location=城市名` 保存城市到 Redis（缓存 365 天），Agent 天气 Tool 和仪表盘天气卡片均自动读取
+- `GET  /api/user/weather?location=城市名&lat=纬度&lon=经度`：天气查询（wttr.in，支持中文/英文城市名；若不传任何参数则使用用户保存在 Redis 中的坐标/城市偏好）。优先使用经纬度查询（精度更高），无坐标时回退城市名查询。响应提取温度/体感温度/风速/湿度/天气描述，英文天气描述自动翻译为中文。前端仪表盘城市选择器通过 `PUT /api/user/weather-location?location=城市名&lat=纬度&lon=经度` 保存城市+坐标到 Redis（JSON 格式 `{"lat":xx,"lon":yy,"name":"城市名"}`，TTL 365 天），Agent 天气 Tool 和仪表盘天气卡片均自动读取。**天气数据缓存**：查询结果以 `sp:weather:coord:{lat},{lon}` 或 `sp:weather:data:{location}` 为 key 缓存到 Redis（TTL 30 分钟），同一天内命中缓存直接返回；跨天后穿透到 wttr.in 拉取最新数据。前端天气卡片标题栏提供刷新按钮，可手动触发重新查询。经纬度首次浏览器 GPS 定位时自动缓存，后续不覆盖（除非用户手动切换城市）
 
 ### 9.3 习惯指标计算原理（user-service）
 
@@ -605,7 +614,7 @@ score = punchRatio × 60 + scheduleRatio × 40
 
 **方式一：画像计算触发（全量分析）**
 
-调用 `/api/user/portrait` 或 `/api/user/portrait/recompute` 时，`InfoController` 拉取近 7 天打卡记录 + 排程数据，完整计算三项指标，通过 `PunchClient.updateHabits()` 写回 `user_habits`。同时调用 `UserPortraitAiService` 让 AI 基于打卡/排程/随笔片段生成个性化建议（`recommendation` + `tips`）。
+调用 `/api/user/portrait` 或 `/api/user/portrait/recompute` 时，`InfoController` 拉取近 7 天打卡记录 + 排程数据，完整计算三项指标，通过 `PunchClient.updateHabits()` 写回 `user_habits`。同时通过 Feign 调用 agent-service 的 `UserPortraitAiService`，让 AI 基于打卡/排程数据 + **RAG 向量检索的随笔片段**（从 Redis 向量库按 `userId + type=journal` 过滤检索，topK=10）生成个性化建议（`recommendation` + `tips`）。随笔片段附带头像 mood 和 createdAt，使 AI 能感知用户的情绪状态与学习节奏。
 
 **方式二：打卡自动增量更新（轻量微调）**
 
@@ -616,7 +625,56 @@ score = punchRatio × 60 + scheduleRatio × 40
 
 ### 9.5 画像反馈排程（闭环已实现）
 
-画像系统生成的 `SchedulePreferenceDto`（`focusMinutes`、`breakMinutes`、`maxDailyMinutes`、`procrastinationIndex`）现在会**自动注入到排程请求中**，形成"分析 → 反馈排程 → 调整权重"的闭环。
+画像系统生成的 `SchedulePreferenceDto`（`focusMinutes`、`breakMinutes`、`maxDailyMinutes`、`procrastinationIndex`）会自动注入到排程请求中，形成"分析 → 反馈排程 → 调整权重"的闭环。
+
+**推荐参数模型（`PortraitComputeService.recommend()`）**
+
+排程推荐采用连续映射 + 多因子决策，替代早期三档硬切模型：
+
+**① 专注时长（focusMinutes）—— 连续映射 + 拖延罚分**
+
+```
+focusBase = clamp(round(focusAvg × 0.8 ÷ 5) × 5, 25, 90)
+
+拖延罚分：
+  procrastination > 0.6  →  −10 min
+  procrastination > 0.4  →  −5 min
+  procrastination ≤ 0.4  →  无调整
+
+focus = max(25, focusBase − penalty)
+```
+
+不再使用三档硬切（<40→30 / 40~69→45 / ≥70→60），而是根据实际平均专注时长按 0.8 比例连续映射到 25~90 分钟，边界值不再因 1 分钟之差跳变。高拖延用户自动获得更短的推荐会话。
+
+**② 休息时长（breakMinutes）—— 比例缩放**
+
+```
+break = clamp(round(focus × 0.25 ÷ 5) × 5, 5, 25)
+```
+
+休息时长随专注时长动态调整（约 25%），不再固定 10 分钟。长专注获得长休息，短专注获得短休息。
+
+**③ 每日上限（maxDailyMinutes）—— 三维决策**
+
+```
+完成率分档：
+  completionRate < 30%   →  120 min
+  completionRate < 60%   →  180 min
+  completionRate ≥ 60%   →  240 min
+
+拖延罚分（procPenalty）：
+  procrastination > 0.7  →  −60 min
+  procrastination > 0.5  →  −30 min
+  procrastination ≤ 0.5  →  无调整
+
+maxDaily = max(120, baseTier − procPenalty)
+
+新手保护：
+  streak < 2  →  cap at 150 min
+  streak ≥ 2  →  无封顶
+```
+
+上限决策综合考虑三个维度：完成率反映执行能力、拖延指数反映行为倾向、连续打卡天数提供新手保护。比早期单一的 `streak<3 || onTimeRate<0.5 → 180` 判断更细腻，不再有 streak 从 2 到 3 时上限陡增 60 分钟的悬崖效应。
 
 **数据通路**
 
@@ -744,6 +802,10 @@ SSE 连接维护：后端每 30s 发送一次 heartbeat ping 保持连接活跃�
 2) 启动
 
 ```bash
+# 先启动 B站代理（宿主机上运行，容器内 resource-search 通过它转发 B站 API 请求）
+python3 bilibili_proxy.py &
+
+# 启动所有服务
 docker compose up -d --build
 ```
 
@@ -1244,7 +1306,7 @@ curl -N -X POST "http://localhost:8088/api/agent/chat/stream" ^
 - 新建 `stores/decompose.js`（Pinia store）：管理五阶段流水线状态（intent → llm → saving → resources → done），任务列表自动逐条揭示（220ms 间隔），`onTasksGenerated()` 立即设任务数据 + 800ms/1600ms 分阶段推进动画，`onAllDone()` 取消未完成计时器并快速收尾（400ms × 2），5 秒自动消失
 - 新建 `components/DecomposePanel.vue`：玻璃拟态浮动面板（右上角 top:80px），五阶段纵向步骤条 —— pending（灰色节点）、active（主色节点 + 发光脉冲动画 + "进行中"标签）、done（绿色对勾），节点间连接线随进度变色，任务列表在生成阶段逐条从右侧滑入（TransitionGroup），完成后显示任务总数 + 关闭按钮
 - `DefaultLayout.vue`：新增 `GOAL_DECOMPOSE_STARTED`、`GOAL_DECOMPOSE_PROGRESS`、`GOAL_DECOMPOSE_SAVING` SSE 监听器，`GOAL_TASK_READY` 调用 `decompose.onAllDone()`
-- `PlanView.vue`：`createGoalByAi()` 成功后调用 `decompose.start(goalText)`
+- `PlanView.vue`：`createGoalByAi()` 成功后设置 `tasksLoading = true`，不自行调用 decompose store（SSE 事件由 DefaultLayout 统一驱动 DecomposePanel）
 - `GoalsView.vue`：`regenerateTasksForGoal()` 调用前触发 `decompose.start(goalTitle)`
 
 **Bug 修复**——后端：
@@ -1259,7 +1321,7 @@ curl -N -X POST "http://localhost:8088/api/agent/chat/stream" ^
 - 删除 `api.get('/user/dashboard')` 调用：该接口在 PlanView 中从未被读取（`dashboard.value` 仅赋值无消费）
 - Wizard 步骤从 localStorage 直接恢复（零延迟）
 - goals 列表用 `.then()` 异步加载，到达后自动填充当前 goal 和 tasks
-- `pollTasksUntilReady` 从 `await` 改为 fire-and-forget，后台轮询不阻塞页面渲染
+- `pollTasksUntilReady` 已移除，任务加载改为 watch `GOAL_TASK_READY` SSE 信号驱动，不再轮询 API
 - 跳过 `auth.fetchMe()`（`auth.me` 登录时已设置）
 
 **修改**——后端：
@@ -1282,7 +1344,7 @@ curl -N -X POST "http://localhost:8088/api/agent/chat/stream" ^
 - **kNN 反序列化修复**：ES Java Client 8.10 的 `SearchResponse<CourseResourceDocument>` 无法解码 kNN 响应（`Failed to decode response`，状态码 200）。改用 `org.elasticsearch.client.RestClient` 发送原生 kNN JSON 请求，通过 `ObjectMapper` 手动解析 `_source`，`_source` 过滤排除 embedding 字段减少传输体积
 - **标题质量门禁**（`isValidTitle`）：正则匹配纯哈希值（`HEX_HASH` 32位+）、哈希后缀（`HEX_HASH_SUFFIX` `_16位hex`）、纯数字、%开头、CJK主题下无汉字的过长英文标题
 - **多查询词扩展**（`buildSearchQueries`）：CJK 主题自动拼接后缀（`教程`/`入门`/`基础`，`bilibili.query-suffixes` 可配），多个查询词独立请求 B站 API（间隔 400ms），扩充候选池后统一质量过滤
-- **相似度阈值收紧**：CJK 0.03→0.06，非 CJK 0.08→0.10，减少误判通过
+- **相似度阈值调整**：CJK 0.04（经 0.06→0.04 两次调优），非 CJK 0.10，搭配短主题字符重叠兜底（≤4字、≥50% 重叠即放行），平衡精度与召回
 - **兜底平台仅限国内**：`defaultResources()` 和 AI prompt 移除 Google/Coursera/edX/Medium，替换为 B站/慕课网/知乎/GitHub 搜索链接
 - **每主题抓取量**：从 3 条提升至 8 条（`per-topic-limit`），配合多查询词扩展确保质量过滤后仍有足够候选
 
@@ -1293,3 +1355,391 @@ curl -N -X POST "http://localhost:8088/api/agent/chat/stream" ^
   - 内容过滤成功拦截："B3 2 6.9"、"东哥Y2JB更新"、"Odyssey JAILBREAK RELEASED"、"奥迪a6l"
 - 全链路通畅：B站 API → 多查询词 → 标题门禁 → 内容过滤 → MySQL → embedding → ES → kNN 检索 ✅
 - **已知限制**：Docker 容器 IP 访问 B站时，部分中文主题（如"数据结构"）返回的 Top 8 结果中掺杂大量哈希文件名视频，质量过滤器正确拦截了这些垃圾，但也导致该主题 0 条入库。英文字母主题（Java/Python/Go/Rust 等）不受影响，正常入库
+
+### 15.22 天气查询 Redis 缓存 + 前端刷新（2026-06-10）
+
+**问题**：每次首页加载都实时调用 wttr.in 外部 API 获取天气数据，无缓存层，增加外部依赖调用量和响应延迟。
+
+**修改**——后端（`InfoController.weather()`）：
+- 查询前先以 `sp:weather:data:{location}` 为 key 查 Redis 缓存，命中且日期为今天则直接返回，跳过外部 API 调用
+- 缓存未命中或跨天后调用 `weatherClient.fetch()` 获取实时数据，结果 JSON 序列化后写入 Redis，TTL 30 分钟
+- 外部 API 不可用时仍返回"天气服务暂不可用"，不阻塞页面
+
+**修改**——前端（`DashboardView.vue`）：
+- 天气卡片标题栏新增刷新按钮（`mdi-refresh` 图标），点击调用 `loadWeather()` 手动重新查询
+- 刷新时后端根据缓存是否过期决定走缓存还是穿透到 wttr.in
+
+### 15.32 天气经纬度缓存与查询优化（2026-06-12）
+
+**问题**：
+1. 天气显示"经纬度天气"——浏览器 GPS 定位后，`WeatherClient.fetch(lat, lon)` 在 LLM 城市名翻译失败时回退显示原始坐标字符串（如 `22.5431,114.0579`）
+2. "天气服务暂不可用"偶发——wttr.in 外部 API 网络不稳定
+3. 经纬度坐标未持久化——浏览器 GPS 坐标每次页面刷新后丢失，只能回退到城市名字符串查询（精度低）。用户关怀消息（登录关怀/Agent 工具）也只能用城市名字符串查询天气，无法使用更精确的坐标
+
+**修改**——Redis 存储格式升级：
+- `sp:weather:loc:{userId}` 从纯文本城市名（如 `深圳`）升级为 JSON 对象：`{"lat":22.5431,"lon":114.0579,"name":"深圳"}`
+- 向后兼容：读取时检测 `{` 前缀判断新旧格式，旧格式（纯文本）自动回退为 `name` 字段
+- 经纬度仅首次浏览器 GPS 定位时写入 Redis，后续自动探测不覆盖已有坐标（`trySaveCoords` 中 `lat=null` 时保留已有值）
+- TTL 365 天，用户手动选择城市时更新坐标
+
+**修改**——`WeatherClient.java`（`common/.../util/WeatherClient.java`）：
+- `fetch(double lat, double lon)`：不再预置坐标为 location 值；先尝试从 wttr.in `nearest_area` 解析地名并通过 LLM 翻译为中文；LLM 翻译失败时回退到英文原始地名（而非坐标字符串）；仅在完全无法解析时才使用坐标字符串作为兜底
+
+**修改**——`InfoController.java`（`user-service/.../controller/InfoController.java`）：
+- 新增 `WeatherLoc(Double lat, Double lon, String name)` 记录类
+- `GET /api/user/weather`：浏览器传入 lat/lon 时自动调用 `trySaveCoords()` 缓存到 Redis；仅传城市名时检查 Redis 是否有缓存坐标，有则优先用坐标查询（精度更高）
+- `PUT /api/user/weather-location`：新增可选参数 `lat`、`lon`，存储 JSON 格式到 Redis
+- `trySaveCoords(userId, lat, lon, name)`：读取已有 Redis 数据，仅在显式传入新坐标时覆盖；name 以传入值为准，未传入时保留已有值
+- `getUserWeatherLocation(userId)`：解析 Redis JSON，返回 `WeatherLoc`（含 lat/lon/name）；旧格式纯文本兼容
+
+**修改**——`NotificationController.java`（`user-service/.../controller/NotificationController.java`）：
+- 新增 `WeatherLoc` 记录类 + `ObjectMapper`
+- `getUserWeatherLocation(userId)`：解析 Redis JSON，返回含坐标的 `WeatherLoc`
+- `fetchWeatherBrief(WeatherLoc)`：有坐标时调用 `weatherClient.fetch(lat, lon)`（更精确），无坐标时回退城市名字符串查询
+- `publishLoginCare()`：用户关怀消息的天气部分现在基于 Redis 缓存的经纬度查询
+
+**修改**——`SmartPlannerTools.java`（`agent-service/.../tool/SmartPlannerTools.java`）：
+- 新增 `WeatherLocInfo` 记录类 + `ObjectMapper`
+- `getWeather()` 工具：用户未指定城市时，优先用 Redis 缓存的经纬度查询（`weatherClient.fetch(lat, lon)`），回退城市名查询
+- `getUserSavedLocationInfo()`：解析 Redis JSON 获取坐标和城市名
+- `getUserSavedLocation()`：保持返回城市名（兼容调用方），内部委托给 `getUserSavedLocationInfo().name`
+
+**修改**——前端（`DashboardView.vue`）：
+- 新增 `weatherLocationCoords` 映射表：8 个预设城市（深圳/北京/上海/广州/杭州/成都/武汉/南京）的经纬度坐标
+- `loadWeather()`：浏览器 GPS 定位成功后，自动 `PUT /api/user/weather-location` 将城市名 + 坐标持久化到 Redis
+- `selectWeatherLocation(loc)`：选择预设城市时，同时传入坐标参数（`lat`/`lon`）到天气查询和城市保存接口
+
+**数据流**：
+```
+首次访问 → 浏览器 GPS → GET /api/user/weather?lat=22.54&lon=114.06
+                      → 后端自动 PUT Redis: {"lat":22.54,"lon":114.06,"name":"深圳"}
+再次访问 → 浏览器 GPS 失败 → GET /api/user/weather?location=深圳
+                          → 后端检测 Redis 有坐标 → 用坐标查询 wttr.in（精度更高）
+用户关怀 → NotificationController → 读 Redis 坐标 → weatherClient.fetch(lat, lon)
+Agent 工具 → SmartPlannerTools → 用户未指定城市 → 读 Redis 坐标 → fetch(lat, lon)
+```
+
+### 15.23 Redis 向量库索引修复与用户隔离强化（2026-06-10）
+
+#### 15.23.1 Redis FT 索引完整 Schema 创建
+
+**问题**：agent-service 启动时 `RedisVectorStore` 的 `initializeSchema(true)` 仅创建 `content`（TEXT）和 `embedding`（VECTOR）两个字段，缺少用户隔离所需的 TAG 字段（`userId`、`type`、`goalId`、`taskId`、`journalId`、`punchId`），导致 `FilterExpressionBuilder` 按 userId/type 过滤时无对应索引字段，过滤失效。
+
+**修改**：`AgentAiConfig.vectorStore()` 中关闭 `initializeSchema(false)`，改为手动调用 Jedis `ftCreate()` 创建完整索引：
+- 索引名：`smartplanner-rag`，数据类型：`JSON`，前缀：`sp:emb:`
+- Schema：1 个 TEXT（`$.content`）+ 6 个 TAG（`userId`、`type`、`goalId`、`taskId`、`journalId`、`punchId`）+ 1 个 VECTOR（`$.embedding`，HNSW 算法，1536 维 FLOAT32，COSINE 距离，M=16，EF_CONSTRUCTION=200）
+- 索引已存在时跳过创建（幂等），避免重启覆盖已有数据
+
+**关键代码位置**：`agent-service/.../config/AgentAiConfig.java`
+
+**踩坑记录**：
+- Jedis 5.1.2 中 `IndexDataType` 是独立类 `redis.clients.jedis.search.IndexDataType`，非 `FTCreateParams` 内部类
+- `VectorAlgorithm.DistanceMetric` 和 `HNSW_Attributes` 内部类在 Jedis 5.1.2 中不存在，需用 `Map<String, Object>` 通过 `VectorField.Builder.attributes(Map)` 传入
+- HNSW 索引必须显式指定 `TYPE: FLOAT32`，否则 Redis 报 "Missing mandatory parameter"
+
+#### 15.23.2 TAG 字段兼容性修复（Numeric → String）
+
+**问题**：`AgentRagIndexer` 构建文档时，元数据中的 ID 字段（`userId`、`goalId`、`taskId` 等）以 Java `Long`/`Integer` 类型存入 `Map<String, Object>`，Redis JSON 序列化后为数字类型。但 TAG 字段仅接受字符串，导致 56 条文档写入报 "Invalid JSON type: Numeric type can represent only NUMERIC field"。
+
+**修改**：`AgentRagIndexer` 中所有元数据 put 调用统一转换为字符串：
+- `meta.put("userId", String.valueOf(userId))`
+- `meta.put("goalId", String.valueOf(g.getId()))`
+- `meta.put("taskId", String.valueOf(t.getId()))`
+- `meta.put("journalId", String.valueOf(j.getId()))`
+- `meta.put("punchId", String.valueOf(r.getId()))`
+- `onJournalCreated()` 中同样转换 journal 元数据
+
+**验证**：修改后所有 56 条文档成功索引（`percent_indexed=1`，0 失败）。
+
+#### 15.23.3 Agent Controller UTF-8 编码修复
+
+**问题**：`AgentController` 的 `chat()` 和 `chatStream()` 方法使用 `@RequestBody(required = false) String rawBody` 接收请求体，Spring MVC 的 `StringHttpMessageConverter` 默认使用 ISO-8859-1 编码，导致中文字符被解析为 U+FFFD 替换字符（乱码）。
+
+**修改**：
+- 参数类型从 `String rawBody` 改为 `Map<String, Object> body`，Jackson 的反序列化器默认使用 UTF-8，中文正常解析
+- 新增 `extractMessage(Map<String, Object> body)` 辅助方法，从 Map 中提取 `message` 字段
+- `chatStream` 中变量名从 `body` 改为 `streamBody` 避免与 `Map<String, Object> body` 冲突
+
+**代码位置**：`agent-service/.../controller/AgentController.java`
+
+#### 15.23.4 用户画像 RAG 集成
+
+**问题**：用户画像分析（`UserPortraitAiService`）仅基于打卡记录和排程数据生成建议，缺少用户随笔（journal）中反映的情绪和学习状态信息。
+
+**修改**：
+- `UserPortraitAiService` 注入 `AgentRagIndexer` 和 `ObjectProvider<VectorStore>`
+- 新增 `fetchJournalSnippets()` 方法：从向量库中检索用户随笔片段（过滤条件 `userId == X AND type == journal`，查询文本 `"学习 情绪 反思 进度"`，topK=10），提取 mood 和 createdAt 元数据拼接为上下文字符串
+- `analyze()` 方法在调用 AI 前先拉取随笔片段，注入 prompt 的"用户近期随笔片段"部分
+- `PortraitRecomputeRequest` 新增 `userId` 字段，由 `user-service` 的 `PortraitComputeService` 在调用前设置
+
+**用户隔离验证**：
+- userId=1（有打卡/随笔数据）：`Portrait RAG: userId=1, journalSnippets=3`，画像分析包含个性化建议
+- userId=2（无数据）：`Portrait RAG: userId=2, journalSnippets=0`，画像分析仅基于排程/打卡数据
+- 内部 agent 端点（无 JWT）通过 `request.userId` 字段验证隔离，拒绝无 userId 的请求（401）
+
+**代码位置**：`agent-service/.../service/UserPortraitAiService.java`
+
+### 15.24 PlanView 向导 UX 全面重构（2026-06-11）
+
+**问题**：向导页 Step 3（任务拆解）自己维护了一套 `pollTasksUntilReady`（每 2 秒轮询 REST API），和 SSE → DecomposePanel（右上角浮动进度面板）完全重复。用户看到浮层已显示进度，但 wizard 页面还在傻等轮询。Step 4 纯属信息页，无实际操作。Step 2 两个输入框间的关系不明确。
+
+**修改**——前端（`PlanView.vue`）：
+
+**移除冗余轮询，接入 SSE 事件驱动**：
+- 删除 `pollTasksUntilReady()`、`stopTasksPolling()`、`isTasksReady()` 函数及相关 ref（`tasksPolling`、`tasksPollingMessage`、`tasksPollTimer`）
+- 新增 `watch(notify.signalSeq.GOAL_TASK_READY)`：后端 SSE 推送 `GOAL_TASK_READY` 时自动调用 `loadGoalTasks()` 加载任务，检测到有效任务后解除 `tasksLoading`
+- `createGoalByAi()` 不再自行轮询，仅设置 `tasksLoading = true` + `tasks = []`，进度展示完全交给 DecomposePanel（SSE → DefaultLayout → decompose store 自动驱动）
+
+**Step 3 三重状态机**：
+| 状态 | 条件 | 展示 |
+|------|------|------|
+| 加载中 | `tasksLoading && !hasRealTasks` | 旋转进度 + "AI 正在拆解任务，进度见右上角面板" + 快捷导航（去写随笔/去目标页/手动刷新） |
+| 无任务 | `!hasRealTasks` 且不在加载 | 警告提示 + 刷新/改进目标/去目标页 |
+| 任务就绪 | `hasRealTasks` | 完整任务列表 + 满意/不满意/刷新 + 底部"回到首页"/"去目标页排程" |
+
+**Step 2 布局增强**：
+- 新增引导文字："描述你想学习的内容，AI 将自动拆解为可执行的子任务"
+- `goalText` 和 `topic` 字段各自新增 `persistent-hint` 说明推荐填写方式，区分两字段用途
+- 新增 info alert 告知提交后进度在右上角浮层显示
+- 新增"上一步"返回按钮
+- 提交按钮添加 brain 图标，语义更强
+
+**向导从 4 步缩减为 3 步**：
+- Stepper header: `导入课表 → 添加新目标 → 确认任务`
+- 原 Step 4（排程/完成）的导航合并到 Step 3 任务就绪后的操作按钮
+- 所有导航按钮统一调用 `finishWizard()`（回首页）或 `finishWizardAndGo(to)`（去目标页/日程）
+- `safeSaveWizardState` 的步数范围从 `1..4` 调整为 `1..3`
+
+**架构流程**：
+```
+用户提交目标 → 后端 SSE 事件流 → DefaultLayout → decompose store → DecomposePanel（右上浮层）
+                                                                    ↓
+                              PlanView watch GOAL_TASK_READY → 自动加载任务刷新页面
+```
+
+### 15.25 Docker Compose 启动顺序修复（2026-06-11）
+
+**问题**：`docker compose restart`（或 `up -d`）全部容器时，业务容器和基础设施容器同时启动。Redis/MySQL/RabbitMQ/Nacos 还在初始化，Spring Boot 的 Jedis/HikariCP/RabbitMQ 连接池就已经尝试建连，全部失败。之后健康检查一直复用到这些坏连接，持续报 `RedisConnectionFailureException` / `CommunicationsException`。`depends_on` 只等容器**启动**，不等服务**就绪**。
+
+**修改**——`docker-compose.yml`：
+
+**基础设施容器添加 healthcheck**：
+| 服务 | healthcheck | interval | retries | start_period |
+|------|------------|----------|---------|-------------|
+| Redis | `redis-cli ping` | 5s | 10 | 10s |
+| MySQL | `mysqladmin ping` | 5s | 15 | 20s |
+| RabbitMQ | `rabbitmq-diagnostics check_port_connectivity` | 10s | 10 | 20s |
+| Nacos | `curl /nacos/v1/console/health/readiness` | 10s | 15 | 30s |
+| Elasticsearch | `curl /_cluster/health \| grep green\|yellow` | 10s | 20 | 30s |
+
+**所有业务容器 `depends_on` 从列表式改为长语法 + `condition: service_healthy`**：
+```yaml
+# 之前（仅等容器启动）
+depends_on:
+  - nacos
+  - redis
+  - rabbitmq
+
+# 之后（等服务就绪）
+depends_on:
+  nacos:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  rabbitmq:
+    condition: service_healthy
+```
+- goal-service: 等 nacos, mysql, redis, rabbitmq 全部 healthy
+- schedule-engine: 同上
+- resource-search: 等 nacos, mysql, elasticsearch, rabbitmq 全部 healthy
+- punch-service: 等 nacos, mysql, redis, rabbitmq 全部 healthy
+- user-service: 等 nacos, mysql, rabbitmq 全部 healthy
+- agent-service: 等 nacos, redis, rabbitmq 全部 healthy
+- admin-server: 等 nacos healthy
+- gateway-service: 等 nacos, redis, rabbitmq healthy + user-service, agent-service 容器启动
+- adminer: 等 mysql healthy
+
+**启动顺序效果**：基础设施全部 healthy（30-60s）→ 业务容器并行启动 → Gateway 最后启动
+
+**踩坑——Nacos healthcheck 大小写**：Nacos 的 `/nacos/v1/console/health/readiness` 返回 `OK`（大写），初始 healthcheck 使用 `grep -q 'ok'` 大小写敏感，导致永远匹配不上，Nacos 一直处于 `(unhealthy)`，所有服务死等。修复为 `grep -qi 'ok'`（`-i` 忽略大小写）。
+**验证**：`docker exec nacos curl -s http://localhost:8848/nacos/v1/console/health/readiness` → `OK`
+
+### 15.26 前端死代码清理 + 2048 入口调整（2026-06-11）
+
+**死代码清理**——删除 7 类无引用代码：
+
+| 分类 | 清理内容 |
+|------|---------|
+| 文件 | `components/HelloWorld.vue`（脚手架模板，全项目无引用）+ `assets/hero.png`、`vite.svg`、`vue.svg` |
+| `stores/assistant.js` | `adviceText` / `chatOpen` / `toolStatus` 状态（写入后从未渲染或从未读写）；`openChat()`、`closeChat()` 方法（从未调用） |
+| `stores/decompose.js` | `advancePhase()` 方法（从未调用，流水线由 `onTasksGenerated` / `onAllDone` 驱动） |
+| `stores/notify.js` | `lastSignal` 状态（写入后从未读取） |
+| `views/ScheduleView.vue` | `updateScheduleStatus()` 函数（定义后从未被模板引用） |
+| `views/PlanView.vue` | 空 `onBeforeUnmount(() => {})` 回调及 import |
+| `layouts/DefaultLayout.vue` | 5 个无用 CSS class：`sp-menu-item`、`sp-agent-chat`、`sp-chat-input`、`sp-chat-scroll`、`sp-agent-loading` |
+
+**2048 入口调整**——从侧边栏主菜单移除，改为底部「休息一下」入口：
+- 从 `menu` 数组移除 `{ to: '/games/2048', title: '2048', icon: 'mdi-grid' }`
+- 在 `#append` 区域以分割线隔开，放置低透明度按钮（`opacity:0.55`），图标 `mdi-gamepad-variant-outline`，文字"休息一下"
+- 视觉分层：上方工作区、下方小憩区，不喧宾夺主
+
+### 15.27 排程逻辑三连修复（2026-06-11）
+
+#### 15.27.1 filterOverlaps 相邻任务误丢弃
+
+**问题**：`ScheduleService.filterOverlaps()` 使用 `!s.getStartTime().isAfter(lastEnd)` 判断重叠，将 `startTime == lastEnd`（前一个任务恰好结束后一个任务开始）的相邻任务也当作重叠丢弃。用户选择 2 个任务排程，结果只有 1 个被排入。
+
+**修改**：条件改为 `s.getStartTime().isBefore(lastEnd)`，只有真正的时间重叠（后一个任务的开始时间早于前一个任务的结束时间）才过滤，相邻任务正常保留。（`schedule-engine/.../service/ScheduleService.java:1753`）
+
+#### 15.27.2 进阶生成不应删除已有排程
+
+**问题**：`GoalService.regenerateTasks()` 在删除旧任务后，通过 Feign 调用 `scheduleClient.deleteTaskSchedulesByTaskIds()` 清理关联排程。用户点击"进阶生成"后，今天已排程的任务全部消失。
+
+**修改**：移除 `regenerateTasks()` 中的排程清理调用。排程只在删除目标时才清理，进阶生成只替换任务定义，不影响已有排程。`GoalAiWorker` 同样不执行排程清理。（`goal-service/.../service/GoalService.java`）
+
+#### 15.27.3 listTaskSchedules 孤立排程防御性过滤
+
+**问题**：`listTaskSchedules()` 在构建 `titleMap` 时，若 Feign 调用 `getTasksByIds` 失败（空指针/超时），`titleMap` 为空但后续 `.filter()` 仍然执行 `titleMap.containsKey(s.getTaskId())`，导致所有排程都被过滤掉，前端显示 `nodata`。
+
+**修改**：`.filter()` 增加防御判断——`!titleMap.isEmpty() ? titleMap.containsKey(...) : true`，当 titleMap 为空时保留所有排程（标记为"未归属任务"），不再全部丢弃。（`schedule-engine/.../service/ScheduleService.java:2209`）
+
+### 15.28 Redis 连接稳定性修复（2026-06-11）
+
+**问题**：agent-service 启动时 Redis 尚未完全就绪，`RedissonClient` 和 `JedisPooled` 无重试机制，一次连接失败即永久不可用。Spring Boot 自动配置的 `JedisConnectionFactory` 使用 `spring.data.redis.*` 前缀，但 docker-compose 只配了 `SPRING_REDIS_HOST`（对应 `spring.redis.*`），导致容器内无法连接 Redis。
+
+**修改**——`AgentAiConfig.java`：
+- `RedissonClient`：新增 `setConnectTimeout(10000)`、`setRetryAttempts(10)`、`setRetryInterval(3000)`、`setTimeout(10000)`、`setConnectionMinimumIdleSize(1)`、`setConnectionPoolSize(4)`
+- `JedisPooled`：从无配置的 `new JedisPooled(host, port)` 改为使用 `DefaultJedisClientConfig` 构建，设置 `connectionTimeoutMillis(10000)` 和 `socketTimeoutMillis(10000)`，支持密码
+- `resolveRedisHost/resolveRedisPort/resolveRedisPassword`：优先读取 `spring.data.redis.*`（Spring Boot 标准前缀），兼容 `spring.redis.*`
+
+**修改**——`docker-compose.yml`：
+- agent-service 环境变量新增 `SPRING_DATA_REDIS_HOST: redis`，确保 Spring Boot 自动配置的 `JedisConnectionFactory` 能正确连接 Redis
+
+### 15.29 Agent 随笔查询增强（2026-06-11）
+
+**问题**：Agent 的 `buildJournalPrefix()` 在系统提示词中注入随笔上下文时，直接通过 Feign 调用 `goalClient.listJournals()` 获取全部随笔。这种方式无法语义筛选——用户问"最近学习状态怎么样"时，所有随笔（包括情绪宣泄、生活琐事）都被注入，LLM 难以聚焦相关内容。
+
+**修改**——`AgentChatService.buildJournalPrefix()`：
+- 改用 RAG 混合检索：调用 `smartPlannerTools.searchPersonalData(userQuery, topK=10)` 进行语义搜索
+- 搜索结果按 `type` 分类：`journal`（随笔）和 `other`（目标/任务/课程等关联内容）
+- 随笔段附带 `createdAt` 和 `mood` 元数据，让 LLM 感知时间线和情绪变化
+- 无结果时兜底返回"用户暂无随笔记录"
+- `AgentChatService` 新增 `AgentRagIndexer` 依赖注入
+
+### 15.30 前端 SSE 信号驱动自动刷新（2026-06-11）
+
+**问题**：GoalsView 进阶生成和 ScheduleView 排程完成后，用户需要手动点击刷新按钮才能看到新数据。虽然右上角通知已弹出，但页面数据未更新。
+
+**修改**——`GoalsView.vue`：
+- **进阶生成自动刷新**：`regenerateTasksForGoal()` 调用 API 成功后设置 `regenerateWaiting = true`，不再用 `setTimeout` 盲等
+- 新增 `watch(signalSeq.GOAL_TASK_READY)`：SSE 推送任务生成完成 → 自动调用 `load()` 刷新页面 → 展开对应目标面板 → 显示"进阶任务生成完成"
+- 新增 `watch(signalSeq.GOAL_DECOMPOSE_FAILED)`：生成失败时清除等待状态
+- API 调用失败时调用 `decompose.dismiss()` 关闭动画面板
+
+**修改**——`ScheduleView.vue`：
+- 新增 `watch(signalSeq.SCHEDULE_DONE)`：SSE 推送排程完成 → 自动调用 `loadSchedules()` + `loadFree()` + `loadClasses()` 刷新全部数据
+
+**修改**——`notify.js`：
+- `signalSeq` 新增 `GOAL_DECOMPOSE_FAILED: 0` 信号键
+
+**修改**——`DefaultLayout.vue`：
+- `GOAL_DECOMPOSE_FAILED` SSE 事件处理中新增 `notify.signal('GOAL_DECOMPOSE_FAILED')`，使 GoalsView 能感知失败
+
+### 15.31 删除目标增强 + GoalsView 重构（2026-06-11）
+
+**删除目标增强**：
+- 删除目标前先查询未完成任务数（`GET /api/user/goals/{goalId}/unfinished-count`）
+- 有未完成任务时弹窗确认（显示任务数量），确认后删除；无未完成任务时直接删除
+- 新增 `deletingGoalId` ref 用于按钮 loading 状态
+
+**GoalsView 重构**：
+- 移除 `adviceMap`、`taskResources`、`loadTaskResourcesForSchedules()`、`loadTaskAdvice()`、`resourcesForTask()`、`openUrl()` 等未使用/已废弃的资源推荐代码
+- 页面组件支持 `KeepAlive` 缓存：`onActivated` 时自动刷新数据，`onDeactivated` 时清理轮询定时器
+- 排程轮询超时保护：5 分钟后自动停止轮询并提示用户手动刷新
+- 代码风格统一：单行 if/for 简化，减少不必要的花括号嵌套
+
+### 15.33 排程推荐模型升级 —— 连续映射 + 多因子决策（2026-06-12）
+
+**问题**：`PortraitComputeService.recommend()` 使用三档硬切模型：
+- 专注时长：`focusAvg < 40 → 30 | 40~69 → 45 | ≥70 → 60`（边界值差 1 分钟跳一档，且上限 60 浪费了 90+ 用户的能力）
+- 休息时长：固定 10 min，与用户实际专注能力无关
+- 每日上限：`streak < 3 || onTimeRate < 0.5 → 180, else 240`（仅两个条件，悬崖跳变 60 min；streak 2→3 那天突然多 60 分钟；拖延指数、完成率等已有指标全部浪费）
+
+**修改**——后端（`PortraitComputeService.java`）：
+
+**① 专注时长 → 连续映射 + 拖延罚分**
+
+```
+focusBase = clamp(round(focusAvg × 0.8 ÷ 5) × 5, 25, 90)
+procrastination > 0.6 → −10 min
+procrastination > 0.4 → −5 min
+focus = max(25, focusBase − penalty)
+```
+
+avg 30→25, 45→35, 60→50, 90→70, 120→90（连续过渡，无悬崖）。高拖延用户自动获得更短推荐。
+
+**② 休息时长 → 比例缩放**
+
+```
+break = clamp(round(focus × 0.25 ÷ 5) × 5, 5, 25)
+```
+
+休息跟随专注动态调整（约 25% 比例），不再固定 10 min。
+
+**③ 每日上限 → 三维决策**
+
+```
+完成率分档：<30%→120 | 30~60%→180 | ≥60%→240
+拖延罚分：>0.7→−60 | >0.5→−30 | ≤0.5→0
+新手保护：streak < 2 → 封顶 150
+```
+
+综合完成率（执行能力）、拖延指数（行为倾向）、连续打卡（新手保护）三个维度，比早期二条件判断更细腻。
+
+**修改**——`buildComputation()` 推荐明细：
+- 新增 9 个中间决策字段（`focusBase`、`focusPenalty`、`completionTier`、`procPenalty`、`streakCapped` 等），前端可直接渲染决策路径
+- AI 微调检测改为比较本地计算值与存储值的三字段差异
+
+**修改**——前端（`ProfileView.vue`）：
+- 推荐决策流完全重写：三步骤分别展示连续映射公式、拖延罚分规则、完成率分档、新手保护
+- 每步高亮当前命中的规则 chip，附带用户实际数据解释
+- 旧缓存数据兜底显示通用模板
+- 新增 6 个输入标签和帮助文本（`procrastinationInput`、`focusBase`、`focusPenalty`、`completionTier`、`procPenalty`、`streakCapped`）
+
+**影响范围**：
+- 接口不变（`SchedulePreferenceDto` 三字段不变，调用方无感知）
+- 改动局限在 `PortraitComputeService.java` 一个文件的 `recommend()` + `buildComputation()`
+- 前端仅影响计算明细中推荐卡片，推荐结果卡片（`推荐排程参数`）自动适配新值
+- 新用户默认值不变（focus=45, break=10, max=240 所有字段 null 时由 `resolvePreference()` 兜底）
+
+### 15.34 画像 RAG 查询动态化 + AI 约束对齐（2026-06-12）
+
+**问题 1 — RAG 查询词固定**：`UserPortraitAiService.fetchJournalSnippets()` 使用硬编码查询词 `"学习 情绪 反思 进度"`、topK=10，四人概念拼在一起导致向量检索被稀释，任何随笔都沾边，拉回的噪声片段不聚焦用户实际问题。
+
+**问题 2 — AI 输出约束未更新**：`clampPortraitResult()` 仍强制 focusMinutes 为 30/45/60、breakMinutes 固定 10，AI prompt 也要求 `focusMinutes 必须是 30/45/60 之一`。新本地模型可产生 25~90 连续值，但 AI 推荐会被 clamp 强制拍回旧三档，新模型形同虚设。
+
+**修改——RAG 查询动态化**（`UserPortraitAiService.java`）：
+
+新增 `buildRagQuery(request)` 方法，根据用户画像指标动态选择口语化查询词（模拟用户真实叙事风格），topK 从 10 降为 5，查询词末尾拼接对应 mood 值增强命中：
+
+| 画像状态 | 查询词 | 意图 |
+|----------|--------|------|
+| 拖延 > 0.6 | `不想学 没状态 好累 坚持不下去了 烦躁 难过` | 找负面情绪诱因 |
+| 完成率 < 50% | `做不完 来不及 总是被打断 想放弃 任务太多了` | 找执行障碍 |
+| 连续 ≥ 5 天 | `坚持下来了 有进步 收获很大 突破了自己 开心 充实` | 找正向反馈 |
+| 拖延低 + 完成率高 | `效率很高 很专注 很满意 找到了节奏 热血 兴奋` | 找成功模式 |
+| 其他 | `今天学习怎么样 心情如何 有什么反思` | 通用兜底 |
+
+设计考量：embedding 向量检索按语义相似度匹配，查询词越接近用户真实随笔措辞（口语叙事 + mood 标签），余弦距离越近。分析性术语（"拖延"）改为叙事表达（"不想学"），并混入前端 mood 选择器的情绪词（"烦躁"、"开心"），使查询向量同时匹配随笔 content 和 mood 两个字段。 |
+
+**修改——AI 约束对齐新模型**（`UserPortraitAiService.java`）：
+
+- `clampPortraitResult()`：
+  - focusMinutes：`f ∈ {30,45,60} else 45` → `clamp(f, 25, 90)`，允许连续值
+  - breakMinutes：无条件 `setBreakMinutes(10)` → `clamp(round(b/5)×5, 5, 25)`，保留 AI 推荐的比例值
+- AI prompt：`focusMinutes 必须是 30/45/60 之一；breakMinutes 固定 10` → `focusMinutes: 25-90 连续值；breakMinutes: 5-25 比例缩放`
+
+**影响范围**：
+- 仅 `UserPortraitAiService.java` 一个文件，新增 1 个方法（10 行）、改 2 个 clamp 逻辑、改 1 行 prompt 约束
+- 无接口变更、无 DTO 变更、前端无感知
+- 旧用户下次 `recompute()` 或登录触发画像分析时自动生效

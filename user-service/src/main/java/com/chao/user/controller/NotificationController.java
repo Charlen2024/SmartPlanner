@@ -22,6 +22,10 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 
+import org.redisson.api.RedissonClient;
+import org.springframework.beans.factory.ObjectProvider;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -48,7 +52,9 @@ public class NotificationController {
     private final AppUserService appUserService;
     private final PortraitComputeService portraitComputeService;
     private final WeatherClient weatherClient;
+    private final ObjectProvider<RedissonClient> redissonProvider;
     private final Executor aiTaskExecutor;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final Map<Long, List<SseEmitter>> emitters = new ConcurrentHashMap<>();
     private final Map<Long, Set<String>> lastLoginCareSessionKeys = new ConcurrentHashMap<>();
@@ -190,8 +196,9 @@ public class NotificationController {
         } catch (Exception ignored) {
         }
 
-        // Fetch weather summary for care context
-        String weatherInfo = fetchWeatherBrief();
+        // Fetch weather summary for care context — use user's saved coordinates
+        WeatherLoc weatherLoc = getUserWeatherLocation(userId);
+        String weatherInfo = fetchWeatherBrief(weatherLoc);
 
         boolean scheduleImported = false;
         boolean hasGoals = false;
@@ -323,9 +330,19 @@ public class NotificationController {
         return sb.toString();
     }
 
-    private String fetchWeatherBrief() {
+    private record WeatherLoc(Double lat, Double lon, String name) {
+        boolean hasCoords() { return lat != null && lon != null; }
+    }
+
+    private String fetchWeatherBrief(WeatherLoc wl) {
         try {
-            WeatherData wd = weatherClient.fetch("Shenzhen");
+            WeatherData wd;
+            if (wl.hasCoords()) {
+                wd = weatherClient.fetch(wl.lat(), wl.lon());
+            } else {
+                String loc = !wl.name().isBlank() ? wl.name() : "Shenzhen";
+                wd = weatherClient.fetch(loc);
+            }
             Double temp = wd.getTemperature();
             String cn = wd.getWeatherDescCn() != null ? wd.getWeatherDescCn() : "";
             if (temp != null && (temp > 0 || !cn.isBlank())) {
@@ -334,6 +351,35 @@ public class NotificationController {
         } catch (Exception ignored) {
         }
         return "";
+    }
+
+    private WeatherLoc getUserWeatherLocation(Long userId) {
+        try {
+            if (userId == null) return new WeatherLoc(null, null, "");
+            RedissonClient r = redissonProvider.getIfAvailable();
+            if (r == null) return new WeatherLoc(null, null, "");
+            String raw = String.valueOf(r.getBucket("sp:weather:loc:" + userId).get());
+            if (raw == null || "null".equals(raw)) return new WeatherLoc(null, null, "");
+            if (raw.startsWith("{")) {
+                Map m = objectMapper.readValue(raw, Map.class);
+                Double lat = toDouble(m.get("lat"));
+                Double lon = toDouble(m.get("lon"));
+                String name = String.valueOf(m.getOrDefault("name", ""));
+                return new WeatherLoc(lat, lon, "null".equals(name) ? "" : name.trim());
+            }
+            // Legacy: plain city name string
+            return new WeatherLoc(null, null, raw.trim());
+        } catch (Exception ignored) {
+            return new WeatherLoc(null, null, "");
+        }
+    }
+
+    private Double toDouble(Object v) {
+        if (v instanceof Number n) return n.doubleValue();
+        if (v instanceof String s) {
+            try { return Double.parseDouble(s); } catch (NumberFormatException ignored) {}
+        }
+        return null;
     }
 
 }

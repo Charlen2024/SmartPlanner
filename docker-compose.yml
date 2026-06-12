@@ -1,3 +1,6 @@
+x-env-tz: &env-tz
+  TZ: Asia/Shanghai
+
 x-env-ai: &env-ai
   AI_DASHSCOPE_API_KEY: ${AI_DASHSCOPE_API_KEY}
   MODEL: ${MODEL}
@@ -35,9 +38,16 @@ services:
       - "8848:8848"
       - "9848:9848"
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy
     networks:
       - sp-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:8848/nacos/v1/console/health/readiness | grep -qi 'ok'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
 
   mysql:
     image: docker.m.daocloud.io/library/mysql:8.0
@@ -52,6 +62,12 @@ services:
       - mysql_data:/var/lib/mysql
     networks:
       - sp-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 20s
 
   adminer:
     image: docker.m.daocloud.io/library/adminer:4.8.1
@@ -62,7 +78,8 @@ services:
     environment:
       - ADMINER_DEFAULT_SERVER=mysql
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy
     networks:
       - sp-net
 
@@ -78,6 +95,12 @@ services:
       - "6379:6379"
     networks:
       - sp-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 
   rabbitmq:
     image: docker.m.daocloud.io/library/rabbitmq:3.12-management
@@ -91,6 +114,12 @@ services:
       - "15672:15672"
     networks:
       - sp-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   elasticsearch:
     image: docker.m.daocloud.io/library/elasticsearch:8.10.2
@@ -106,6 +135,12 @@ services:
       - "9201:9200"
     networks:
       - sp-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -qE 'green|yellow'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
 
   # --- Microservices ---
   goal-service:
@@ -115,17 +150,22 @@ services:
       args:
         SERVICE_NAME: goal-service
         SERVICE_PORT: "8081"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5"
     container_name: goal-service
     restart: unless-stopped
     ports:
       - "8081:8081"
     depends_on:
-      - nacos
-      - mysql
-      - redis
-      - rabbitmq
+      nacos:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
-      <<: [*env-nacos, *env-rabbitmq, *env-ai]
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/sp_goal?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
       SPRING_REDIS_HOST: redis
     networks:
@@ -138,17 +178,22 @@ services:
       args:
         SERVICE_NAME: schedule-engine
         SERVICE_PORT: "8082"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5"
     container_name: schedule-engine
     restart: unless-stopped
     ports:
       - "8082:8082"
     depends_on:
-      - nacos
-      - mysql
-      - redis
-      - rabbitmq
+      nacos:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
-      <<: [*env-nacos, *env-rabbitmq, *env-ai]
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/sp_schedule?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
       SMARTPLANNER_AI_SCHEDULE_TIMEOUT_SECONDS: "170"
     networks:
@@ -161,19 +206,26 @@ services:
       args:
         SERVICE_NAME: resource-search
         SERVICE_PORT: "8083"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5"
     container_name: resource-search
     restart: unless-stopped
     ports:
       - "8083:8083"
     depends_on:
-      - nacos
-      - mysql
-      - elasticsearch
-      - rabbitmq
+      nacos:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
-      <<: [*env-nacos, *env-rabbitmq, *env-ai]
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/sp_resource?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
       SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
+      SMARTPLANNER_HTTP_PROXY_HOST: ${SMARTPLANNER_HTTP_PROXY_HOST:-host.docker.internal}
+      SMARTPLANNER_HTTP_PROXY_PORT: ${SMARTPLANNER_HTTP_PROXY_PORT:-18888}
     networks:
       - sp-net
 
@@ -184,17 +236,22 @@ services:
       args:
         SERVICE_NAME: punch-service
         SERVICE_PORT: "8084"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5"
     container_name: punch-service
     restart: unless-stopped
     ports:
       - "8084:8084"
     depends_on:
-      - nacos
-      - mysql
-      - redis
-      - rabbitmq
+      nacos:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
-      <<: [*env-nacos, *env-rabbitmq, *env-ai]
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/sp_punch?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
       SPRING_REDIS_HOST: redis
     networks:
@@ -207,19 +264,24 @@ services:
       args:
         SERVICE_NAME: agent-service
         SERVICE_PORT: "8086"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5"
         JVM_OPTS: "-Djava.net.preferIPv4Stack=true"
     container_name: agent-service
     restart: unless-stopped
     ports:
       - "8086:8086"
     depends_on:
-      - nacos
-      - redis
-      - rabbitmq
+      nacos:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
-      <<: [*env-nacos, *env-rabbitmq, *env-ai]
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
       SPRING_REDIS_HOST: redis
       SPRING_REDIS_PORT: "6379"
+      SPRING_DATA_REDIS_HOST: redis
       JWT_SECRET: dev-jwt-secret-change-me-please-32bytes
       JWT_ISSUER: http://sp
     networks:
@@ -239,11 +301,14 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - nacos
-      - mysql
-      - rabbitmq
+      nacos:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
-      <<: [*env-nacos, *env-rabbitmq, *env-ai]
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/sp_user?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
       SPRING_DATASOURCE_USERNAME: root
       SPRING_DATASOURCE_PASSWORD: root
@@ -270,7 +335,8 @@ services:
     ports:
       - "9090:9090"
     depends_on:
-      - nacos
+      nacos:
+        condition: service_healthy
     environment:
       <<: *env-nacos
     networks:
@@ -283,18 +349,24 @@ services:
       args:
         SERVICE_NAME: gateway-service
         SERVICE_PORT: "8088"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5"
     container_name: gateway-service
     restart: unless-stopped
     ports:
       - "8088:8088"
     depends_on:
-      - nacos
-      - redis
-      - user-service
-      - agent-service
-      - rabbitmq
+      nacos:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+      agent-service:
+        condition: service_started
     environment:
-      <<: [*env-nacos, *env-rabbitmq, *env-ai]
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
       SPRING_REDIS_HOST: redis
       JWT_SECRET: dev-jwt-secret-change-me-please-32bytes
       GATEWAY_RL_REPLENISH: "5"

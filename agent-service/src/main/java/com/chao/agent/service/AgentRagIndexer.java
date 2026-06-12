@@ -71,7 +71,10 @@ public class AgentRagIndexer {
 
     public void ensureUserRagIndexed(Long userId) {
         if (userId == null) return;
-        if (ragIndexedLocal.getOrDefault(userId, false)) return;
+        if (ragIndexedLocal.getOrDefault(userId, false)) {
+            log.info("RAG index skipped for userId={}: already indexed in local cache", userId);
+            return;
+        }
         if (redissonClient == null) return;
         VectorStore vs = vectorStoreProvider != null ? vectorStoreProvider.getIfAvailable() : null;
         if (vs == null) {
@@ -83,9 +86,11 @@ public class AgentRagIndexer {
         String v = bucket.get();
         if ("1".equals(v)) {
             ragIndexedLocal.put(userId, true);
+            log.info("RAG index skipped for userId={}: already indexed per Redis", userId);
             return;
         }
 
+        log.info("RAG index START for userId={}", userId);
         List<Document> docs = new java.util.ArrayList<>();
 
         try {
@@ -98,9 +103,9 @@ public class AgentRagIndexer {
                     if (text.isBlank()) continue;
                     Map<String, Object> meta = new HashMap<>();
                     meta.put("type", "goal");
-                    meta.put("userId", userId);
-                    meta.put("goalId", g.getId());
-                    meta.put("title", g.getTitle());
+                    meta.put("userId", String.valueOf(userId));
+                    meta.put("goalId", String.valueOf(g.getId()));
+                    if (g.getTitle() != null) meta.put("title", g.getTitle());
                     docs.add(new Document("goal:" + userId + ":" + g.getId(), text, meta));
                 }
             }
@@ -118,10 +123,10 @@ public class AgentRagIndexer {
                     if (text.isBlank()) continue;
                     Map<String, Object> meta = new HashMap<>();
                     meta.put("type", "task");
-                    meta.put("userId", userId);
-                    meta.put("taskId", t.getId());
-                    meta.put("goalId", t.getGoalId());
-                    meta.put("title", t.getTitle());
+                    meta.put("userId", String.valueOf(userId));
+                    meta.put("taskId", String.valueOf(t.getId()));
+                    if (t.getGoalId() != null) meta.put("goalId", String.valueOf(t.getGoalId()));
+                    if (t.getTitle() != null) meta.put("title", t.getTitle());
                     docs.add(new Document("task:" + userId + ":" + t.getId(), text, meta));
                 }
             }
@@ -132,25 +137,32 @@ public class AgentRagIndexer {
         try {
             Result<List<UserJournalDto>> jr = goalClient.listJournals(userId, null);
             List<UserJournalDto> journals = jr != null ? jr.getData() : List.of();
+            log.info("RAG idx: journals fetch userId={}, code={}, count={}", userId, jr != null ? jr.getCode() : -1, journals != null ? journals.size() : 0);
             if (journals != null) {
+                int added = 0;
                 for (UserJournalDto j : journals) {
                     if (j == null || j.getId() == null) continue;
                     String text = j.getContent();
-                    if (text == null || text.isBlank()) continue;
+                    if (text == null || text.isBlank()) {
+                        log.info("RAG idx: skipping blank journal id={}", j.getId());
+                        continue;
+                    }
                     Map<String, Object> meta = new HashMap<>();
                     meta.put("type", "journal");
-                    meta.put("userId", userId);
-                    meta.put("journalId", j.getId());
-                    meta.put("goalId", j.getGoalId());
+                    meta.put("userId", String.valueOf(userId));
+                    meta.put("journalId", String.valueOf(j.getId()));
+                    if (j.getGoalId() != null) meta.put("goalId", String.valueOf(j.getGoalId()));
                     meta.put("title", "随笔");
-                    meta.put("createdAt", j.getCreatedAt() != null ? j.getCreatedAt().toString() : "");
-                    meta.put("mood", j.getMood() != null ? j.getMood() : "");
+                    if (j.getCreatedAt() != null) meta.put("createdAt", j.getCreatedAt().toString());
+                    if (j.getMood() != null && !j.getMood().isBlank()) meta.put("mood", j.getMood());
                     docs.add(new Document("journal:" + userId + ":" + j.getId(), text, meta));
+                    added++;
                     if (docs.size() >= 200) break;
                 }
+                log.info("RAG idx: journals added={}/{}, totalDocs={}", added, journals.size(), docs.size());
             }
         } catch (Exception e) {
-            log.debug("RAG idx: journals fetch failed for userId={}: {}", userId, e.getMessage());
+            log.warn("RAG idx: journals fetch failed for userId={}: {}", userId, e.getMessage());
         }
 
         try {
@@ -186,12 +198,12 @@ public class AgentRagIndexer {
                     if (text.isBlank()) continue;
                     Map<String, Object> meta = new HashMap<>();
                     meta.put("type", "punch");
-                    meta.put("userId", userId);
-                    meta.put("punchId", r.getId());
-                    meta.put("taskId", r.getTaskId());
+                    meta.put("userId", String.valueOf(userId));
+                    meta.put("punchId", String.valueOf(r.getId()));
+                    if (r.getTaskId() != null) meta.put("taskId", String.valueOf(r.getTaskId()));
                     meta.put("taskTitle", taskName);
-                    meta.put("createdAt", r.getCreatedAt() != null ? r.getCreatedAt().toString() : "");
-                    meta.put("durationSeconds", r.getDurationSeconds());
+                    if (r.getCreatedAt() != null) meta.put("createdAt", r.getCreatedAt().toString());
+                    if (r.getDurationSeconds() != null) meta.put("durationSeconds", r.getDurationSeconds());
                     docs.add(new Document("punch:" + userId + ":" + r.getId(), text, meta));
                     if (docs.size() >= 500) break;
                 }
@@ -201,11 +213,19 @@ public class AgentRagIndexer {
         }
 
         if (!docs.isEmpty()) {
+            log.info("RAG index COMMIT userId={}, totalDocs={}, types: goal={}, task={}, journal={}, punch={}",
+                    userId,
+                    docs.size(),
+                    docs.stream().filter(d -> "goal".equals(d.getMetadata().get("type"))).count(),
+                    docs.stream().filter(d -> "task".equals(d.getMetadata().get("type"))).count(),
+                    docs.stream().filter(d -> "journal".equals(d.getMetadata().get("type"))).count(),
+                    docs.stream().filter(d -> "punch".equals(d.getMetadata().get("type"))).count());
             VectorStoreUtils.deleteByUserId(vs, userId);
             VectorStoreUtils.addDocsInBatches(vs, docs, 20);
             bucket.set("1");
             bucket.expire(Duration.ofDays(3));
             ragIndexedLocal.put(userId, true);
+            log.info("RAG index DONE userId={}, cache set, local cache updated", userId);
             return;
         }
         bucket.set("0");
@@ -237,8 +257,8 @@ public class AgentRagIndexer {
         try {
             Map<String, Object> meta = new HashMap<>();
             meta.put("type", "journal");
-            meta.put("userId", userId);
-            meta.put("goalId", goalId);
+            meta.put("userId", String.valueOf(userId));
+            if (goalId != null) meta.put("goalId", String.valueOf(goalId));
             meta.put("title", "随笔");
             meta.put("mood", data.get("mood") instanceof String s ? s : "");
             meta.put("createdAt", java.time.LocalDateTime.now().toString());

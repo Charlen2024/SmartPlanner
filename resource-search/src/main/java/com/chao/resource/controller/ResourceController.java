@@ -6,6 +6,7 @@ import com.chao.common.dto.ResourceAdviceJobStartRequest;
 import com.chao.common.dto.ResourceAdviceJobStartResponse;
 import com.chao.common.dto.ResourceAdviceJobStatusResponse;
 import com.chao.resource.entity.CourseResource;
+import com.chao.resource.service.BilibiliCrawlerService;
 import com.chao.resource.service.ResourceAdviceJobService;
 import com.chao.resource.service.ResourceService;
 import lombok.RequiredArgsConstructor;
@@ -19,6 +20,7 @@ import java.util.List;
 public class ResourceController {
     private final ResourceService resourceService;
     private final ResourceAdviceJobService resourceAdviceJobService;
+    private final BilibiliCrawlerService bilibiliCrawlerService;
 
     @PostMapping
     public Result<CourseResource> create(
@@ -75,7 +77,7 @@ public class ResourceController {
      */
     @PostMapping("/crawl")
     public Result<String> crawlTopic(@RequestParam String topic) {
-        resourceService.crawlTopicAsync(topic);
+        bilibiliCrawlerService.crawlTopicAsync(topic);
         return Result.success("ok");
     }
 }

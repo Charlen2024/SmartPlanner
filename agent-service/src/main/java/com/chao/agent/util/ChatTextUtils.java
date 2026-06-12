@@ -162,11 +162,31 @@ public final class ChatTextUtils {
     public static String extractJson(String text) {
         if (text == null) return "{}";
         String s = text.trim();
+        // Strip markdown code fences before extraction
+        s = s.replaceAll("(?s)^```(?:json|JSON)?\\s*\\n(.*)\\n```\\s*$", "$1");
+        s = s.trim();
         int first = s.indexOf('{');
-        int last = s.lastIndexOf('}');
-        if (first >= 0 && last > first) {
-            return s.substring(first, last + 1).trim();
+        if (first < 0) return s;
+        // Depth tracking: find matching closing brace. When the LLM omits the
+        // outer '}', lastIndexOf would match an inner '}' and truncate the JSON.
+        int depth = 0;
+        boolean inString = false;
+        int lastMatching = -1;
+        for (int i = first; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '"' && (i == first || s.charAt(i - 1) != '\\')) {
+                inString = !inString;
+            } else if (!inString) {
+                if (c == '{' || c == '[') depth++;
+                else if (c == '}' || c == ']') {
+                    depth--;
+                    if (depth == 0) lastMatching = i;
+                }
+            }
         }
+        if (lastMatching > first) return s.substring(first, lastMatching + 1).trim();
+        // Unclosed — return from first to end so repair logic can fix it
+        if (depth > 0) return s.substring(first).trim();
         return s;
     }
 }

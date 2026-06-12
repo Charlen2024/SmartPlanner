@@ -6,9 +6,7 @@ import { useDisplay, useTheme } from 'vuetify'
 import { useNotifyStore } from '../stores/notify'
 import { useAssistantStore } from '../stores/assistant'
 import { useDecomposeStore } from '../stores/decompose'
-import { useScheduleStore } from '../stores/schedule'
 import DecomposePanel from '../components/DecomposePanel.vue'
-import SchedulePanel from '../components/SchedulePanel.vue'
 
 
 const auth = useAuthStore()
@@ -27,7 +25,6 @@ watch(() => assistant.chatMessages?.length, () => {
 const notify = useNotifyStore()
 const assistant = useAssistantStore()
 const decompose = useDecomposeStore()
-const schedule = useScheduleStore()
 const slots = useSlots()
 
 function dismissNotify(id) {
@@ -100,6 +97,7 @@ function startSse(token) {
     try {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
+      notify.signal('GOAL_DECOMPOSE_FAILED', data)
       decompose.onFailed(data?.payload?.message || data.content || '拆解失败')
     } catch (err) { console.warn('SSE event parse error:', err) }
   })
@@ -114,28 +112,17 @@ function startSse(token) {
     } catch (err) { console.warn('SSE event parse error:', err) }
   })
   sseSource.addEventListener('SCHEDULE_STARTED', (e) => {
-    try {
-      const data = JSON.parse(e.data)
-      const date = data?.payload?.date || ''
-      schedule.start(date)
-    } catch (err) { console.warn('SSE event parse error:', err) }
+    // Schedule progress shown via toast notifications only
   })
   sseSource.addEventListener('SCHEDULE_PROGRESS', (e) => {
-    try {
-      const data = JSON.parse(e.data)
-      const stage = data?.payload?.stage || ''
-      const progress = data?.payload?.progress || 0
-      const message = data?.payload?.message || ''
-      schedule.onProgress(stage, progress, message)
-    } catch (err) { console.warn('SSE event parse error:', err) }
+    // Schedule progress shown via toast notifications only
   })
   sseSource.addEventListener('SCHEDULE_DONE', (e) => {
     try {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
       notify.signal('SCHEDULE_DONE', data)
-      const payload = data?.payload || {}
-      schedule.onDone(payload)
+      notify.success(data.content || '排程完成')
     } catch (err) { console.warn('SSE event parse error:', err) }
   })
   sseSource.addEventListener('SCHEDULE_FAILED', (e) => {
@@ -143,7 +130,7 @@ function startSse(token) {
       const data = JSON.parse(e.data)
       notify.addReminder(data)
       notify.signal('SCHEDULE_FAILED', data)
-      schedule.onFailed(data?.payload?.message || data.content || '排程失败')
+      notify.error(data.content || '排程失败')
     } catch (err) { console.warn('SSE event parse error:', err) }
   })
   sseSource.addEventListener('AGENT_REMINDER', (e) => {
@@ -190,6 +177,8 @@ function startSse(token) {
   }
   sseSource.onopen = () => { sseRetryCount = 0 }
 }
+
+
 
 onMounted(() => {
   const saved = localStorage.getItem('theme')
@@ -262,7 +251,6 @@ const menu = [
   { to: '/resources', title: '资源', icon: 'mdi-book-open-variant' },
   { to: '/punch', title: '打卡', icon: 'mdi-checkbox-multiple-marked' },
   { to: '/profile', title: '画像', icon: 'mdi-account-circle' },
-  { to: '/games/2048', title: '2048', icon: 'mdi-grid' },
 ]
 
 
@@ -278,7 +266,17 @@ function logout() {
   router.push('/login')
 }
 
-const quickPrompts = ['今天该做什么？', '总结本周进度', '给我一个学习建议']
+const quickPrompts = computed(() => {
+  const p = route.path
+  if (p === '/punch' || p.startsWith('/punch')) return ['今天打卡完成了吗？', '分析我的打卡习惯', '推荐一个坚持的方法']
+  if (p === '/goals' || p.startsWith('/goals')) return ['拆解这个目标', '分析目标完成情况', '建议下一步任务']
+  if (p === '/schedule' || p.startsWith('/schedule')) return ['今天时间怎么安排？', '明天的日程有什么？', '分析本周时间利用']
+  if (p === '/journals' || p.startsWith('/journals')) return ['总结本周随笔', '回顾最近的复盘', '给我一个写作灵感']
+  if (p === '/resources' || p.startsWith('/resources')) return ['推荐相关学习资源', '帮我整理收藏夹', '搜索一门课程']
+  if (p === '/plan' || p.startsWith('/plan')) return ['拆解我的学习目标', '帮我规划本周任务']
+  if (p === '/profile' || p.startsWith('/profile')) return ['分析我的学习画像', '我的优势和短板是什么？']
+  return ['今天该做什么？', '总结本周进度', '给我一个学习建议']
+})
 
 
 function chatHint() {
@@ -440,7 +438,7 @@ function onResizeEnd() {
       <v-menu v-model="notifMenu" :close-on-content-click="false" location="bottom end">
         <template #activator="{ props: menuProps }">
           <span class="bell-wrap">
-            <v-btn v-bind="menuProps" icon="mdi-bell-outline" class="mr-2" />
+            <v-btn v-bind="menuProps" icon="mdi-bell-outline" aria-label="通知" class="mr-2" />
             <span v-if="unreadCount > 0" class="bell-dot">{{ unreadCount }}</span>
           </span>
         </template>
@@ -487,49 +485,51 @@ function onResizeEnd() {
         rail-width="76"
         class="sp-drawer"
     >
-      <!-- 展开：品牌卡片 -->
-      <div v-if="!rail" class="px-3 pt-3 pb-2">
-        <v-card variant="tonal" color="primary" class="pa-3 rounded-lg">
+      <!-- Brand: icon aligned in both modes -->
+      <div class="sp-brand-area">
+        <div class="sp-brand-icon-cell">
+          <v-icon color="primary" size="28">mdi-lightbulb-outline</v-icon>
+        </div>
+        <div :class="['sp-brand-text', { 'ml-2': !rail, 'sp-collapsed': rail }]">
           <div class="text-subtitle-2 font-weight-semibold">SmartPlanner</div>
           <div class="text-caption">学习 · 计划 · 打卡</div>
-        </v-card>
-      </div>
-      <!-- 收起：品牌图标（与展开卡片等高对齐） -->
-      <div v-else class="sp-rail-brand">
-        <v-icon color="primary" size="24">mdi-lightbulb-outline</v-icon>
+        </div>
       </div>
 
-      <!-- 展开：文字菜单 -->
-      <v-list v-if="!rail" nav density="compact" class="mt-1">
-        <v-list-item
-            v-for="m in menu"
-            :key="m.to"
-            :to="m.to"
-            :exact="m.to === '/'"
-            :prepend-icon="m.icon"
-            rounded="lg"
-        >
-          <v-list-item-title class="text-body-2">{{ m.title }}</v-list-item-title>
-        </v-list-item>
-      </v-list>
-
-      <!-- 收起：纯图标菜单 -->
-      <div v-else class="sp-rail-icons mt-1">
+      <!-- Menu: unified layout, icon cell fixed at rail width -->
+      <div class="sp-menu-list mt-1">
         <v-btn
-            v-for="m in menu"
-            :key="m.to"
-            :to="m.to"
-            :exact="m.to === '/'"
-            :icon="m.icon"
-            variant="text"
-            size="36"
-            class="sp-rail-btn"
-        />
+          v-for="m in menu"
+          :key="m.to"
+          :to="m.to"
+          :exact="m.to === '/'"
+          variant="text"
+          class="sp-menu-row"
+          :height="44"
+        >
+          <span class="sp-menu-icon-cell">
+            <v-icon :icon="m.icon" size="22" />
+          </span>
+          <span :class="['sp-menu-label', 'text-body-2', { 'sp-collapsed': rail }]">{{ m.title }}</span>
+        </v-btn>
       </div>
 
       <template #append>
+        <v-divider class="mb-1" />
+        <v-btn
+          to="/games/2048"
+          variant="text"
+          class="sp-menu-row"
+          :height="40"
+          style="opacity:0.55"
+        >
+          <span class="sp-menu-icon-cell">
+            <v-icon icon="mdi-gamepad-variant-outline" size="20" />
+          </span>
+          <span :class="['sp-menu-label', 'text-caption', { 'sp-collapsed': rail }]">休息一下</span>
+        </v-btn>
         <div class="pa-2">
-          <v-btn  size="small" @click="rail = !rail" :icon="rail ? 'mdi-chevron-right' : 'mdi-chevron-left'" class="mx-auto d-flex" />
+          <v-btn size="small" @click="rail = !rail" :icon="rail ? 'mdi-chevron-right' : 'mdi-chevron-left'" aria-label="切换菜单栏" class="mx-auto d-flex" />
         </div>
       </template>
     </v-navigation-drawer>
@@ -537,11 +537,15 @@ function onResizeEnd() {
     <v-main class="sp-main">
       <v-container class="py-6" style="max-width: 1200px">
         <slot v-if="slots.default" />
-        <router-view v-else />
+        <router-view v-else v-slot="{ Component }">
+          <keep-alive>
+            <component :is="Component" />
+          </keep-alive>
+        </router-view>
       </v-container>
     </v-main>
 
-    <TransitionGroup name="notif" tag="div" class="notif-stack">
+    <TransitionGroup name="notif" tag="div" class="notif-stack" :style="{ right: decompose.active ? '332px' : '16px' }">
       <v-alert
           v-for="(n, idx) in notify.items"
           v-show="n.open"
@@ -557,7 +561,6 @@ function onResizeEnd() {
     </TransitionGroup>
 
     <DecomposePanel />
-    <SchedulePanel />
 
     <div
         v-show="assistant.x !== null"
@@ -671,21 +674,68 @@ function onResizeEnd() {
 .sp-drawer {
   border-right: 1px solid rgba(var(--v-theme-on-surface), 0.08);
 }
-/* 收起模式：纯图标按钮居中 */
-.sp-rail-icons {
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	gap: 4px;
+
+/* ── Smooth rail collapse text ── */
+.sp-brand-text,
+.sp-menu-label {
+  overflow: hidden;
+  white-space: nowrap;
+  transition: max-width 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  max-width: 220px;
+  opacity: 1;
 }
-.sp-rail-brand {
-	display: flex;
-	justify-content: center;
-	align-items: center;
-	height: 84px;
+
+.sp-collapsed.sp-brand-text,
+.sp-collapsed.sp-menu-label {
+  max-width: 0 !important;
+  min-width: 0 !important;
+  opacity: 0;
+  margin-left: 0 !important;
 }
-.sp-rail-btn {
-	border-radius: 12px;
+/* ── Brand ── */
+.sp-brand-area {
+  display: flex;
+  align-items: center;
+  height: 76px;
+}
+.sp-brand-icon-cell {
+  width: 76px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.sp-brand-text {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Menu (unified) ── */
+.sp-menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sp-menu-row {
+  justify-content: flex-start !important;
+  padding: 0 !important;
+  width: 100%;
+  border-radius: 12px;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+}
+.sp-menu-icon-cell {
+  width: 76px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.sp-menu-label {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
 }
 .sp-hamburger {
 	transition: width 0.2s;
@@ -701,6 +751,7 @@ function onResizeEnd() {
       radial-gradient(1000px 600px at 90% 0%, rgba(var(--v-theme-secondary), 0.16), transparent 55%),
       linear-gradient(180deg, rgba(var(--v-theme-background), 1), rgba(var(--v-theme-background), 1));
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 .sp-user {
   margin-left: 10px;
@@ -764,10 +815,6 @@ function onResizeEnd() {
 .sp-agent-actions :deep(.v-btn__loader) {
   margin-inline-end: 8px;
 }
-.sp-agent-loading {
-  margin-left: 8px;
-  opacity: 0.85;
-}
 
 .sp-agent-resize {
   position: absolute;
@@ -802,16 +849,6 @@ function onResizeEnd() {
   border-right: 2px solid rgba(var(--v-theme-on-surface), 0.35);
   border-bottom: 2px solid rgba(var(--v-theme-on-surface), 0.35);
   border-radius: 2px;
-}
-.sp-agent-chat {
-  max-height: 240px;
-  overflow-y: auto;
-  padding: 8px 10px;
-  border: 1px solid rgba(var(--v-theme-on-surface), 0.14);
-  border-radius: 8px;
-  background: rgba(var(--v-theme-surface), 0.74);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
 }
 
 .sp-agent :deep(.v-field__overlay) {
@@ -880,11 +917,6 @@ function onResizeEnd() {
   transition: transform 0.3s ease;
 }
 
-/* Sidebar menu items */
-.sp-menu-item {
-  margin: 2px 8px;
-  border-radius: 10px;
-}
 /* Chat bubbles */
 .sp-chat-bubble {
   padding: 10px 14px;
@@ -953,43 +985,70 @@ function onResizeEnd() {
   white-space: pre-wrap;
   word-break: break-word;
 }
+.sp-chat-markdown :deep(blockquote) {
+  border-left: 3px solid rgba(var(--v-theme-primary), 0.35);
+  margin: 8px 0;
+  padding: 4px 12px;
+  opacity: 0.85;
+}
+.sp-chat-markdown :deep(blockquote p) {
+  margin: 4px 0;
+}
+.sp-chat-markdown :deep(hr) {
+  border: none;
+  border-top: 1px solid rgba(var(--v-theme-on-surface), 0.1);
+  margin: 12px 0;
+}
+.sp-chat-markdown :deep(table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.sp-chat-markdown :deep(th),
+.sp-chat-markdown :deep(td) {
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+  padding: 4px 8px;
+  text-align: left;
+}
+.sp-chat-markdown :deep(th) {
+  background: rgba(var(--v-theme-on-surface), 0.04);
+  font-weight: 600;
+}
 /* Tool call inline lines */
 .sp-chat-markdown :deep(.sp-tool-call) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
-  margin: 6px 0;
+  padding: 5px 12px;
+  margin: 4px 0;
   border-radius: 8px;
-  background: rgba(var(--v-theme-primary), 0.08);
-  border-left: 3px solid rgba(var(--v-theme-primary), 0.45);
+  background: rgba(var(--v-theme-primary), 0.06);
   font-size: 12px;
-  opacity: 0.9;
+  opacity: 0.85;
   user-select: none;
+  border: 1px solid rgba(var(--v-theme-primary), 0.1);
 }
 .sp-chat-markdown :deep(.sp-tool-call.sp-tool-done) {
-  background: rgba(var(--v-theme-success), 0.07);
-  border-left-color: rgba(var(--v-theme-success), 0.5);
+  background: rgba(var(--v-theme-success), 0.05);
+  border-color: rgba(var(--v-theme-success), 0.12);
+  opacity: 0.65;
+}
+.sp-chat-markdown :deep(.sp-tool-icon) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  font-size: 12px;
+  line-height: 1;
+  flex-shrink: 0;
+  animation: sp-shimmer 1.6s ease-in-out infinite;
   opacity: 0.7;
 }
-.sp-chat-markdown :deep(.sp-tool-dot) {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: rgb(var(--v-theme-primary));
-  animation: sp-pulse 1.2s ease-in-out infinite;
-  flex-shrink: 0;
-}
-.sp-chat-markdown :deep(.sp-tool-done .sp-tool-dot) {
-  background: rgb(var(--v-theme-success));
+.sp-chat-markdown :deep(.sp-tool-done .sp-tool-icon) {
   animation: none;
-}
-.sp-chat-scroll {
-  scroll-behavior: smooth;
-}
-.sp-chat-input :deep(.v-field) {
-  background: transparent !important;
+  opacity: 0.45;
 }
 .sp-chat-bar {
   display: flex;
@@ -1016,9 +1075,6 @@ function onResizeEnd() {
   padding-top: 6px !important;
   padding-bottom: 6px !important;
 }
-.sp-chat-input :deep(.v-field__overlay) {
-  opacity: 0 !important;
-}
 /* Agent card stronger glass */
 .sp-agent-card {
   backdrop-filter: blur(20px) saturate(160%) !important;
@@ -1029,8 +1085,8 @@ function onResizeEnd() {
   -webkit-backdrop-filter: blur(20px) saturate(160%) !important;
 }
 
-@keyframes sp-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.3; transform: scale(0.75); }
+@keyframes sp-shimmer {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
 }
 </style>

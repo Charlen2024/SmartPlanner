@@ -1,24 +1,29 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onMounted, ref, watch } from 'vue'
 import api from '../plugins/api'
 import { useAuthStore } from '../stores/auth'
+import { timeToMinutes, dateDowValue, computeWeekNumber, matchesWeekFn, clampedDurationMinutes, blockStyle, layoutOverlappingBlocks } from '../composables/useTimeline'
 
 const loading = ref(false)
 const error = ref('')
-const goalQuery = ref('')
 const dashboard = ref(null)
 const weather = ref(null)
 const weatherLocation = ref(localStorage.getItem('weatherLocation') || '深圳')
 const weatherLocations = ['深圳', '北京', '上海', '广州', '杭州', '成都', '武汉', '南京']
+const weatherLocationCoords = {
+  '深圳': { lat: 22.5431, lon: 114.0579 },
+  '北京': { lat: 39.9042, lon: 116.4074 },
+  '上海': { lat: 31.2304, lon: 121.4737 },
+  '广州': { lat: 23.1291, lon: 113.2644 },
+  '杭州': { lat: 30.2741, lon: 120.1551 },
+  '成都': { lat: 30.5728, lon: 104.0668 },
+  '武汉': { lat: 30.5928, lon: 114.3055 },
+  '南京': { lat: 32.0603, lon: 118.7969 },
+}
 const today = ref(new Date().toISOString().slice(0, 10))
-const selectedGoalId = ref(null)
-const selectedGoalTitle = ref('')
-const selectedGoalTasks = ref([])
-const tasksLoading = ref(false)
-const tasksError = ref('')
-const goalQueryTimer = ref(null)
 const scheduleDate = ref('')
 
+// ── Helpers ──
 function fmt(dt) {
   if (!dt) return '-'
   return String(dt).replace('T', ' ').slice(0, 16)
@@ -36,48 +41,8 @@ function fmtHm(dt) {
   return s.slice(0, 5)
 }
 
-function timeToMinutes(dt) {
-  if (!dt) return null
-  const s = String(dt)
-  const t = s.includes('T') ? s.split('T')[1] : s
-  const hhmm = t.slice(0, 5)
-  const [h, m] = hhmm.split(':')
-  const hh = Number(h)
-  const mm = Number(m)
-  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null
-  return hh * 60 + mm
-}
-
-function dateDowValue(dateStr) {
-  if (!dateStr) return null
-  const d = new Date(`${dateStr}T00:00:00`)
-  const js = d.getDay()
-  return ((js + 6) % 7) + 1
-}
-
 const auth = useAuthStore()
 const firstWeekMonday = computed(() => auth.me?.firstWeekMonday || localStorage.getItem('firstWeekMonday') || '')
-
-function computeWeekNumber(dateStr, fwmStr) {
-  if (!dateStr || !fwmStr) return null
-  const d = new Date(`${dateStr}T00:00:00`)
-  const fwm = new Date(`${fwmStr}T00:00:00`)
-  const diffDays = Math.floor((d - fwm) / (1000 * 60 * 60 * 24))
-  return Math.floor(diffDays / 7) + 1
-}
-
-function matchesWeekFn(c, weekNumber) {
-  if (!c) return true
-  const ws = c.weekStart, we = c.weekEnd
-  if (ws == null || we == null) return true
-  if (weekNumber == null) return true
-  if (weekNumber < ws || weekNumber > we) return false
-  const wt = c.weekType
-  if (!wt) return true
-  if (wt === 'even' || wt === '双') return weekNumber % 2 === 0
-  if (wt === 'odd' || wt === '单') return weekNumber % 2 === 1
-  return true
-}
 
 const weekNumber = computed(() => computeWeekNumber(scheduleDate.value, firstWeekMonday.value))
 
@@ -88,7 +53,6 @@ const dayClasses = computed(() => {
   if (!dow) return []
   const wn = weekNumber.value
   const dowClasses = (allClasses.value ?? []).filter((c) => Number(c?.dayOfWeek) === Number(dow))
-  // 按周过滤；若过滤后为空但当天原始有课，回退为不过滤（防止 firstWeekMonday 配置错误）
   if (wn != null) {
     const filtered = dowClasses.filter((c) => matchesWeekFn(c, wn))
     if (filtered.length > 0 || dowClasses.length === 0) return filtered
@@ -107,6 +71,7 @@ function humanMinutes(total) {
   return `${h} 小时 ${mm} 分`
 }
 
+// ── API ──
 async function load() {
   loading.value = true
   error.value = ''
@@ -118,33 +83,60 @@ async function load() {
   } finally {
     loading.value = false
   }
-  // Weather loads independently, never blocks the dashboard
   loadWeather()
 }
 
 async function loadWeather() {
   try {
-    const w = await api.get('/user/weather', { params: { location: weatherLocation.value } })
+    let params = {}
+    let gotCoords = false
+    let lat, lon
+    // Try browser geolocation first
+    if (navigator.geolocation) {
+      try {
+        const pos = await new Promise((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000, maximumAge: 600000 })
+        })
+        lat = pos.coords.latitude
+        lon = pos.coords.longitude
+        params = { lat, lon }
+        gotCoords = true
+      } catch (geoErr) {
+        // Fall back to saved/default location
+        params = { location: weatherLocation.value }
+      }
+    } else {
+      params = { location: weatherLocation.value }
+    }
+    const w = await api.get('/user/weather', { params })
     weather.value = w?.data?.data ?? null
+    if (weather.value?.location) {
+      weatherLocation.value = weather.value.location
+    }
+    // Cache coordinates to Redis on first successful geolocation
+    if (gotCoords) {
+      api.put('/user/weather-location', null, {
+        params: { location: weatherLocation.value, lat, lon }
+      }).catch(() => {})
+    }
   } catch (e) {
-    // silently ignore weather errors
+    // silently ignore
   }
 }
 
 function selectWeatherLocation(loc) {
   weatherLocation.value = loc
   localStorage.setItem('weatherLocation', loc)
-  loadWeather()
-  api.put('/user/weather-location', null, { params: { location: loc } }).catch(() => {})
+  const coords = weatherLocationCoords[loc]
+  const fetchParams = coords ? { lat: coords.lat, lon: coords.lon } : { location: loc }
+  const saveParams = coords ? { location: loc, lat: coords.lat, lon: coords.lon } : { location: loc }
+  api.get('/user/weather', { params: fetchParams }).then(r => {
+    weather.value = r?.data?.data ?? null
+  }).catch(() => {})
+  api.put('/user/weather-location', null, { params: saveParams }).catch(() => {})
 }
 
-const filteredGoals = computed(() => {
-  const q = String(goalQuery.value || '').trim()
-  const list = dashboard.value?.goals ?? []
-  if (!q) return list
-  return list.filter((g) => String(g?.title || '').includes(q) || String(g?.description || '').includes(q))
-})
-
+// ── Computed ──
 const freeTimeSlots = computed(() => dashboard.value?.freeTimeSlots ?? [])
 const freeTotalMinutes = computed(() => {
   let sum = 0
@@ -176,6 +168,11 @@ const displayTaskSchedules = computed(() => {
   return (allTaskSchedules.value ?? []).filter((s) => dateKey(s?.startTime) === d)
 })
 
+const todayScheduleCount = computed(() => {
+  const d = String(today.value || '')
+  return (allTaskSchedules.value ?? []).filter((s) => dateKey(s?.startTime) === d).length
+})
+
 watch(
   () => [today.value, availableScheduleDates.value.join('|')].join('::'),
   () => {
@@ -190,96 +187,26 @@ watch(
   { immediate: true },
 )
 
-function resetGoalTasks() {
-  selectedGoalId.value = null
-  selectedGoalTitle.value = ''
-  selectedGoalTasks.value = []
-  tasksLoading.value = false
-  tasksError.value = ''
-}
-
-async function loadGoalTasks(goalId) {
-  const id = Number(goalId)
-  if (!Number.isFinite(id) || id <= 0) return
-  tasksLoading.value = true
-  tasksError.value = ''
-  try {
-    const res = await api.get(`/user/goals/${id}/tasks`)
-    selectedGoalTasks.value = res?.data?.data ?? []
-  } catch (e) {
-    tasksError.value = e?.response?.data?.message || '加载目标任务失败'
-    selectedGoalTasks.value = []
-  } finally {
-    tasksLoading.value = false
-  }
-}
-
-async function selectGoal(g) {
-  const id = Number(g?.id)
-  if (!Number.isFinite(id) || id <= 0) return
-  selectedGoalId.value = id
-  selectedGoalTitle.value = g?.title || `目标 ${id}`
-  await loadGoalTasks(id)
-}
-
-watch(
-  () => goalQuery.value,
-  (v) => {
-    const q = String(v || '').trim()
-    if (goalQueryTimer.value) clearTimeout(goalQueryTimer.value)
-    if (!q) {
-      resetGoalTasks()
-      return
-    }
-    goalQueryTimer.value = setTimeout(async () => {
-      const list = filteredGoals.value ?? []
-      if (!list.length) {
-        resetGoalTasks()
-        return
-      }
-      const stillValid = list.some((g) => Number(g?.id) === Number(selectedGoalId.value))
-      if (stillValid) return
-      await selectGoal(list[0])
-    }, 300)
-  },
-  { flush: 'post' },
-)
-
-onBeforeUnmount(() => {
-  if (goalQueryTimer.value) clearTimeout(goalQueryTimer.value)
-})
-
+// ── Timeline ──
 const timelineStartHour = 8
 const timelineEndHour = 22
 const blockGapPx = 8
 const minBlockHeightPx = 44
 
-function clampedDurationMinutes(start, end) {
-  const s = timeToMinutes(start)
-  const e = timeToMinutes(end)
-  if (s == null || e == null) return null
-  const startMin = timelineStartHour * 60
-  const endMin = timelineEndHour * 60
-  const topMin = Math.max(s, startMin)
-  const bottomMin = Math.min(e, endMin)
-  const d = bottomMin - topMin
-  return d > 0 ? d : null
-}
-
 const pxPerMinute = computed(() => {
   const mins = []
   for (const s of displayTaskSchedules.value ?? []) {
-    const d = clampedDurationMinutes(s?.startTime, s?.endTime)
+    const d = clampedDurationMinutes(s?.startTime, s?.endTime, timelineStartHour, timelineEndHour)
     if (d != null) mins.push(d)
   }
   for (const f of freeTimeSlots.value ?? []) {
-    const d = clampedDurationMinutes(f?.start, f?.end)
+    const d = clampedDurationMinutes(f?.start, f?.end, timelineStartHour, timelineEndHour)
     if (d != null) mins.push(d)
   }
   for (const c of dayClasses.value ?? []) {
     const start = `${scheduleDate.value}T${String(c?.startTime).slice(0, 5)}:00`
     const end = `${scheduleDate.value}T${String(c?.endTime).slice(0, 5)}:00`
-    const d = clampedDurationMinutes(start, end)
+    const d = clampedDurationMinutes(start, end, timelineStartHour, timelineEndHour)
     if (d != null) mins.push(d)
   }
   const minDur = mins.length ? Math.min(...mins) : null
@@ -290,55 +217,12 @@ const pxPerMinute = computed(() => {
 
 const timelineHeightPx = computed(() => (timelineEndHour - timelineStartHour) * 60 * pxPerMinute.value)
 
-function blockStyle(start, end) {
-  const s = timeToMinutes(start)
-  const e = timeToMinutes(end)
-  if (s == null || e == null) return null
-  const startMin = timelineStartHour * 60
-  const endMin = timelineEndHour * 60
-  const topMin = Math.max(s, startMin) - startMin
-  const bottomMin = Math.min(e, endMin) - startMin
-  const hMin = bottomMin - topMin
-  if (hMin <= 0) return null
-  const ppm = pxPerMinute.value
-  const topPx = Math.round(topMin * ppm)
-  const heightPx = Math.round(hMin * ppm)
-  const finalHeight = Math.max(minBlockHeightPx, heightPx - blockGapPx)
-  return { top: `${topPx}px`, height: `${finalHeight}px` }
-}
 
-function layoutOverlappingBlocks(blocks) {
-  if (!blocks || !blocks.length) return blocks
-  const sorted = [...blocks].sort((a, b) => (a._start || '').localeCompare(b._start || ''))
-  const groups = []
-  let cur = [sorted[0]]
-  let curEnd = sorted[0]._end || ''
-  for (let i = 1; i < sorted.length; i++) {
-    const s = sorted[i]._start || ''
-    if (s < curEnd) {
-      cur.push(sorted[i])
-      if ((sorted[i]._end || '') > curEnd) curEnd = sorted[i]._end || ''
-    } else {
-      groups.push(cur)
-      cur = [sorted[i]]
-      curEnd = sorted[i]._end || ''
-    }
-  }
-  groups.push(cur)
-  const margin = 1.5
-  for (const g of groups) {
-    if (g.length <= 1) continue
-    const n = g.length
-    const pct = (100 - margin * (n + 1)) / n
-    g.forEach((b, col) => {
-      b.style = { ...b.style, left: `${margin + col * (pct + margin)}%`, width: `${pct}%` }
-    })
-  }
-  return blocks
-}
+const blockStyleW = (start, end) => blockStyle(start, end, pxPerMinute.value, timelineStartHour, timelineEndHour, minBlockHeightPx, blockGapPx)
+
 
 const freeBlocks = computed(() =>
-  (freeTimeSlots.value ?? []).map((f) => ({ ...f, _start: f.start, _end: f.end, style: blockStyle(f?.start, f?.end) })).filter((f) => f.style),
+  (freeTimeSlots.value ?? []).map((f) => ({ ...f, _start: f.start, _end: f.end, style: blockStyleW(f?.start, f?.end) })).filter((f) => f.style),
 )
 
 const timelineBlocks = computed(() => {
@@ -346,7 +230,7 @@ const timelineBlocks = computed(() => {
     .map((c) => {
       const start = `${scheduleDate.value}T${String(c.startTime).slice(0, 5)}:00`
       const end = `${scheduleDate.value}T${String(c.endTime).slice(0, 5)}:00`
-      return { ...c, _kind: 'class', _start: start, _end: end, style: blockStyle(start, end) }
+      return { ...c, _kind: 'class', _start: start, _end: end, style: blockStyleW(start, end) }
     })
     .filter((c) => c.style)
 
@@ -357,7 +241,7 @@ const timelineBlocks = computed(() => {
       _idx: idx + 1,
       _start: s?.startTime,
       _end: s?.endTime,
-      style: blockStyle(s?.startTime, s?.endTime),
+      style: blockStyleW(s?.startTime, s?.endTime),
     }))
     .filter((s) => s.style)
 
@@ -376,238 +260,282 @@ function windText() {
   return `${w}`
 }
 
+let _ready = false
 onMounted(load)
+onActivated(() => { if (_ready) load(); _ready = true })
 </script>
 
 <template>
-  <v-row class="mb-2" align="center">
-    <v-col cols="12" md="6">
-      <v-text-field v-model="goalQuery" label="目标查询" density="comfortable" variant="outlined" />
-    </v-col>
-    <v-col cols="12" md="3">
-      <v-btn color="primary" :loading="loading" @click="load">刷新</v-btn>
-    </v-col>
-  </v-row>
+  <!-- ====== Page Header ====== -->
+  <div class="d-flex align-center flex-wrap ga-3 mb-4">
+    <div>
+      <div class="text-h5 font-weight-bold">仪表盘</div>
+      <div class="text-body-2 text-medium-emphasis">{{ today }} · 今日概览</div>
+    </div>
+    <v-spacer />
+    <v-btn variant="tonal" size="small" :loading="loading" @click="load">
+      <v-icon icon="mdi-refresh" size="18" class="mr-1" />刷新
+    </v-btn>
+  </div>
 
-  <v-alert v-if="error" type="error" variant="tonal" class="mb-4">{{ error }}</v-alert>
+  <v-alert v-if="error" type="error" variant="tonal" class="mb-4" density="compact">{{ error }}</v-alert>
 
-  <v-row v-if="dashboard">
-    <v-col cols="12" md="3">
-      <v-card class="pa-2">
-        <v-card-title class="d-flex align-center">
-          <v-icon icon="mdi-bullseye-arrow" class="mr-2" />
-          目标
-        </v-card-title>
-        <v-card-text class="text-h4 font-weight-bold">{{ dashboard.goals?.length ?? 0 }}</v-card-text>
-      </v-card>
-    </v-col>
-    <v-col cols="12" md="3">
-      <v-card class="pa-2">
-        <v-card-title class="d-flex align-center">
-          <v-icon icon="mdi-fire" class="mr-2" />
-          连续打卡
-        </v-card-title>
-        <v-card-text class="text-h4 font-weight-bold">{{ dashboard.streak ?? 0 }}</v-card-text>
-      </v-card>
-    </v-col>
-    <v-col cols="12" md="6">
-      <v-card class="pa-2">
-        <v-card-title class="d-flex align-center justify-space-between">
-          <div class="d-flex align-center">
+  <!-- ====== Loading Skeleton ====== -->
+  <template v-if="loading && !dashboard">
+    <v-row class="mb-4">
+      <v-col v-for="n in 4" :key="n" cols="6" md="3">
+        <v-skeleton-loader type="card" />
+      </v-col>
+    </v-row>
+    <v-row class="mb-4">
+      <v-col cols="12" md="5"><v-skeleton-loader type="card" /></v-col>
+      <v-col cols="12" md="7"><v-skeleton-loader type="card" /></v-col>
+    </v-row>
+    <v-row>
+      <v-col cols="12"><v-skeleton-loader type="card" /></v-col>
+    </v-row>
+  </template>
+
+  <template v-if="dashboard">
+    <!-- ====== Top Metric Cards ====== -->
+    <v-row class="mb-4">
+      <v-col cols="6" md="3">
+        <v-card class="dash-metric-card" color="primary" variant="tonal">
+          <div class="d-flex align-center ga-2 mb-2">
+            <v-icon icon="mdi-bullseye-arrow" size="18" />
+            <span class="text-caption font-weight-medium">目标数</span>
+          </div>
+          <div class="text-h4 font-weight-bold">{{ dashboard.goals?.length ?? 0 }}</div>
+        </v-card>
+      </v-col>
+      <v-col cols="6" md="3">
+        <v-card class="dash-metric-card" color="warning" variant="tonal">
+          <div class="d-flex align-center ga-2 mb-2">
+            <v-icon icon="mdi-fire" size="18" />
+            <span class="text-caption font-weight-medium">连续打卡</span>
+          </div>
+          <div class="text-h4 font-weight-bold">{{ dashboard.streak ?? 0 }} <span class="text-body-2 font-weight-regular">天</span></div>
+        </v-card>
+      </v-col>
+      <v-col cols="6" md="3">
+        <v-card class="dash-metric-card" color="success" variant="tonal">
+          <div class="d-flex align-center ga-2 mb-2">
+            <v-icon icon="mdi-calendar-check" size="18" />
+            <span class="text-caption font-weight-medium">今日排程</span>
+          </div>
+          <div class="text-h4 font-weight-bold">{{ todayScheduleCount }} <span class="text-body-2 font-weight-regular">项</span></div>
+        </v-card>
+      </v-col>
+      <v-col cols="6" md="3">
+        <v-card class="dash-metric-card" color="info" variant="tonal">
+          <div class="d-flex align-center ga-2 mb-2">
+            <v-icon icon="mdi-clock-outline" size="18" />
+            <span class="text-caption font-weight-medium">课余时长</span>
+          </div>
+          <div class="text-h4 font-weight-bold">{{ humanMinutes(freeTotalMinutes) }}</div>
+        </v-card>
+      </v-col>
+    </v-row>
+
+    <!-- ====== Weather + Free Time ====== -->
+    <v-row class="mb-4">
+      <v-col cols="12" md="5">
+        <v-card class="h-100">
+          <v-card-title class="d-flex align-center pb-1">
             <v-icon icon="mdi-weather-partly-cloudy" class="mr-2" />
-            今日 {{ today }}
-          </div>
-          <v-menu>
-            <template #activator="{ props: menuProps }">
-              <v-btn v-bind="menuProps" size="small" variant="text" :icon="true">
-                <v-icon>mdi-map-marker</v-icon>
-                <span class="text-caption ml-1">{{ weatherLocation }}</span>
-              </v-btn>
-            </template>
-            <v-list density="compact">
-              <v-list-item
-                v-for="loc in weatherLocations"
-                :key="loc"
-                :title="loc"
-                :active="loc === weatherLocation"
-                @click="selectWeatherLocation(loc)"
-              />
-            </v-list>
-          </v-menu>
-        </v-card-title>
-        <v-card-text>
-          <div v-if="weather && weather.summary !== '天气服务不可用'">
-            <div class="text-h5 font-weight-bold">{{ weather.summary || '天气' }} {{ tempText() }}°C</div>
-            <div class="text-body-2" style="opacity:0.75">
-              风速 {{ windText() }} km/h
-              <span v-if="weather.feelsLike != null"> · 体感 {{ weather.feelsLike }}°C</span>
-              <span v-if="weather.humidity"> · 湿度 {{ weather.humidity }}%</span>
+            天气
+            <v-spacer />
+            <v-menu>
+              <template #activator="{ props: menuProps }">
+                <v-btn v-bind="menuProps" size="x-small" variant="text" class="text-caption mr-1">
+                  <v-icon icon="mdi-map-marker" size="14" class="mr-1" />{{ weatherLocation }}
+                </v-btn>
+              </template>
+              <v-list density="compact">
+                <v-list-item
+                  v-for="loc in weatherLocations"
+                  :key="loc"
+                  :title="loc"
+                  :active="loc === weatherLocation"
+                  @click="selectWeatherLocation(loc)"
+                />
+              </v-list>
+            </v-menu>
+            <v-btn size="x-small" variant="text" icon="mdi-refresh" aria-label="刷新天气" @click="loadWeather" />
+          </v-card-title>
+          <v-divider />
+          <v-card-text>
+            <div v-if="weather && weather.summary !== '天气服务不可用'" class="d-flex align-center ga-4">
+              <div class="text-h3 font-weight-bold">{{ tempText() }}°</div>
+              <div>
+                <div class="text-body-1 font-weight-medium">{{ weather.summary || '天气' }}</div>
+                <div class="text-caption" style="opacity:0.7">
+                  风速 {{ windText() }} km/h
+                  <span v-if="weather.feelsLike != null"> · 体感 {{ weather.feelsLike }}°C</span>
+                  <span v-if="weather.humidity"> · 湿度 {{ weather.humidity }}%</span>
+                </div>
+              </div>
             </div>
-          </div>
-          <div v-else-if="weather && weather.summary === '天气服务不可用'" class="text-body-2" style="opacity:0.7">
-            天气服务暂不可用
-            <v-btn size="x-small" variant="text" class="ml-2" @click="loadWeather">重试</v-btn>
-          </div>
-          <div v-else class="text-body-2" style="opacity:0.7">天气加载中…</div>
-        </v-card-text>
-      </v-card>
-    </v-col>
-    <v-col cols="12" md="6">
-      <v-card class="pa-2">
-        <v-card-title class="d-flex align-center">
-          <v-icon icon="mdi-calendar-clock" class="mr-2" />
-          今日空闲时间
-        </v-card-title>
-        <v-card-text>
-          <v-alert v-if="!(freeTimeSlots?.length)" type="info" variant="tonal">暂无空闲时间（或课表未导入）</v-alert>
-          <div v-else>
-            <div class="d-flex align-center justify-space-between mb-2">
-              <div class="text-body-2" style="opacity:0.75">合计 {{ humanMinutes(freeTotalMinutes) }}</div>
-              <v-chip size="small" variant="tonal" color="primary">{{ today }}</v-chip>
+            <div v-else-if="weather && weather.summary === '天气服务不可用'" class="text-body-2" style="opacity:0.5">
+              天气服务暂不可用
+              <v-btn size="x-small" variant="text" class="ml-1" @click="loadWeather">重试</v-btn>
             </div>
-            <div class="d-flex flex-wrap" style="gap:8px">
+            <div v-else class="text-body-2" style="opacity:0.5">加载中…</div>
+          </v-card-text>
+        </v-card>
+      </v-col>
+      <v-col cols="12" md="7">
+        <v-card class="h-100">
+          <v-card-title class="d-flex align-center pb-1">
+            <v-icon icon="mdi-calendar-clock" class="mr-2" />
+            今日课余时间
+            <v-spacer />
+            <v-chip size="small" variant="tonal" color="primary">{{ today }}</v-chip>
+          </v-card-title>
+          <v-divider />
+          <v-card-text>
+            <div v-if="freeTotalMinutes" class="text-h5 font-weight-bold mb-3">{{ humanMinutes(freeTotalMinutes) }}</div>
+            <v-alert v-if="!(freeTimeSlots?.length)" type="info" variant="tonal" density="compact" class="mb-0">
+              暂无课余时段，请导入课表
+            </v-alert>
+            <div v-else class="d-flex flex-wrap" style="gap:8px">
               <v-chip v-for="(slot, i) in freeTimeSlots" :key="i" size="small" variant="outlined">
                 {{ fmtHm(slot.start) }} - {{ fmtHm(slot.end) }}
               </v-chip>
             </div>
-          </div>
-        </v-card-text>
-      </v-card>
-    </v-col>
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
 
-    <v-col cols="12" md="6">
-      <v-card class="pa-2">
-        <v-card-title class="d-flex align-center">
-          <v-icon icon="mdi-timetable" class="mr-2" />
-          任务日程
-        </v-card-title>
-        <v-card-text>
-          <div class="mb-2">
-            <div class="text-caption mb-1" style="opacity:0.75">选择日期</div>
-            <v-chip-group column>
-              <v-chip
-                v-for="d in availableScheduleDates"
-                :key="d"
-                :color="String(d) === String(scheduleDate) ? 'primary' : undefined"
-                :variant="String(d) === String(scheduleDate) ? 'flat' : 'outlined'"
-                size="small"
-                @click="scheduleDate = d"
-              >
-                {{ d }}
-              </v-chip>
-            </v-chip-group>
-          </div>
-
-          <v-alert v-if="!(displayTaskSchedules?.length) && !(dayClasses?.length)" type="info" variant="tonal" class="mb-2">该日暂无日程</v-alert>
-
-          <div v-if="(displayTaskSchedules?.length) || (dayClasses?.length)" class="dash-timeline-shell mb-2">
-            <div class="dash-timeline-axis" :style="{ height: timelineHeightPx + 'px' }">
-              <div
-                v-for="h in (timelineEndHour - timelineStartHour + 1)"
-                :key="h"
-                class="dash-timeline-axis-row"
-                :style="{ height: (60 * pxPerMinute) + 'px' }"
-              >
-                {{ String(timelineStartHour + h - 1).padStart(2, '0') }}:00
-              </div>
-            </div>
-            <div class="dash-timeline-canvas" :style="{ height: timelineHeightPx + 'px' }">
-              <div
-                v-for="h in (timelineEndHour - timelineStartHour + 1)"
-                :key="h"
-                class="dash-timeline-gridline"
-                :style="{ top: ((h - 1) * 60 * pxPerMinute) + 'px' }"
-              />
-
-              <div v-for="(b, i) in freeBlocks" :key="'free-' + i" class="dash-timeline-free" :style="b.style" />
-
-              <div
-                v-for="(b, i) in timelineBlocks"
-                :key="(b._kind || 'block') + '-' + (b.id ?? i)"
-                class="dash-timeline-block"
-                :class="b._kind === 'class' ? 'dash-timeline-class' : 'dash-timeline-task'"
-                :style="b.style"
-              >
-                <div class="dash-timeline-title">{{ b._kind === 'class' ? b.courseName : (b.taskTitle || '任务 ' + b._idx) }}</div>
-                <div class="dash-timeline-sub">{{ b._kind === 'class' ? (String(b.startTime).slice(0, 5) + ' - ' + String(b.endTime).slice(0, 5) + ' ' + (b.location || '')) : (fmtHm(b.startTime) + ' - ' + fmtHm(b.endTime)) }}</div>
-              </div>
-            </div>
-          </div>
-        </v-card-text>
-      </v-card>
-    </v-col>
-
-    <v-col cols="12">
-      <v-card class="pa-2">
-        <v-card-title class="d-flex align-center">
-          <v-icon icon="mdi-chart-arc" class="mr-2" />
-          目标进度
-        </v-card-title>
-        <v-card-text>
-          <v-alert v-if="!(dashboard.goalProgress?.length)" type="info" variant="tonal">暂无目标进度</v-alert>
-          <div v-for="g in dashboard.goalProgress ?? []" :key="g.goalId" class="mb-4">
-            <div class="d-flex justify-space-between mb-1">
-              <div class="text-subtitle-2 font-weight-semibold">{{ g.title }}</div>
-              <div class="text-caption" style="opacity:0.75">{{ g.doneTasks }}/{{ g.totalTasks }}（{{ g.percent }}%）</div>
-            </div>
-            <v-progress-linear :model-value="g.percent" height="10" rounded color="primary" />
-          </div>
-        </v-card-text>
-      </v-card>
-    </v-col>
-
-    <v-col cols="12">
-      <v-card class="pa-2">
-        <v-card-title class="d-flex align-center">
-          <v-icon icon="mdi-magnify" class="mr-2" />
-          目标任务查询
-        </v-card-title>
-        <v-card-text>
-          <v-alert v-if="!String(goalQuery || '').trim()" type="info" variant="tonal">输入目标关键词后，自动展示匹配目标的任务列表</v-alert>
-
-          <v-alert v-else-if="!(filteredGoals?.length)" type="info" variant="tonal">暂无匹配目标</v-alert>
-
-          <div v-else>
-            <div v-if="(filteredGoals?.length ?? 0) > 1" class="mb-2">
-              <div class="text-caption mb-1" style="opacity:0.75">匹配到多个目标，点击切换要查看的目标</div>
+    <!-- ====== Task Schedule Timeline ====== -->
+    <v-row class="mb-4">
+      <v-col cols="12">
+        <v-card>
+          <v-card-title class="d-flex align-center pb-1">
+            <v-icon icon="mdi-timetable" class="mr-2" />
+            任务日程
+            <v-spacer />
+            <span class="text-caption text-medium-emphasis mr-2">{{ scheduleDate }}</span>
+          </v-card-title>
+          <v-divider />
+          <v-card-text>
+            <div class="mb-3">
               <v-chip-group column>
                 <v-chip
-                  v-for="g in filteredGoals"
-                  :key="g.id"
-                  :color="Number(g.id) === Number(selectedGoalId) ? 'primary' : undefined"
-                  :variant="Number(g.id) === Number(selectedGoalId) ? 'flat' : 'outlined'"
-                  @click="selectGoal(g)"
+                  v-for="d in availableScheduleDates"
+                  :key="d"
+                  :color="String(d) === String(scheduleDate) ? 'primary' : undefined"
+                  :variant="String(d) === String(scheduleDate) ? 'tonal' : 'outlined'"
+                  size="small"
+                  @click="scheduleDate = d"
                 >
-                  {{ g.title }}
+                  {{ d }}
                 </v-chip>
               </v-chip-group>
             </div>
 
-            <v-alert v-if="tasksError" type="error" variant="tonal" class="mb-2">{{ tasksError }}</v-alert>
-            <v-alert v-else-if="tasksLoading" type="info" variant="tonal" class="mb-2">正在加载任务…</v-alert>
-            <v-alert v-else-if="selectedGoalId && !(selectedGoalTasks?.length)" type="info" variant="tonal" class="mb-2">
-              {{ selectedGoalTitle }} 暂无任务
+            <v-alert v-if="!(displayTaskSchedules?.length) && !(dayClasses?.length)" type="info" variant="tonal" density="compact">
+              该日暂无日程
             </v-alert>
 
-            <div v-else-if="selectedGoalId">
-              <div class="text-subtitle-2 font-weight-semibold mb-2">{{ selectedGoalTitle }} 的任务</div>
-              <v-list density="compact">
-                <v-list-item
-                  v-for="t in (selectedGoalTasks ?? [])"
-                  :key="t.id"
-                  :title="t.title"
-                  :subtitle="t.description"
+            <div v-else class="dash-timeline-shell">
+              <div class="dash-timeline-axis" :style="{ height: timelineHeightPx + 'px' }">
+                <div
+                  v-for="h in (timelineEndHour - timelineStartHour + 1)"
+                  :key="h"
+                  class="dash-timeline-axis-row"
+                  :style="{ height: (60 * pxPerMinute) + 'px' }"
+                >
+                  {{ String(timelineStartHour + h - 1).padStart(2, '0') }}:00
+                </div>
+              </div>
+              <div class="dash-timeline-canvas" :style="{ height: timelineHeightPx + 'px' }">
+                <div
+                  v-for="h in (timelineEndHour - timelineStartHour + 1)"
+                  :key="h"
+                  class="dash-timeline-gridline"
+                  :style="{ top: ((h - 1) * 60 * pxPerMinute) + 'px' }"
                 />
-              </v-list>
+
+                <div v-for="(b, i) in freeBlocks" :key="'free-' + i" class="dash-timeline-free" :style="b.style" />
+
+                <div
+                  v-for="(b, i) in timelineBlocks"
+                  :key="(b._kind || 'block') + '-' + (b.id ?? i)"
+                  class="dash-timeline-block"
+                  :class="b._kind === 'class' ? 'dash-timeline-class' : 'dash-timeline-task'"
+                  :style="b.style"
+                >
+                  <div class="dash-timeline-title">{{ b._kind === 'class' ? b.courseName : (b.taskTitle || '任务 ' + b._idx) }}</div>
+                  <div class="dash-timeline-sub">
+                    {{ b._kind === 'class' ? (String(b.startTime).slice(0, 5) + ' - ' + String(b.endTime).slice(0, 5) + ' ' + (b.location || '')) : (fmtHm(b.startTime) + ' - ' + fmtHm(b.endTime)) }}
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
-        </v-card-text>
-      </v-card>
-    </v-col>
-  </v-row>
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
+
+    <!-- ====== Goal Progress ====== -->
+    <v-row>
+      <v-col cols="12">
+        <v-card>
+          <v-card-title class="d-flex align-center pb-1">
+            <v-icon icon="mdi-chart-arc" class="mr-2" />
+            目标进度
+          </v-card-title>
+          <v-divider />
+          <v-card-text>
+            <v-alert v-if="!(dashboard.goalProgress?.length)" type="info" variant="tonal" density="compact">
+              暂无目标进度
+            </v-alert>
+            <div v-for="g in dashboard.goalProgress ?? []" :key="g.goalId" class="goal-progress-item">
+              <div class="d-flex justify-space-between align-center mb-1">
+                <div class="d-flex align-center ga-2">
+                  <span class="text-body-2 font-weight-semibold">{{ g.title }}</span>
+                  <v-chip size="x-small" :color="g.percent >= 100 ? 'success' : 'primary'" variant="tonal">
+                    {{ g.percent }}%
+                  </v-chip>
+                </div>
+                <span class="text-caption" style="opacity:0.65">{{ g.doneTasks }}/{{ g.totalTasks }}</span>
+              </div>
+              <v-progress-linear :model-value="g.percent" height="8" rounded :color="g.percent >= 100 ? 'success' : 'primary'" />
+            </div>
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
+  </template>
 </template>
 
 <style scoped>
+/* ── Metric Cards ── */
+.dash-metric-card {
+  padding: 16px;
+  border-radius: 12px;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.dash-metric-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(var(--v-theme-on-surface), 0.1);
+}
+
+/* ── Goal Progress ── */
+.goal-progress-item {
+  padding: 8px 12px;
+  border-radius: 10px;
+  transition: background 0.15s;
+  margin-bottom: 8px;
+}
+.goal-progress-item:last-child { margin-bottom: 0; }
+.goal-progress-item:hover {
+  background: rgba(var(--v-theme-on-surface), 0.025);
+}
+
+/* ── Timeline ── */
 .dash-timeline-shell {
   display: grid;
   grid-template-columns: 64px 1fr;
@@ -615,12 +543,12 @@ onMounted(load)
   max-height: 360px;
   overflow: auto;
   border-radius: 12px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.08);
 }
 
 .dash-timeline-axis {
   position: relative;
-  background: rgba(0, 0, 0, 0.02);
+  background: rgba(var(--v-theme-on-surface), 0.02);
   padding-top: 6px;
 }
 
@@ -629,13 +557,13 @@ onMounted(load)
   padding-right: 8px;
   text-align: right;
   font-size: 12px;
-  opacity: 0.75;
+  opacity: 0.65;
 }
 
 .dash-timeline-canvas {
   position: relative;
-  padding: 6px 10px 6px 10px;
-  background: linear-gradient(180deg, rgba(0, 0, 0, 0.015), rgba(0, 0, 0, 0.01));
+  padding: 6px 10px;
+  background: linear-gradient(180deg, rgba(var(--v-theme-on-surface), 0.01), rgba(var(--v-theme-on-surface), 0.02));
 }
 
 .dash-timeline-gridline {
@@ -643,7 +571,7 @@ onMounted(load)
   left: 0;
   right: 0;
   height: 1px;
-  background: rgba(0, 0, 0, 0.06);
+  background: rgba(var(--v-theme-on-surface), 0.06);
 }
 
 .dash-timeline-free {
@@ -652,7 +580,7 @@ onMounted(load)
   right: 4px;
   border-radius: 8px;
   background: rgba(var(--v-theme-primary), 0.06);
-  border: 1px dashed rgba(var(--v-theme-primary), 0.18);
+  border: 1px dashed rgba(var(--v-theme-primary), 0.2);
   z-index: 0;
 }
 
@@ -671,13 +599,13 @@ onMounted(load)
 
 .dash-timeline-class {
   background: rgba(var(--v-theme-secondary), 0.1);
-  border-color: rgba(var(--v-theme-secondary), 0.25);
+  border-color: rgba(var(--v-theme-secondary), 0.2);
   border-left-color: rgb(var(--v-theme-secondary));
 }
 
 .dash-timeline-task {
   background: rgba(var(--v-theme-primary), 0.1);
-  border-color: rgba(var(--v-theme-primary), 0.22);
+  border-color: rgba(var(--v-theme-primary), 0.2);
   border-left-color: rgb(var(--v-theme-primary));
 }
 
@@ -688,9 +616,9 @@ onMounted(load)
 }
 
 .dash-timeline-sub {
-  margin-top: 4px;
-  font-size: 12px;
-  opacity: 0.8;
+  margin-top: 2px;
+  font-size: 11px;
+  opacity: 0.7;
   line-height: 1.2;
 }
 </style>

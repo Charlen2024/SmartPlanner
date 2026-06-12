@@ -60,6 +60,9 @@ public class PlanCandidateWorker {
         - procrastinationIndex > 0.6：用户容易拖延，安排应保守——减少任务数、多留缓冲、优先安排短任务
         - procrastinationIndex < 0.3：用户自律性强，可适度紧凑安排
         - 严禁与课表冲突：所有安排必须落在 freeSlots 内
+        - 每个任务之间必须保留至少 breakMinutes 分钟的间隔（前一个 endTime + breakMinutes ≤ 后一个 startTime）
+        - 尽可能把任务分散到不同的 freeSlots 中，优先填满较早的空闲时段
+        - 必须为 tasks 列表中的每一个任务都安排时间，不得遗漏
         """;
 
     @Async

@@ -8,3 +8,13 @@ spring:
     nacos:
       discovery:
         server-addr: ${SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR:nacos:8848}
+  boot:
+    admin:
+      discovery:
+        enabled: true
+        ignored-services:
+          - nacos
+          - consul
+      monitor:
+        default-timeout: 10000
+        default-retries: 2

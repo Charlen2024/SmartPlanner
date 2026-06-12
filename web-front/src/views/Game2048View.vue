@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
 
 const size = 4
 const board = ref(Array(size * size).fill(0))
@@ -215,12 +215,42 @@ function onKeydown(e) {
 
 onMounted(() => {
   restart()
-  window.addEventListener('keydown', onKeydown, { passive: false })
 })
 
-onUnmounted(() => {
+function attachKeydown() {
+  window.addEventListener('keydown', onKeydown, { passive: false })
+}
+function detachKeydown() {
   window.removeEventListener('keydown', onKeydown)
-})
+}
+
+let touchStartX = 0
+let touchStartY = 0
+
+function onTouchStart(e) {
+  const t = e.touches[0]
+  touchStartX = t.clientX
+  touchStartY = t.clientY
+}
+
+function onTouchEnd(e) {
+  const t = e.changedTouches[0]
+  const dx = t.clientX - touchStartX
+  const dy = t.clientY - touchStartY
+  const minSwipe = 30
+  if (Math.abs(dx) < minSwipe && Math.abs(dy) < minSwipe) return
+  e.preventDefault()
+  if (Math.abs(dx) > Math.abs(dy)) {
+    applyMove(dx > 0 ? 'right' : 'left')
+  } else {
+    applyMove(dy > 0 ? 'down' : 'up')
+  }
+}
+
+onActivated(attachKeydown)
+onDeactivated(detachKeydown)
+
+onUnmounted(detachKeydown)
 </script>
 
 <template>
@@ -234,7 +264,7 @@ onUnmounted(() => {
     </div>
 
     <div class="text-caption mt-2" style="opacity: 0.75">
-      键盘方向键或 WASD 操作
+      键盘方向键 / WASD / 滑动 操作
     </div>
 
     <v-alert v-if="over" type="warning" variant="tonal" class="mt-3">
@@ -246,6 +276,8 @@ onUnmounted(() => {
         class="game-grid"
         role="application"
         aria-label="2048"
+        @touchstart.prevent="onTouchStart"
+        @touchend.prevent="onTouchEnd"
       >
         <div v-for="(v, i) in cells" :key="i" class="game-cell">
           <div

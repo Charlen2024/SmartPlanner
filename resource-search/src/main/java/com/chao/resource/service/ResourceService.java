@@ -21,12 +21,7 @@ import org.elasticsearch.client.Response;
 import org.springframework.data.elasticsearch.core.SearchHit;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -38,16 +33,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.LinkedHashSet;
 import java.util.HashSet;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
-import java.util.concurrent.atomic.AtomicBoolean;
-import org.springframework.scheduling.annotation.Scheduled;
-import com.chao.common.client.GoalClient;
-import com.chao.common.dto.Result;
-import com.chao.common.dto.GoalDto;
-import jakarta.annotation.PostConstruct;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -63,34 +50,11 @@ public class ResourceService {
     private final ElasticsearchOperations elasticsearchOperations;
     private final OpenAiCompatClient openAiCompatClient;
     private final ObjectMapper objectMapper;
-    private final GoalClient goalClient;
-    private final RestTemplate externalRestTemplate;
-    private final Executor aiTaskExecutor;
-    private final AtomicBoolean crawlerRunning = new AtomicBoolean(false);
-    private volatile boolean crawlerPaused = false;
-
-    // --- crawler statistics ---
-    private volatile long lastRunTime;
-    private volatile int lastRunTopicsCount;
-    private volatile int lastRunNewCount;
-    private volatile long totalCrawled;
-    private volatile int consecutiveFailures;
-    private volatile int consecutiveZeroNew;
-
-    @Value("${smartplanner.crawler.bilibili.enabled:true}")
-    private boolean bilibiliCrawlerEnabled;
-    @Value("${smartplanner.crawler.bilibili.topics:Java,Spring Boot,Python,Vue}")
-    private String bilibiliCrawlerTopics;
-    @Value("${smartplanner.crawler.bilibili.interval-ms:21600000}")
-    private long bilibiliCrawlerIntervalMs;
-    @Value("${smartplanner.crawler.bilibili.per-topic-limit:3}")
-    private int bilibiliCrawlerPerTopicLimit;
-    @Value("${smartplanner.crawler.bilibili.topic-delay-ms:800}")
-    private long bilibiliCrawlerTopicDelayMs;
+    private final BilibiliCrawlerService bilibiliCrawlerService;
 
     @Value("${smartplanner.ai.rag-timeout-seconds:45}")
     private int ragTimeoutSeconds;
-    @Value("${smartplanner.ai.advice-timeout-seconds:90}")
+    @Value("${smartplanner.ai.advice-timeout-seconds:120}")
     private int adviceTimeoutSeconds;
 
     @Autowired(required = false)
@@ -102,53 +66,15 @@ public class ResourceService {
     @Value("${smartplanner.search.vector.enabled:true}")
     private boolean vectorSearchEnabled;
 
-    @Value("${smartplanner.crawler.quality-filter.enabled:true}")
-    private boolean qualityFilterEnabled;
-
-    @Value("${smartplanner.crawler.bilibili.query-suffixes:教程,入门,基础}")
-    private String bilibiliQuerySuffixes;
-
-    private static final Pattern TITLE_NOISE = Pattern.compile("(第\\s*\\d+\\s*集|ep\\s*\\d+|p\\s*\\d+|\\d+\\s*分钟|\\d+\\s*秒|时长[:：]?\\s*\\d+\\s*(秒|分钟)|bv\\w+|【购课[^】]*】|chapter\\s*\\d+|unit\\s*\\d+|\\d+(?:\\.\\d+)?--[^\\s]+|\\([^)]*\\)|（[^）]*）)", Pattern.CASE_INSENSITIVE);
+    static final Pattern TITLE_NOISE = Pattern.compile("(第\\s*\\d+\\s*集|ep\\s*\\d+|p\\s*\\d+|\\d+\\s*分钟|\\d+\\s*秒|时长[:：]?\\s*\\d+\\s*(秒|分钟)|bv\\w+|【购课[^】]*】|chapter\\s*\\d+|unit\\s*\\d+|\\d+(?:\\.\\d+)?--[^\\s]+|\\([^)]*\\)|（[^）]*）)", Pattern.CASE_INSENSITIVE);
     private static final Pattern NON_WORD = Pattern.compile("[^\\p{IsHan}\\p{IsAlphabetic}\\p{IsDigit}]+");
     private static final Pattern DIGITS = Pattern.compile("\\d+");
     private static final Pattern TITLE_SPLIT = Pattern.compile("\\s*[-－—]\\s*");
-    private static final Pattern BILIBILI_BV = Pattern.compile("(?i)/video/(BV[0-9A-Za-z]+)");
+    static final Pattern BILIBILI_BV = Pattern.compile("(?i)/video/(BV[0-9A-Za-z]+)");
     private static final Pattern DIGITS_ONLY = Pattern.compile("^\\d+$");
     private static final Pattern HEX_HASH = Pattern.compile("^[0-9a-fA-F]{32,}$");
     private static final Pattern HEX_HASH_SUFFIX = Pattern.compile(".*_[0-9a-fA-F]{16,}$");
-    private static final Pattern CJK_CHAR = Pattern.compile("[\\u4E00-\\u9FFF]");
-
-    // --- crawler getters for actuator endpoint ---
-    public boolean isCrawlerRunning() { return crawlerRunning.get(); }
-    public boolean isCrawlerPaused() { return crawlerPaused; }
-    public long getLastRunTime() { return lastRunTime; }
-    public int getLastRunTopicsCount() { return lastRunTopicsCount; }
-    public int getLastRunNewCount() { return lastRunNewCount; }
-    public long getTotalCrawled() { return totalCrawled; }
-    public int getConsecutiveFailures() { return consecutiveFailures; }
-    public int getConsecutiveZeroNew() { return consecutiveZeroNew; }
-    public boolean isBilibiliCrawlerEnabled() { return bilibiliCrawlerEnabled; }
-    public long getBilibiliCrawlerIntervalMs() { return bilibiliCrawlerIntervalMs; }
-    public long getBilibiliCrawlerTopicDelayMs() { return bilibiliCrawlerTopicDelayMs; }
-    public int getBilibiliCrawlerPerTopicLimit() { return bilibiliCrawlerPerTopicLimit; }
-    public void pauseCrawler() { this.crawlerPaused = true; }
-    public void resumeCrawler() { this.crawlerPaused = false; }
-
-    @jakarta.annotation.PostConstruct
-    public void initCrawl() {
-        Runnable task = () -> {
-            try {
-                Thread.sleep(3000);
-                scheduledBilibiliCrawl();
-            } catch (Exception ignored) {
-            }
-        };
-        if (aiTaskExecutor != null) {
-            CompletableFuture.runAsync(task, aiTaskExecutor);
-        } else {
-            CompletableFuture.runAsync(task);
-        }
-    }
+    static final Pattern CJK_CHAR = Pattern.compile("[\\u4E00-\\u9FFF]");
 
     public CourseResource createResource(String topic, String title, String platform, String url, String summary) {
         CourseResource cr = new CourseResource();
@@ -234,7 +160,7 @@ public class ResourceService {
                         // Try Bilibili real-time before default fallback
             if (out.isEmpty() && !q.isBlank()) {
                 try {
-                    List<ResourceClient.CourseResource> bilibiliResults = fetchBilibiliCandidates(q, q, 6);
+                    List<ResourceClient.CourseResource> bilibiliResults = bilibiliCrawlerService.fetchBilibiliCandidates(q, q, 6);
                     if (bilibiliResults != null && !bilibiliResults.isEmpty()) {
                         for (ResourceClient.CourseResource r : bilibiliResults) {
                             if (r != null && r.getUrl() != null) {
@@ -243,7 +169,7 @@ public class ResourceService {
                         }
                         // Persist crawled results
                         for (ResourceClient.CourseResource r : bilibiliResults) {
-                            saveIfNew(q, r);
+                            bilibiliCrawlerService.saveIfNew(q, r);
                         }
                     }
                 } catch (Exception ignored) {
@@ -940,67 +866,8 @@ public class ResourceService {
         }
     }
 
-    private boolean isCJK(String s) {
-        if (s == null || s.isBlank()) return false;
-        return s.codePoints().anyMatch(cp -> Character.UnicodeBlock.of(cp) == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS);
-    }
-
-    private boolean isValidTitle(String title, String topic) {
-        if (title == null || title.isBlank()) return false;
-        if (title.length() < 4) return false;
-        if (DIGITS_ONLY.matcher(title).matches()) return false;
-        if (title.startsWith("%")) return false;
-        if (HEX_HASH.matcher(title).matches()) return false;
-        if (HEX_HASH_SUFFIX.matcher(title).matches()) return false;
-        if (isCJK(topic)) {
-            boolean titleHasCJK = CJK_CHAR.matcher(title).find();
-            if (!titleHasCJK && title.length() >= 15 && !title.contains(" ")) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private List<String> buildSearchQueries(String topic) {
-        List<String> queries = new ArrayList<>();
-        queries.add(topic);
-        if (isCJK(topic) && bilibiliQuerySuffixes != null && !bilibiliQuerySuffixes.isBlank()) {
-            for (String suffix : bilibiliQuerySuffixes.split(",")) {
-                String s = suffix.trim();
-                if (!s.isEmpty()) {
-                    queries.add(topic + s);
-                }
-            }
-        }
-        return queries;
-    }
-
-    private boolean isContentRelevantToTopic(String topic, String title, String summary) {
-        if (topic == null || topic.isBlank()) return true;
-        if (title == null || title.isBlank()) return false;
-        String normTopic = normalizeText(topic);
-        String normTitle = normalizeText(title);
-        String normSummary = summary != null ? normalizeText(summary) : "";
-        if (normTitle.contains(normTopic) || normTopic.contains(normTitle)) return true;
-        if (!normSummary.isBlank() && (normSummary.contains(normTopic) || normTopic.contains(normSummary)))
-            return true;
-        double titleSim = bigramSimilarity(normTopic, normTitle);
-        double summarySim = normSummary.isBlank() ? 0.0 : bigramSimilarity(normTopic, normSummary);
-        double combinedSim = Math.max(titleSim, summarySim);
-        boolean hasCJK = normTopic.codePoints().anyMatch(cp ->
-                Character.isIdeographic(cp) || (cp >= 0x4E00 && cp <= 0x9FFF));
-        double threshold = hasCJK ? 0.06 : 0.10;
-        if (combinedSim >= threshold) return true;
-        if (hasCJK && normTopic.length() <= 3) {
-            long matchCount = normTopic.codePoints()
-                    .filter(cp -> normTitle.indexOf(cp) >= 0)
-                    .count();
-            if (matchCount >= normTopic.codePoints().count() * 0.5) return true;
-        }
-        return false;
-    }
-
-    private String canonicalUrl(String url) {
+    // --- shared with BilibiliCrawlerService (package-private access) ---
+    static String canonicalUrl(String url) {
         if (url == null) return null;
         String u = url.trim();
         if (u.isEmpty()) return null;
@@ -1392,7 +1259,7 @@ public class ResourceService {
         return false;
     }
 
-    private int bigramMatchCount(String q, String t, String s) {
+    static int bigramMatchCount(String q, String t, String s) {
         if (q == null || q.isBlank()) return 0;
         String a = t != null ? t : "";
         String b = s != null ? s : "";
@@ -1412,7 +1279,7 @@ public class ResourceService {
         return hit;
     }
 
-    private String normalizeText(String s) {
+    static String normalizeText(String s) {
         if (s == null) return "";
         String t = s.trim().toLowerCase();
         StringBuilder sb = new StringBuilder(t.length());
@@ -1429,7 +1296,7 @@ public class ResourceService {
         return sb.toString();
     }
 
-    private double bigramSimilarity(String a, String b) {
+    static double bigramSimilarity(String a, String b) {
         if (a == null || b == null) return 0.0;
         String x = a.trim();
         String y = b.trim();
@@ -1480,300 +1347,4 @@ public class ResourceService {
         dto.setSummary(summary);
         return dto;
     }
-    @Scheduled(initialDelayString = "${smartplanner.crawler.bilibili.initial-delay-ms:120000}", fixedDelayString = "${smartplanner.crawler.bilibili.interval-ms:21600000}")
-    public void scheduledBilibiliCrawl() {
-        if (!bilibiliCrawlerEnabled || crawlerPaused) return;
-        if (!crawlerRunning.compareAndSet(false, true)) return;
-        try {
-            Set<String> topics = new LinkedHashSet<>();
-            // 1. Get topics from existing resource DB
-            try {
-                List<CourseResource> existing = courseResourceMapper.selectList(null);
-                if (existing != null) {
-                    for (CourseResource r : existing) {
-                        if (r.getTopic() != null && !r.getTopic().isBlank()) {
-                            topics.add(r.getTopic().trim());
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("Failed to load existing topics from DB: {}", e.getMessage());
-            }
-            // 2. Add topics from user goals (learning interests)
-            try {
-                Result<java.util.List<String>> topicsResult = goalClient.getDistinctTopics();
-                java.util.List<String> goalTopics = topicsResult != null ? topicsResult.getData() : java.util.List.of();
-                if (goalTopics != null) {
-                    for (String t : goalTopics) {
-                        if (t != null && !t.isBlank()) {
-                            topics.add(t.trim());
-                        }
-                    }
-                }
-                log.debug("Added {} goal-based topics to crawler", goalTopics != null ? goalTopics.size() : 0);
-            } catch (Exception e) {
-                log.warn("Failed to get goal topics: {}", e.getMessage());
-            }
-            // 3. Add configured seed topics
-            if (bilibiliCrawlerTopics != null && !bilibiliCrawlerTopics.isBlank()) {
-                for (String t : bilibiliCrawlerTopics.split(",")) {
-                    String trimmed = t.trim();
-                    if (!trimmed.isEmpty()) topics.add(trimmed);
-                }
-            }
-            if (topics.isEmpty()) {
-                lastRunTime = System.currentTimeMillis();
-                lastRunTopicsCount = 0;
-                lastRunNewCount = 0;
-                return;
-            }
-
-            log.info("Bilibili crawler started: {} topics, limit {} per topic", topics.size(), bilibiliCrawlerPerTopicLimit);
-            lastRunTopicsCount = topics.size();
-            int totalNew = 0;
-            int failedTopics = 0;
-            int i = 0;
-            for (String topic : topics) {
-                try {
-                    List<ResourceClient.CourseResource> candidates = fetchBilibiliCandidates(topic, topic, bilibiliCrawlerPerTopicLimit);
-                    for (ResourceClient.CourseResource c : candidates) {
-                        if (saveIfNew(topic, c)) totalNew++;
-                    }
-                } catch (Exception e) {
-                    failedTopics++;
-                    log.warn("Crawl failed for topic {}: {}", topic, e.getMessage());
-                }
-                // Rate limiting between topics
-                if (++i < topics.size() && bilibiliCrawlerTopicDelayMs > 0) {
-                    try { Thread.sleep(bilibiliCrawlerTopicDelayMs); } catch (InterruptedException ignored) {}
-                }
-            }
-            lastRunTime = System.currentTimeMillis();
-            lastRunNewCount = totalNew;
-            totalCrawled += totalNew;
-            // Per-topic failures that result in zero new = real failure, not just "nothing new"
-            boolean allTopicsFailed = (topics.size() > 0 && failedTopics == topics.size());
-            if (totalNew > 0) {
-                consecutiveZeroNew = 0;
-                consecutiveFailures = 0;
-            } else if (allTopicsFailed || (failedTopics > 0 && totalNew == 0)) {
-                consecutiveFailures++;
-                consecutiveZeroNew = 0;
-            } else {
-                consecutiveZeroNew++;
-                consecutiveFailures = 0;
-            }
-            log.info("Bilibili crawler finished: {} new resources saved", totalNew);
-        } catch (Exception e) {
-            consecutiveFailures++;
-            lastRunTime = System.currentTimeMillis();
-            lastRunNewCount = 0;
-            log.error("Bilibili crawler failed", e);
-        } finally {
-            crawlerRunning.set(false);
-        }
-    }
-
-    /**
-     * 异步爬取指定主题（目标驱动即时爬取），不等待结果。
-     */
-    public void crawlTopicAsync(String topic) {
-        if (topic == null || topic.isBlank()) return;
-        if (!bilibiliCrawlerEnabled) return;
-        Runnable task = () -> {
-            if (!crawlerRunning.compareAndSet(false, true)) return;
-            try {
-                List<ResourceClient.CourseResource> candidates = fetchBilibiliCandidates(topic, topic, bilibiliCrawlerPerTopicLimit);
-                int saved = 0;
-                for (ResourceClient.CourseResource c : candidates) {
-                    if (saveIfNew(topic, c)) saved++;
-                }
-                totalCrawled += saved;
-                if (saved > 0) {
-                    consecutiveZeroNew = 0;
-                    consecutiveFailures = 0;
-                }
-                log.info("Goal-driven crawl for '{}': {} new resources", topic, saved);
-            } catch (Exception e) {
-                consecutiveFailures++;
-                log.warn("Goal-driven crawl failed for '{}': {}", topic, e.getMessage());
-            } finally {
-                crawlerRunning.set(false);
-            }
-        };
-        if (aiTaskExecutor != null) {
-            CompletableFuture.runAsync(task, aiTaskExecutor);
-        } else {
-            CompletableFuture.runAsync(task);
-        }
-    }
-
-    private boolean saveIfNew(String topic, ResourceClient.CourseResource c) {
-        if (topic == null || c == null || c.getUrl() == null) return false;
-        // Check duplicate by URL
-        Long count = courseResourceMapper.selectCount(
-                new LambdaQueryWrapper<CourseResource>().eq(CourseResource::getSourceUrl, c.getUrl()));
-        if (count != null && count > 0) return false;
-
-        // Title quality gate
-        if (!isValidTitle(c.getTitle(), topic)) {
-            log.debug("Skipping garbage title for topic '{}': title={}", topic, c.getTitle());
-            return false;
-        }
-
-        // Content quality filter
-        if (qualityFilterEnabled && !isContentRelevantToTopic(topic, c.getTitle(), c.getSummary())) {
-            log.debug("Skipping irrelevant resource for topic '{}': title={}", topic, c.getTitle());
-            return false;
-        }
-
-        CourseResource entity = new CourseResource();
-        entity.setTopic(topic);
-        entity.setTitle(c.getTitle());
-        entity.setSourceUrl(c.getUrl());
-        entity.setPlatform(c.getPlatform());
-        entity.setContentSummary(c.getSummary());
-        entity.setCreatedAt(LocalDateTime.now());
-        courseResourceMapper.insert(entity);
-
-        // Index to ES
-        try {
-            CourseResourceDocument doc = new CourseResourceDocument();
-            doc.setId(entity.getId());
-            doc.setTopic(topic);
-            doc.setTitle(entity.getTitle());
-            doc.setPlatform(entity.getPlatform());
-            doc.setSourceUrl(entity.getSourceUrl());
-            doc.setContentSummary(entity.getContentSummary());
-            doc.setCreatedAtEpochMillis(entity.getCreatedAt() != null ? entity.getCreatedAt().atZone(java.time.ZoneId.of("Asia/Shanghai")).toInstant().toEpochMilli() : System.currentTimeMillis());
-            generateAndSetEmbedding(doc);
-            searchRepository.save(doc);
-        } catch (Exception e) {
-            log.warn("Failed to index resource to ES: {}", e.getMessage());
-        }
-        return true;
-    }
-
-    private String httpGetTextWithUA(String url, String userAgent, String referer, String origin) {
-        int maxRetries = 2;
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("User-Agent", userAgent);
-        headers.set("Referer", referer);
-        if (origin != null) headers.set("Origin", origin);
-        headers.set("Accept", "application/json, text/plain, */*");
-        headers.set("Accept-Language", "zh-CN,zh;q=0.9");
-        HttpEntity<Void> entity = new HttpEntity<>(headers);
-
-        for (int attempt = 0; attempt <= maxRetries; attempt++) {
-            try {
-                ResponseEntity<String> resp = externalRestTemplate.exchange(url, HttpMethod.GET, entity, String.class);
-                if (resp.getStatusCode().is2xxSuccessful()) {
-                    return resp.getBody();
-                }
-                if (resp.getStatusCodeValue() == 429 || resp.getStatusCode().is5xxServerError()) {
-                    if (attempt < maxRetries) {
-                        try { Thread.sleep((attempt + 1) * 1000L); } catch (InterruptedException ignored) {}
-                        continue;
-                    }
-                }
-                return null;
-            } catch (Exception e) {
-                if (attempt < maxRetries) {
-                    try { Thread.sleep((attempt + 1) * 500L); } catch (InterruptedException ignored) {}
-                } else {
-                    log.debug("httpGetTextWithUA failed after {} retries: {}", maxRetries, e.getMessage());
-                    return null;
-                }
-            }
-        }
-        return null;
-    }
-
-    List<ResourceClient.CourseResource> fetchBilibiliCandidates(String query, String topic, int limit) {
-        List<ResourceClient.CourseResource> out = new ArrayList<>();
-        Set<String> seenUrls = new HashSet<>();
-        List<String> queries = buildSearchQueries(query);
-        log.debug("Fetching Bilibili candidates: queries={}, limit={}", queries, limit);
-
-        for (int qi = 0; qi < queries.size(); qi++) {
-            String q = queries.get(qi).trim();
-            if (q.isEmpty()) continue;
-            if (qi > 0) {
-                try { Thread.sleep(400); } catch (InterruptedException ignored) {}
-            }
-            String apiUrl = "https://api.bilibili.com/x/web-interface/search/all/v2?keyword=" + URLEncoder.encode(q, StandardCharsets.UTF_8);
-            String json = httpGetTextWithUA(apiUrl,
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "https://www.bilibili.com/",
-                    "https://www.bilibili.com");
-            if (json == null || json.isBlank()) {
-                log.debug("Bilibili query '{}' returned empty/null response", q);
-                continue;
-            }
-            try {
-                JsonNode root = objectMapper.readTree(json);
-                if (root.path("code").asInt() != 0) {
-                    log.debug("Bilibili API code != 0 for '{}': code={}", q, root.path("code").asInt());
-                    continue;
-                }
-                JsonNode result = root.path("data").path("result");
-                if (!result.isArray()) continue;
-                int added = 0;
-                outer:
-                for (JsonNode category : result) {
-                    if (out.size() >= limit * 2) break;
-                    if (!"video".equals(category.path("result_type").asText())) continue;
-                    JsonNode items = category.path("data");
-                    if (!items.isArray()) continue;
-                    for (JsonNode item : items) {
-                        if (out.size() >= limit) continue outer;
-                        String arcurl = item.path("arcurl").asText();
-                        String bvid = item.path("bvid").asText();
-                        String title = item.path("title").asText().replaceAll("<[^>]+>", "").trim();
-                        int play = item.path("play").asInt();
-                        String author = item.path("author").asText();
-                        String description = item.path("description").asText().replaceAll("<[^>]+>", "").trim();
-                        int duration = parseBilibiliDuration(item.path("duration").asText());
-                        if (title.isBlank()) continue;
-                        String url = !arcurl.isBlank() ? arcurl : (!bvid.isBlank() ? "https://www.bilibili.com/video/" + bvid : "");
-                        if (url.isBlank()) continue;
-                        String canonical = canonicalUrl(url);
-                        if (canonical != null && !seenUrls.add(canonical)) continue;
-                        StringBuilder summary = new StringBuilder();
-                        if (!author.isBlank()) summary.append("UP主: ").append(author).append(" | ");
-                        summary.append("播放: ").append(play);
-                        if (duration > 0) summary.append(" | ").append(duration).append("分钟");
-                        if (!description.isBlank()) summary.append(" | ").append(description);
-                        ResourceClient.CourseResource r = new ResourceClient.CourseResource();
-                        r.setTitle(title);
-                        r.setPlatform("B站");
-                        r.setUrl(url);
-                        r.setSummary(summary.toString());
-                        out.add(r);
-                        added++;
-                    }
-                }
-                log.debug("Bilibili query '{}': {} results", q, added);
-            } catch (Exception e) {
-                log.warn("Bilibili crawl failed: query={}, err={}", q, e.getMessage());
-            }
-        }
-        log.debug("fetchBilibiliCandidates returning {} total results for query='{}'", out.size(), query);
-        return out;
-    }
-
-    private int parseBilibiliDuration(String duration) {
-        if (duration == null || duration.isBlank()) return 0;
-        try {
-            String[] parts = duration.split(":");
-            if (parts.length == 2) {
-                return Integer.parseInt(parts[0]) + (Integer.parseInt(parts[1]) >= 30 ? 1 : 0);
-            } else if (parts.length == 3) {
-                return Integer.parseInt(parts[0]) * 60 + Integer.parseInt(parts[1]);
-            }
-        } catch (NumberFormatException ignored) {
-        }
-        return 0;
-    }
-
 }

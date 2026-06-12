@@ -1,8 +1,6 @@
 import { defineStore } from 'pinia'
-import { marked } from 'marked'
 import api from '../plugins/api'
-
-marked.setOptions({ breaks: true, gfm: true })
+import { renderMarkdown, renderMarkdownStreaming } from '../plugins/markdown'
 
 function sanitizeHtml(html) {
   if (!html) return ''
@@ -17,26 +15,41 @@ function sanitizeHtml(html) {
     .replace(/javascript\s*:/gi, '')
 }
 
-function renderAiHtml(text) {
-  if (!text) return ''
-  try {
-    let fixed = text
-      .replace(/^(#{1,6})([^\s#])/gm, '$1 $2')
-      .replace(/^(\s*)([-*])([^\s])/gm, '$1$2 $3')
-    // Prevent broken rendering from unclosed markers during streaming
-    if ((fixed.match(/\*\*/g) || []).length % 2 !== 0) {
-      fixed = fixed.replace(/\*\*([^*]*)$/, '$1')
-    }
-    if ((fixed.match(/(?<!\*)\*(?!\*)/g) || []).length % 2 !== 0) {
-      fixed = fixed.replace(/(?<!\*)\*(?!\*)([^*]*)$/, '$1')
-    }
-    if ((fixed.match(/`/g) || []).length % 2 !== 0) {
-      fixed = fixed.replace(/`([^`]*)$/, '$1')
-    }
-    return sanitizeHtml(marked.parse(fixed))
-  } catch {
-    return text
+function normalizeWhitespace(text) {
+  return text
+    .replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+// Auto-link known app paths like /journals /punch that appear as plain text
+function autoLinkNavPaths(text) {
+  const paths = ['/journals', '/punch', '/goals', '/schedule', '/resources', '/profile', '/games/2048']
+  // Protect existing markdown links [text](/path) from being double-processed
+  const protected_ = new Map()
+  let idx = 0
+  let work = text.replace(/\]\((\/[a-z0-9\-\/]+)\)/g, (match) => {
+    const key = `__PROTECTED_LINK_${idx}__`
+    protected_.set(key, match)
+    idx++
+    return key
+  })
+  for (const path of paths) {
+    const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const re = new RegExp(`(?<![\\w([/])${escaped}(?![\\w)\\]])`, 'g')
+    work = work.replace(re, `[${path}](${path})`)
   }
+  for (const [key, original] of protected_) {
+    work = work.replace(key, original)
+  }
+  return work
+}
+
+function renderAiHtml(text, streaming = false) {
+  if (!text) return ''
+  const fixed = autoLinkNavPaths(normalizeWhitespace(text))
+  const html = streaming ? renderMarkdownStreaming(fixed) : renderMarkdown(fixed)
+  return html ? sanitizeHtml(html) : text
 }
 
 const NAV_ITEMS = [
@@ -81,17 +94,38 @@ function extractNavTarget(raw) {
   return null
 }
 
+// Normalize markdown links to plain paths, e.g. [/punch](/punch) → /punch
+function normalizeNavLinks(text) {
+  return String(text || '').replace(/\[([^\]]*)\]\((\/[a-z0-9\-\/]+)\)/g, '$2')
+}
+
 function extractNavigateDirective(text) {
   const out = []
-  for (const line of String(text || '').split('\n')) {
-    const m = String(line || '').match(/(?:跳转|打开|进入)\s*[:：]?\s*(\/[a-z0-9\-\/]+)/i)
-    if (m?.[1] && NAV_ITEMS.some((x) => x.to === m[1]) && !out.includes(m[1])) out.push(m[1])
+  // Match both single-path "跳转: /punch" and multi-path "跳转: /punch | /journals"
+  const re = /(?:跳转|打开|进入)\s*[:：]?\s*(\/[a-z0-9\-\/]+(?:\s*[|,，、]\s*\/[a-z0-9\-\/]+)*)/gi
+  for (let line of String(text || '').split('\n')) {
+    line = normalizeNavLinks(line)
+    let m
+    while ((m = re.exec(line)) !== null) {
+      const paths = m[1].split(/[|,，、]/).map(p => p.trim()).filter(Boolean)
+      for (const p of paths) {
+        if (NAV_ITEMS.some((x) => x.to === p) && !out.includes(p)) out.push(p)
+      }
+    }
   }
   return out
 }
 
 function stripNavigateDirective(text) {
-  return String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/(?:跳转|打开|进入)\s*[:：]?\s*\/[a-z0-9\-\/]+/gi, '').replace(/\n{3,}/g, '\n\n').trim()
+  return String(text || '')
+    .replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    .split('\n')
+    .filter(line => {
+      const normalized = normalizeNavLinks(line)
+      return !/^(?:跳转|打开|进入)\s*[:：]?\s*(?:\/[a-z0-9\-\/]+[\s|,，、]*)+$/gi.test(normalized)
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n').trim()
 }
 
 const TOOL_FRIENDLY_NAME = {
@@ -175,14 +209,12 @@ function nextMsgId() { return 'm_' + (++_msgIdCounter) + '_' + Date.now() }
 export const useAssistantStore = defineStore('assistant', {
   state: () => ({
     initialized: false, minimized: false, x: null, y: null, width: 380, height: 520,
-    adviceText: '', chatOpen: false, chatInput: '', chatLoading: false, chatMessages: [], navRequest: null,
-    toolStatus: null, // null | string — shown as progress indicator during tool execution
+    chatInput: '', chatLoading: false, chatMessages: [], navRequest: null,
   }),
   actions: {
     async init() {
       if (this.initialized) return
       this.initialized = true
-      this.adviceText = '欢迎回来，先照顾好自己。'
       // Pre-build agent on page load so first chat is fast
       api.post('/agent/warmup').catch(() => {})
     },
@@ -202,16 +234,13 @@ export const useAssistantStore = defineStore('assistant', {
         this.y = ny
       }
     },
-    openChat() { this.chatOpen = true; this.minimized = false },
-    closeChat() { this.chatOpen = false },
     requestNavigate(to, title) {
       if (!to) return
       this.navRequest = { to: String(to), title: String(title || to), at: Date.now() }
     },
     clearNavRequest() { this.navRequest = null },
     setCareText(text) {
-      const t = String(text || '').trim()
-      if (t) this.adviceText = t
+      // hook for DefaultLayout SSE AGENT_REMINDER
     },
     async sendChat() {
       const text = String(this.chatInput ?? '').trim()
@@ -240,8 +269,8 @@ export const useAssistantStore = defineStore('assistant', {
           try {
             const res = await fetch('/api/agent/chat/stream', {
               method: 'POST',
-              headers: { 'Content-Type': 'text/plain', ...(accessToken ? { Authorization: 'Bearer ' + accessToken } : {}) },
-              body: text, signal: ctrl.signal,
+              headers: { 'Content-Type': 'application/json', ...(accessToken ? { Authorization: 'Bearer ' + accessToken } : {}) },
+              body: JSON.stringify({ message: text }), signal: ctrl.signal,
             })
             if (res.status === 401) return { needRefresh: true }
             if (!res.ok) throw new Error('HTTP ' + res.status)
@@ -287,11 +316,23 @@ export const useAssistantStore = defineStore('assistant', {
         if (!reader) { aiMsg.text = String(await streamRes.text() || '服务返回为空'); return }
         const decoder = new TextDecoder('utf-8')
         let buf = '', sseBuf = '', lastFlush = 0, lastFlushed = '', pendingToolLine = ''
+        const MIN_FIRST_FLUSH = 20 // wait until we have enough text to avoid fragmenting the first word
+        let hasFlushed = false
+        const MIN_PARAGRAPH_CHARS = 60 // collapse \n\n → space until we have enough content
         const flush = () => {
           if (buf !== lastFlushed) {
+            if (!hasFlushed && buf.length < MIN_FIRST_FLUSH) return
+            hasFlushed = true
             lastFlushed = buf
-            aiMsg.text = buf
-            aiMsg.html = renderAiHtml(buf) // real-time markdown
+            // Strip leading newlines from SSE framing
+            let display = buf.replace(/^\n+/, '')
+            // During early streaming, collapse double-newlines to avoid premature paragraph breaks
+            // ("我\n\n来查查" would otherwise show "我" as a separated paragraph)
+            if (display.length < MIN_PARAGRAPH_CHARS) {
+              display = display.replace(/\n\n+/g, '')
+            }
+            aiMsg.text = display
+            aiMsg.html = renderAiHtml(display, true)
             lastFlush = Date.now()
           }
         }
@@ -311,7 +352,7 @@ export const useAssistantStore = defineStore('assistant', {
               const raw = chunk.slice(15)
               const name = raw.endsWith('__') ? raw.slice(0, -2) : raw
               const friendly = mapToolName(name?.trim()) || '处理中...'
-              const line = '\n\n<div class="sp-tool-call"><span class="sp-tool-dot"></span>' + friendly + '</div>\n\n'
+              const line = '\n\n<div class="sp-tool-call"><span class="sp-tool-icon">&#9900;</span><span>' + friendly + '</span></div>\n\n'
               pendingToolLine = line
               buf += line
               flush()

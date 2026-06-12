@@ -77,6 +77,40 @@ public class GoalService {
         人文/理论类：[{“title”:”精读：《论语》学而篇”,”description”:”逐句理解并写300字心得，标注3处与现实的关联”,”estimatedMinutes”:60,”priority”:1,”subTasks”:[]}]
         """;
 
+    private static final String ADVANCED_SYSTEM_PROMPT = """
+        你是”进阶学习路径规划”专家。用户已经完成了一些基础学习任务，你需要基于已有的学习基础，规划更高阶的进阶任务。
+
+        进阶策略（重要）：
+        1. 分析用户已学内容，判断当前所处的学习阶段（入门/初级/中级/进阶）
+        2. 按 Bloom 认知层次向上推进：记忆→理解→应用→分析→评价→创造
+        3. 每个任务都应比已学内容更深入一步，避免简单重复
+        4. 优先填补知识盲区，然后向更深的子领域延伸
+        5. 对于技能类目标：增加复杂度、速度要求、或变体练习
+        6. 对于理论类目标：从理解走向批判性分析、综合应用、跨领域连接
+
+        输出要求（必须严格遵守）：
+        1) 只输出 JSON 数组，不要 Markdown，不要解释，不要代码块。
+        2) 每个任务对象：{title, description, estimatedMinutes, priority, subTasks}
+           - title: 10-25 字，体现”进阶”特征，如”实战：用Spring Boot搭建REST API”、”分析：《原则》核心论点并写批判”
+           - description: 1-2 句，明确进阶完成标准（比基础任务更高的要求）
+           - estimatedMinutes: 30-180 的整数，进阶任务可适当偏长，默认 60
+           - priority: 0=低 1=中 2=高，衔接已学内容的前置任务优先级更高
+           - subTasks: 子步骤数组（可为空）
+        3) 数量：默认 4-8 个进阶任务；复杂领域 6-12 个
+
+        强约束（绝对禁止）：
+        - 禁止生成用户已学过的同类基础任务（如已学过”变量与循环”就不要再生”复习循环语法”）
+        - 禁止输出”制定计划/安排日程/排程/设置提醒/整理笔记/检查进度”等管理动作
+        - 禁止输出任何含日期时间的任务
+        - 禁止输出空泛任务（如”深入学习/综合练习”），必须指明学什么、练什么
+        - 禁止输出与用户当前目标不相关的任务
+
+        进阶示例（格式参考）：
+        已学Python基础语法 → [{“title”:”实战：用Flask写一个Todo API”,”description”:”实现CRUD接口，包含参数校验和错误处理，通过Postman测试5个场景”,”estimatedMinutes”:120,”priority”:2,”subTasks”:[]}]
+        已学算法入门 → [{“title”:”刷题：LeetCode中等难度动态规划5道”,”description”:”完成最长回文子串、编辑距离等题型，每题写时间/空间复杂度分析”,”estimatedMinutes”:150,”priority”:2,”subTasks”:[{“title”:”复习：DP状态转移方程推导”,”description”:”手写5种DP模板的状态定义与转移方程”,”estimatedMinutes”:45,”priority”:2,”subTasks”:[]}]}]
+        已学英语四级 → [{“title”:”写作：独立完成3篇托福独立写作”,”description”:”每篇300+词，使用5个以上高级句型，找母语者批改”,”estimatedMinutes”:120,”priority”:1,”subTasks”:[]}]
+        """;
+
     public GoalDto createGoalAndStartAi(Long userId, String goalDescription) {
         String text = goalDescription == null ? "" : goalDescription.trim();//去除首尾的空白字符
         Goal goal = new Goal();
@@ -111,20 +145,60 @@ public class GoalService {
         if (goal == null || goal.getUserId() == null || !goal.getUserId().equals(userId)) {
             throw new IllegalArgumentException("目标不存在");
         }
+
+        // Query BEFORE deletion — otherwise completed tasks are lost
+        List<GoalTask> learnedTasks = goalTaskMapper.selectList(new LambdaQueryWrapper<GoalTask>()
+                .eq(GoalTask::getUserId, userId)
+                .eq(GoalTask::getGoalId, goalId)
+                .orderByAsc(GoalTask::getId));
+        List<UserJournal> journals = userJournalMapper.selectList(new LambdaQueryWrapper<UserJournal>()
+                .eq(UserJournal::getUserId, userId)
+                .orderByDesc(UserJournal::getCreatedAt)
+                .last("LIMIT 5"));
+
+        // Delete old tasks
         goalTaskMapper.delete(new LambdaQueryWrapper<GoalTask>()
                 .eq(GoalTask::getUserId, userId)
                 .eq(GoalTask::getGoalId, goalId));
 
-        String fb = feedback == null ? "" : feedback.trim();
-        String prompt = SYSTEM_PROMPT;
-        if (!fb.isBlank()) {
-            prompt = prompt + "\n用户对上一版计划的意见：" + fb + "\n请根据意见重新生成任务，避免重复上一版表述。";
+        StringBuilder userPrompt = new StringBuilder();
+        if (learnedTasks != null && !learnedTasks.isEmpty()) {
+            userPrompt.append("=== 用户该目标下的全部任务（含已完成和未完成） ===\n");
+            for (GoalTask t : learnedTasks) {
+                String status = t.getStatus() != null && t.getStatus() == 1 ? "[已完成]" : "[未完成]";
+                userPrompt.append("- ").append(status).append(" ").append(t.getTitle());
+                if (t.getDescription() != null && !t.getDescription().isBlank()) {
+                    userPrompt.append("（").append(t.getDescription()).append("）");
+                }
+                userPrompt.append("\n");
+            }
+            userPrompt.append("\n");
         }
-        
+        if (journals != null && !journals.isEmpty()) {
+            userPrompt.append("=== 用户近期学习随笔（反映学习状态与困惑） ===\n");
+            for (UserJournal j : journals) {
+                if (j.getContent() != null && !j.getContent().isBlank()) {
+                    String snippet = j.getContent().length() > 200
+                            ? j.getContent().substring(0, 200) : j.getContent();
+                    userPrompt.append("- ").append(snippet).append("\n");
+                }
+            }
+            userPrompt.append("\n");
+        }
+        userPrompt.append("=== 当前学习目标 ===\n");
+        userPrompt.append(goal.getDescription());
+        userPrompt.append("\n\n请基于上述全部任务，生成更高阶的进阶学习任务，跳过已完成的任务、从已有基础上深入，避免重复。");
+
+        String fb = feedback == null ? "" : feedback.trim();
+        String prompt = ADVANCED_SYSTEM_PROMPT;
+        if (!fb.isBlank()) {
+            prompt = prompt + "\n用户对上一版计划的意见：" + fb + "\n请根据意见重新生成任务。";
+        }
+
         GoalAiTaskMessage msg = new GoalAiTaskMessage();
         msg.setUserId(userId);
         msg.setGoalId(goalId);
-        msg.setGoalDescription(goal.getDescription());
+        msg.setGoalDescription(userPrompt.toString());
         msg.setSystemPrompt(prompt);
         rabbitTemplate.convertAndSend(RabbitMqConfig.GOAL_EXCHANGE, RabbitMqConfig.GOAL_AI_ROUTING_KEY, msg);
     }
@@ -204,6 +278,12 @@ public class GoalService {
         goal.setStatus(status);
         goal.setDeadline(deadline);
         goalMapper.updateById(goal);
+    }
+
+    public long countUnfinishedTasks(Long goalId) {
+        return goalTaskMapper.selectCount(new LambdaQueryWrapper<GoalTask>()
+                .eq(GoalTask::getGoalId, goalId)
+                .ne(GoalTask::getStatus, 1));
     }
 
     @Transactional

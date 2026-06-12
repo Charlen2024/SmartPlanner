@@ -4,6 +4,10 @@ server:
 spring:
   application:
     name: agent-service
+  boot:
+    admin:
+      client:
+        url: http://admin-server:9090
   security:
     oauth2:
       resourceserver:

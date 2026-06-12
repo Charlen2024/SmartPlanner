@@ -6,13 +6,17 @@ import com.chao.common.client.ScheduleClient;
 import com.chao.common.dto.*;
 import com.chao.user.dto.UserInsightDto;
 import com.chao.user.dto.UserPortraitDto;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RedissonClient;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Service
@@ -22,6 +26,11 @@ public class PortraitComputeService {
     private final PunchClient punchClient;
     private final ScheduleClient scheduleClient;
     private final AgentPortraitClient agentPortraitClient;
+    private final ObjectMapper objectMapper;
+    private final ObjectProvider<RedissonClient> redissonProvider;
+
+    private static final String PORTRAIT_CACHE_KEY_PREFIX = "sp:portrait:";
+    private static final int PORTRAIT_CACHE_TTL_DAYS = 7;
 
     public UserPortraitDto recompute(Long userId) {
         LocalDateTime to = LocalDateTime.now();
@@ -41,6 +50,7 @@ public class PortraitComputeService {
         AiPortraitResult ai = null;
         try {
             PortraitRecomputeRequest req = new PortraitRecomputeRequest();
+            req.setUserId(userId);
             req.setPunchRecords(records);
             req.setSchedules(schedules);
             req.setStreak(streak);
@@ -79,10 +89,21 @@ public class PortraitComputeService {
         dto.setTips(ai != null && ai.getTips() != null && !ai.getTips().isEmpty()
                 ? ai.getTips() : insights.getTips());
         buildComputation(dto, records, schedules);
+        cachePortrait(userId, dto);
         return dto;
     }
 
     public UserPortraitDto load(Long userId) {
+        UserPortraitDto cached = getCachedPortrait(userId);
+        if (cached != null) {
+            LocalDateTime to = LocalDateTime.now();
+            LocalDateTime from = to.minusDays(7);
+            UserInsightDto insights = computeInsightsFromFeign(userId, from, to);
+            cached.setInsights(insights);
+            cached.setRecommendation(recommend(insights, cached.getHabits()));
+            buildComputation(cached, null, null);
+            return cached;
+        }
         LocalDateTime to = LocalDateTime.now();
         LocalDateTime from = to.minusDays(7);
 
@@ -273,20 +294,40 @@ public class PortraitComputeService {
     }
 
     private SchedulePreferenceDto recommend(UserInsightDto insights, UserHabitDto habits) {
+        // 1. Focus: continuous mapping from avg focus, then procrastination penalty
         int focusAvg = habits != null && habits.getFocusDurationAvg() != null ? habits.getFocusDurationAvg() : 45;
-        int focus;
-        if (focusAvg < 40) focus = 30;
-        else if (focusAvg < 70) focus = 45;
-        else focus = 60;
-        int maxDaily = 240;
-        if (insights != null) {
-            int streak = insights.getStreak() != null ? insights.getStreak() : 0;
-            double onTime = insights.getOnTimeRate() != null ? insights.getOnTimeRate() : 0.0;
-            if (streak < 3 || onTime < 0.5) maxDaily = 180;
+        int focusBase = (int) Math.round(focusAvg * 0.8 / 5.0) * 5;
+        focusBase = Math.max(25, Math.min(90, focusBase));
+
+        double proIndex = habits != null && habits.getProcrastinationIndex() != null ? habits.getProcrastinationIndex() : 0.0;
+        int focusPenalty = 0;
+        if (proIndex > 0.6) focusPenalty = 10;
+        else if (proIndex > 0.4) focusPenalty = 5;
+        int focus = Math.max(25, focusBase - focusPenalty);
+
+        // 2. Break: ~25% of focus, rounded to 5
+        int breakMin = Math.max(5, Math.min(25, (int) Math.round(focus * 0.25 / 5.0) * 5));
+
+        // 3. Max daily: completion tier → procrastination penalty → streak safety net
+        double completionRate = insights != null && insights.getCompletionRate() != null ? insights.getCompletionRate() : 0.0;
+        int maxDailyBase;
+        if (completionRate < 0.3) maxDailyBase = 120;
+        else if (completionRate < 0.6) maxDailyBase = 180;
+        else maxDailyBase = 240;
+
+        int procPenalty = 0;
+        if (proIndex > 0.7) procPenalty = 60;
+        else if (proIndex > 0.5) procPenalty = 30;
+        int maxDaily = Math.max(120, maxDailyBase - procPenalty);
+
+        int streak = insights != null && insights.getStreak() != null ? insights.getStreak() : 0;
+        if (streak < 2) {
+            maxDaily = Math.min(maxDaily, 150);
         }
+
         SchedulePreferenceDto dto = new SchedulePreferenceDto();
         dto.setFocusMinutes(focus);
-        dto.setBreakMinutes(10);
+        dto.setBreakMinutes(breakMin);
         dto.setMaxDailyMinutes(maxDaily);
         return dto;
     }
@@ -321,8 +362,8 @@ public class PortraitComputeService {
 
         c.put("streak", Map.of(
                 "label", "连续打卡", "formula", "最近连续打卡天数",
-                "inputs", Map.of(),
-                "result", String.valueOf(ins.getStreak() != null ? ins.getStreak() : 0)));
+                "inputs", Map.of("streak", ins.getStreak() != null ? ins.getStreak() : 0),
+                "result", String.valueOf(ins.getStreak() != null ? ins.getStreak() : 0) + " 天"));
 
         if (records != null && schedules != null && !records.isEmpty() && !schedules.isEmpty()) {
             long morningPunch = records.stream().filter(r -> { LocalDateTime t = punchStartTime(r); return t != null && t.getHour() <= 10; }).count();
@@ -335,15 +376,17 @@ public class PortraitComputeService {
             boolean aiRefinedMorning = habMorning != localMorningScore;
             c.put("morningScore", Map.of(
                     "label", "晨型倾向",
-                    "formula", "(打卡晨型比 × 0.6 + 排程晨型比 × 0.4) × 100" + (aiRefinedMorning ? " → AI微调" : ""),
+                    "formula", "晨间打卡÷总打卡数 × 60 + 晨间排程÷总排程数 × 40" + (aiRefinedMorning ? " → AI微调" : ""),
                     "inputs", Map.of("morningPunchCount", morningPunch, "totalPunchRecords", records.size(),
                             "morningScheduleCount", morningSch, "totalSchedules", schedules.size(),
                             "localResult", localMorningScore),
                     "result", String.valueOf(habMorning)));
         } else {
+            int habMorning = hab != null && hab.getMorningPersonScore() != null ? hab.getMorningPersonScore() : 0;
             c.put("morningScore", Map.of(
-                    "label", "晨型倾向", "formula", "(打卡晨型比 × 0.6 + 排程晨型比 × 0.4) × 100",
-                    "inputs", Map.of(), "result", String.valueOf(hab != null ? hab.getMorningPersonScore() : 0)));
+                    "label", "晨型倾向", "formula", "晨间打卡÷总打卡数 × 60 + 晨间排程÷总排程数 × 40",
+                    "inputs", Map.of("localResult", habMorning),
+                    "result", String.valueOf(habMorning)));
         }
 
         if (records != null && !records.isEmpty()) {
@@ -363,9 +406,11 @@ public class PortraitComputeService {
                             "localResult", localFocus),
                     "result", habFocus + " min"));
         } else {
+            int habFocus = hab != null && hab.getFocusDurationAvg() != null ? hab.getFocusDurationAvg() : 0;
             c.put("focusAvg", Map.of(
                     "label", "平均专注时长", "formula", "打卡总时长(分钟) ÷ 打卡次数",
-                    "inputs", Map.of(), "result", (hab != null ? hab.getFocusDurationAvg() : 0) + " min"));
+                    "inputs", Map.of("localResult", habFocus),
+                    "result", habFocus + " min"));
         }
 
         double delay = ins.getAvgDelayMinutes() != null ? ins.getAvgDelayMinutes() : 0;
@@ -386,7 +431,7 @@ public class PortraitComputeService {
         c.put("procrastination", Map.of(
                 "label", "拖延指数",
                 "formula", (matched >= 3
-                        ? "延迟分 × 0.45 + (1−准时率) × 0.35 + (1−完成率) × 0.20"
+                        ? "(平均延迟÷180) × 0.45 + (1−准时率) × 0.35 + (1−完成率) × 0.20"
                         : "样本不足(<3): 0.3 + (1−完成率) × 0.7")
                         + (aiRefinedProc ? " → AI微调" : ""),
                 "inputs", Map.of("delayScore", Math.round(delayScore * 100) / 100.0,
@@ -396,13 +441,49 @@ public class PortraitComputeService {
                 "result", habProcPct + "%"));
 
         SchedulePreferenceDto rec = dto.getRecommendation();
+        // Compute local recommendation intermediates for the decision-flow display
+        int focusAvg = hab != null && hab.getFocusDurationAvg() != null ? hab.getFocusDurationAvg() : 45;
+        int focusBase = (int) Math.round(focusAvg * 0.8 / 5.0) * 5;
+        focusBase = Math.max(25, Math.min(90, focusBase));
+        double procIdx = hab != null && hab.getProcrastinationIndex() != null ? hab.getProcrastinationIndex() : 0.0;
+        int focusPenalty = 0;
+        if (procIdx > 0.6) focusPenalty = 10;
+        else if (procIdx > 0.4) focusPenalty = 5;
+        int localFocus = Math.max(25, focusBase - focusPenalty);
+        int localBreak = Math.max(5, Math.min(25, (int) Math.round(localFocus * 0.25 / 5.0) * 5));
+        int localMaxBase;
+        if (completionRate < 0.3) localMaxBase = 120;
+        else if (completionRate < 0.6) localMaxBase = 180;
+        else localMaxBase = 240;
+        int procPenalty = 0;
+        if (procIdx > 0.7) procPenalty = 60;
+        else if (procIdx > 0.5) procPenalty = 30;
+        int localMaxDaily = Math.max(120, localMaxBase - procPenalty);
+        int streak = ins.getStreak() != null ? ins.getStreak() : 0;
+        boolean streakCapped = streak < 2;
+        if (streakCapped) localMaxDaily = Math.min(localMaxDaily, 150);
+
+        boolean aiRefinedRec = rec != null
+                && (rec.getFocusMinutes() != localFocus
+                    || rec.getBreakMinutes() != localBreak
+                    || rec.getMaxDailyMinutes() != localMaxDaily);
+
+        Map<String, Object> recInputs = new LinkedHashMap<>();
+        recInputs.put("focusAvgInput", focusAvg);
+        recInputs.put("procrastinationInput", Math.round(procIdx * 100) / 100.0);
+        recInputs.put("completionRateInput", Math.round(completionRate * 100) / 100.0);
+        recInputs.put("streakInput", streak);
+        recInputs.put("focusBase", focusBase);
+        recInputs.put("focusPenalty", focusPenalty);
+        recInputs.put("completionTier", localMaxBase);
+        recInputs.put("procPenalty", procPenalty);
+        recInputs.put("streakCapped", streakCapped);
+
         c.put("recommendation", Map.of(
                 "label", "排程推荐",
-                "formula", "focusAvg < 40 → 30min | 40~69 → 45min | ≥70 → 60min，连续打卡<3或准时率<50% → 上限180min"
-                        + (rec != null && rec.getBreakMinutes() != null && rec.getBreakMinutes() != 10 ? " → AI微调" : ""),
-                "inputs", Map.of("focusAvgInput", hab != null ? hab.getFocusDurationAvg() : 0,
-                        "streakInput", ins.getStreak() != null ? ins.getStreak() : 0,
-                        "onTimeRateInput", Math.round(onTimeRate * 100) / 100.0),
+                "formula", "专注=clamp(round(avg×0.8÷5)×5,25,90)−拖延罚分; 休息=clamp(round(专注×0.25÷5)×5,5,25); 上限=完成率分档−拖延罚分,streak<2封顶150"
+                        + (aiRefinedRec ? " → AI微调" : ""),
+                "inputs", recInputs,
                 "result", rec != null
                         ? "专注" + rec.getFocusMinutes() + "min / 休息" + rec.getBreakMinutes() + "min / 上限" + rec.getMaxDailyMinutes() + "min"
                         : "-"));
@@ -424,5 +505,31 @@ public class PortraitComputeService {
         if (r.getCreatedAt() != null && r.getDurationSeconds() != null && r.getDurationSeconds() > 0)
             return r.getCreatedAt().minusSeconds(r.getDurationSeconds());
         return r.getCreatedAt();
+    }
+
+    // ---- Redis cache ----
+
+    private void cachePortrait(Long userId, UserPortraitDto dto) {
+        try {
+            RedissonClient r = redissonProvider.getIfAvailable();
+            if (r == null) return;
+            String json = objectMapper.writeValueAsString(dto);
+            r.getBucket(PORTRAIT_CACHE_KEY_PREFIX + userId).set(json, PORTRAIT_CACHE_TTL_DAYS, TimeUnit.DAYS);
+        } catch (Exception e) {
+            log.debug("Portrait cache write failed for userId={}: {}", userId, e.toString());
+        }
+    }
+
+    private UserPortraitDto getCachedPortrait(Long userId) {
+        try {
+            RedissonClient r = redissonProvider.getIfAvailable();
+            if (r == null) return null;
+            String json = String.valueOf(r.getBucket(PORTRAIT_CACHE_KEY_PREFIX + userId).get());
+            if (json == null || "null".equals(json) || json.isBlank()) return null;
+            return objectMapper.readValue(json, UserPortraitDto.class);
+        } catch (Exception e) {
+            log.debug("Portrait cache read failed for userId={}: {}", userId, e.toString());
+            return null;
+        }
     }
 }

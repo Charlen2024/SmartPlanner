@@ -53,6 +53,7 @@ public class AgentChatService {
     private final RedissonClient redissonClient;
     private final SmartPlannerTools smartPlannerTools;
     private final com.chao.common.client.GoalClient goalClient;
+    private final AgentRagIndexer agentRagIndexer;
     private final PunchClient punchClient;
     private final ScheduleClient scheduleClient;
     private final Executor aiTaskExecutor;
@@ -67,6 +68,13 @@ public class AgentChatService {
             - 列表项用短横线，每条一行，不堆砌成段落
             **加粗**强调关键数字和日期
             [页面名](/路径) 做导航链接
+
+            ——换行规则（极其重要，必须严格遵守）——
+            严禁在句子中间换行。每句话必须在同一行内写完。
+            严禁在加粗/斜体等格式标记内部换行（如 **今天\n\n（周五）** 是严重错误）。
+            严禁在词语中间换行（如 "这股劲\n\n儿" 是严重错误）。
+            只有在一个完整段落真正结束时，才可以用空行分隔下一个段落。
+            如果拿不准该不该换行，就不要换行。
 
             ——周总结输出格式——
             ## 本周打卡
@@ -174,34 +182,37 @@ public class AgentChatService {
                  q.contains("journal"));
         if (!listing) return "";
         try {
-            com.chao.common.dto.Result<java.util.List<com.chao.common.dto.UserJournalDto>> result = goalClient.listJournals(userId, null);
-            if (result == null || result.getCode() != 200) return "";
-            java.util.List<com.chao.common.dto.UserJournalDto> journals = result.getData();
-            if (journals == null || journals.isEmpty()) return "\n[系统] 用户暂无随笔记录。\n";
-            StringBuilder sb = new StringBuilder();
-            sb.append("\n[系统] 用户最近的随笔记录如下（已按时间倒序排列）：\n");
-            java.util.List<com.chao.common.dto.UserJournalDto> sorted = new java.util.ArrayList<>(journals);
-            sorted.sort((a, b) -> {
-                java.time.LocalDateTime x = a != null ? a.getCreatedAt() : null;
-                java.time.LocalDateTime y = b != null ? b.getCreatedAt() : null;
-                if (x == null && y == null) return 0;
-                if (x == null) return 1;
-                if (y == null) return -1;
-                return y.compareTo(x);
-            });
-            int count = 0;
-            for (com.chao.common.dto.UserJournalDto j : sorted) {
-                if (j == null || j.getId() == null) continue;
-                sb.append("- ").append(j.getCreatedAt() != null ? j.getCreatedAt().toString() : "");
-                sb.append(" | ").append(j.getMood() != null ? j.getMood() : "无");
-                sb.append(" | ").append(j.getContent() != null ? j.getContent() : "");
-                sb.append("\n");
-                if (++count >= 20) break;
+            // RAG 混合检索：searchPersonalData 内部会先调 ensureUserRagIndexed 确保索引，再做向量检索，最后 keyword 兜底
+            java.util.List<java.util.Map<String, Object>> ragResults = smartPlannerTools.searchPersonalData(q, 10);
+            java.util.List<java.util.Map<String, Object>> journals = new java.util.ArrayList<>();
+            java.util.List<java.util.Map<String, Object>> other = new java.util.ArrayList<>();
+            for (var m : ragResults) {
+                if ("journal".equals(m.get("type"))) journals.add(m);
+                else other.add(m);
             }
-            log.info("buildJournalPrefix userId={}, injected journalCount={}", userId, count);
+
+            if (journals.isEmpty() && other.isEmpty()) {
+                log.info("buildJournalPrefix userId={}, RAG returned empty", userId);
+                return "\n[系统] 用户暂无随笔记录。\n";
+            }
+
+            StringBuilder sb = new StringBuilder();
+            if (!journals.isEmpty()) {
+                sb.append("\n[系统 RAG检索] 用户随笔记录如下：\n");
+                for (var m : journals) {
+                    sb.append("- ").append(m.get("createdAt")).append(" | ").append(m.get("mood")).append(" | ").append(m.get("text")).append("\n");
+                }
+            }
+            if (!other.isEmpty()) {
+                sb.append("[系统] RAG 还检索到其他相关内容：\n");
+                for (var m : other) {
+                    sb.append("- [").append(m.get("type")).append("] ").append(m.get("title")).append(" | ").append(m.get("text")).append("\n");
+                }
+            }
+            log.info("buildJournalPrefix userId={}, RAG journalCount={}, otherCount={}", userId, journals.size(), other.size());
             return sb.toString();
         } catch (Exception e) {
-            log.debug("buildJournalPrefix failed userId={}: {}", userId, e.getMessage());
+            log.warn("buildJournalPrefix RAG failed userId={}: {}", userId, e.getMessage());
             return "";
         }
     }

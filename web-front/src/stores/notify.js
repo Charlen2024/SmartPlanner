@@ -12,12 +12,12 @@ export const useNotifyStore = defineStore('notify', {
     reminders: [],
     signalSeq: {
       GOAL_TASK_READY: 0,
+      GOAL_DECOMPOSE_FAILED: 0,
       SCHEDULE_DONE: 0,
       SCHEDULE_FAILED: 0,
       RESOURCE_ADVICE_DONE: 0,
       RESOURCE_ADVICE_FAILED: 0,
     },
-    lastSignal: null,
   }),
   actions: {
     setOwner(userId) {
@@ -158,7 +158,6 @@ export const useNotifyStore = defineStore('notify', {
       if (t && Object.prototype.hasOwnProperty.call(this.signalSeq, t)) {
         this.signalSeq[t] = Number(this.signalSeq[t] || 0) + 1
       }
-      this.lastSignal = { type: t, payload: payload ?? null, ts: Date.now() }
     },
   },
 })

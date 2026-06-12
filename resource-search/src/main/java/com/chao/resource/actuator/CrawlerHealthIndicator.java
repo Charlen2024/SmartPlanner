@@ -1,6 +1,6 @@
 package com.chao.resource.actuator;
 
-import com.chao.resource.service.ResourceService;
+import com.chao.resource.service.BilibiliCrawlerService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.boot.actuate.health.Health;
 import org.springframework.boot.actuate.health.HealthIndicator;
@@ -10,40 +10,40 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class CrawlerHealthIndicator implements HealthIndicator {
 
-    private final ResourceService resourceService;
+    private final BilibiliCrawlerService bilibiliCrawlerService;
 
     @Override
     public Health health() {
-        if (!resourceService.isBilibiliCrawlerEnabled()) {
+        if (!bilibiliCrawlerService.isBilibiliCrawlerEnabled()) {
             return Health.unknown()
                     .withDetail("reason", "Crawler is disabled")
                     .build();
         }
 
-        int failures = resourceService.getConsecutiveFailures();
+        int failures = bilibiliCrawlerService.getConsecutiveFailures();
         if (failures >= 3) {
             return Health.down()
                     .withDetail("reason", failures + " consecutive crawl failures")
                     .withDetail("consecutiveFailures", failures)
-                    .withDetail("totalCrawled", resourceService.getTotalCrawled())
+                    .withDetail("totalCrawled", bilibiliCrawlerService.getTotalCrawled())
                     .build();
         }
 
-        int zeroNew = resourceService.getConsecutiveZeroNew();
+        int zeroNew = bilibiliCrawlerService.getConsecutiveZeroNew();
         if (zeroNew >= 2) {
             return Health.outOfService()
                     .withDetail("reason", zeroNew + " consecutive runs with 0 new resources")
                     .withDetail("consecutiveZeroNew", zeroNew)
-                    .withDetail("totalCrawled", resourceService.getTotalCrawled())
+                    .withDetail("totalCrawled", bilibiliCrawlerService.getTotalCrawled())
                     .build();
         }
 
         Health.Builder builder = Health.up()
-                .withDetail("totalCrawled", resourceService.getTotalCrawled())
-                .withDetail("lastRunNewCount", resourceService.getLastRunNewCount())
-                .withDetail("lastRunTopicsCount", resourceService.getLastRunTopicsCount());
+                .withDetail("totalCrawled", bilibiliCrawlerService.getTotalCrawled())
+                .withDetail("lastRunNewCount", bilibiliCrawlerService.getLastRunNewCount())
+                .withDetail("lastRunTopicsCount", bilibiliCrawlerService.getLastRunTopicsCount());
 
-        if (resourceService.isCrawlerPaused()) {
+        if (bilibiliCrawlerService.isCrawlerPaused()) {
             builder.withDetail("paused", true);
         }
 

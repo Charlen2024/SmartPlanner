@@ -44,6 +44,9 @@ public interface GoalClient {
     @DeleteMapping("/api/goals/{goalId}")
     Result<String> deleteGoal(@PathVariable("goalId") Long goalId);
 
+    @GetMapping("/api/goals/{goalId}/unfinished-count")
+    Result<java.util.Map<String, Long>> countUnfinishedTasks(@PathVariable("goalId") Long goalId);
+
     @PostMapping("/api/goals/{goalId}/tasks")
     Result<GoalTaskDto> createTask(
             @PathVariable("goalId") Long goalId,

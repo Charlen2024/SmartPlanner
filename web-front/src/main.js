@@ -3,6 +3,7 @@ import './style.css'
 import App from './App.vue'
 
 import '@mdi/font/css/materialdesignicons.css'
+import 'highlight.js/styles/github-dark.css'
 import 'vuetify/styles'
 import { createVuetify } from 'vuetify'
 import * as components from 'vuetify/components'

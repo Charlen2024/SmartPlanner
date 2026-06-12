@@ -1,6 +1,6 @@
 package com.chao.resource.actuator;
 
-import com.chao.resource.service.ResourceService;
+import com.chao.resource.service.BilibiliCrawlerService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.actuate.health.Health;
@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 public class CrawlerManagementTest {
 
-    private ResourceService service;
+    private BilibiliCrawlerService service;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -66,9 +66,8 @@ public class CrawlerManagementTest {
     @Test
     void endpointTrigger_shouldFailWhenAlreadyRunning() {
         setField(service, "bilibiliCrawlerEnabled", true);
-        // Set crawlerRunning to true via reflection
         try {
-            Field f = ResourceService.class.getDeclaredField("crawlerRunning");
+            Field f = BilibiliCrawlerService.class.getDeclaredField("crawlerRunning");
             f.setAccessible(true);
             java.util.concurrent.atomic.AtomicBoolean ab = (java.util.concurrent.atomic.AtomicBoolean) f.get(service);
             ab.set(true);
@@ -204,7 +203,6 @@ public class CrawlerManagementTest {
     @Test
     void crawlTopicAsync_shouldNoopWhenDisabled() {
         setField(service, "bilibiliCrawlerEnabled", false);
-        // Should not throw, just return immediately
         assertDoesNotThrow(() -> service.crawlTopicAsync("Spring Boot"));
         assertFalse(service.isCrawlerRunning());
     }
@@ -220,21 +218,19 @@ public class CrawlerManagementTest {
     @Test
     void crawlTopicAsync_shouldNotRunWhenAlreadyRunning() throws Exception {
         setField(service, "bilibiliCrawlerEnabled", true);
-        Field f = ResourceService.class.getDeclaredField("crawlerRunning");
+        Field f = BilibiliCrawlerService.class.getDeclaredField("crawlerRunning");
         f.setAccessible(true);
         java.util.concurrent.atomic.AtomicBoolean ab = (java.util.concurrent.atomic.AtomicBoolean) f.get(service);
         ab.set(true);
 
-        // Should return immediately without error
         assertDoesNotThrow(() -> service.crawlTopicAsync("Java"));
         assertTrue(service.isCrawlerRunning());
     }
 
-    // ---- per-topic failure → health verification ----
+    // ---- per-topic failure -> health verification ----
 
     @Test
     void healthIndicator_downWhenConsecutiveFailuresSet() {
-        // Simulate scenario where all topics failed (consecutiveFailures incremented by scheduler)
         setField(service, "bilibiliCrawlerEnabled", true);
         setField(service, "consecutiveFailures", 4);
         setField(service, "consecutiveZeroNew", 0);
@@ -249,7 +245,6 @@ public class CrawlerManagementTest {
 
     @Test
     void healthIndicator_zeroNewOnlyWhenNoFailures() {
-        // When topics produced 0 results but didn't fail → zero new
         setField(service, "bilibiliCrawlerEnabled", true);
         setField(service, "consecutiveFailures", 0);
         setField(service, "consecutiveZeroNew", 3);
@@ -278,24 +273,22 @@ public class CrawlerManagementTest {
 
     // ---- helpers ----
 
-    private static ResourceService createMinimalService() throws Exception {
-        java.lang.reflect.Constructor<ResourceService> ctor =
-                ResourceService.class.getDeclaredConstructor(
+    private static BilibiliCrawlerService createMinimalService() throws Exception {
+        java.lang.reflect.Constructor<BilibiliCrawlerService> ctor =
+                BilibiliCrawlerService.class.getDeclaredConstructor(
                         com.chao.resource.mapper.CourseResourceMapper.class,
                         com.chao.resource.search.CourseResourceSearchRepository.class,
-                        org.springframework.data.elasticsearch.core.ElasticsearchOperations.class,
-                        com.chao.common.ai.OpenAiCompatClient.class,
-                        com.fasterxml.jackson.databind.ObjectMapper.class,
                         com.chao.common.client.GoalClient.class,
                         org.springframework.web.client.RestTemplate.class,
-                        java.util.concurrent.Executor.class);
+                        java.util.concurrent.Executor.class,
+                        com.fasterxml.jackson.databind.ObjectMapper.class);
         ctor.setAccessible(true);
-        return ctor.newInstance(null, null, null, null, new com.fasterxml.jackson.databind.ObjectMapper(), null, null, null);
+        return ctor.newInstance(null, null, null, null, null, new com.fasterxml.jackson.databind.ObjectMapper());
     }
 
     private static void setField(Object target, String name, Object value) {
         try {
-            Field f = ResourceService.class.getDeclaredField(name);
+            Field f = BilibiliCrawlerService.class.getDeclaredField(name);
             f.setAccessible(true);
             f.set(target, value);
         } catch (Exception e) {

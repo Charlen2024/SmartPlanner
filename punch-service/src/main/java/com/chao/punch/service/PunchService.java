@@ -46,7 +46,7 @@ public class PunchService {
         record.setDurationSeconds(durationSeconds);
         record.setStartedAt(toLocalDateTime(startedAtMs));
         record.setEndedAt(toLocalDateTime(endedAtMs));
-        record.setCreatedAt(LocalDateTime.now());
+        record.setCreatedAt(LocalDateTime.now(SHANGHAI));
         record.setAiAuditResult(1);
         record.setAiAuditRemark("打卡成功");
         punchRecordMapper.insert(record);
@@ -132,7 +132,7 @@ public class PunchService {
         created.setMorningPersonScore(0);
         created.setFocusDurationAvg(0);
         created.setProcrastinationIndex(0f);
-        created.setLastAnalysisTime(LocalDateTime.now());
+        created.setLastAnalysisTime(LocalDateTime.now(SHANGHAI));
         userHabitMapper.insert(created);
         return created;
     }
@@ -142,7 +142,7 @@ public class PunchService {
         habit.setMorningPersonScore(morningPersonScore);
         habit.setFocusDurationAvg(focusDurationAvg);
         habit.setProcrastinationIndex(procrastinationIndex);
-        habit.setLastAnalysisTime(LocalDateTime.now());
+        habit.setLastAnalysisTime(LocalDateTime.now(SHANGHAI));
         userHabitMapper.updateById(habit);
         return habit;
     }

@@ -175,6 +175,9 @@ public class ScheduleService {
         约束：
         - taskId 必须从 tasks 列表中的 id 里选择（严禁编造/使用序号）
         - taskTitle 必须与该 taskId 对应的 title 完全一致
+        - 每个任务之间必须保留至少 breakMinutes 分钟的间隔（前一个 endTime + breakMinutes ≤ 后一个 startTime）
+        - 尽可能把任务分散到不同的 freeSlots 中，优先填满较早的空闲时段
+        - 必须为 tasks 列表中的每一个任务都安排时间，不得遗漏
         """;
 
     public ScheduleImportResultDto parseAndSaveSchedule(Long userId, MultipartFile file, String firstWeekMonday) {
@@ -1750,7 +1753,7 @@ public class ScheduleService {
         List<TaskScheduleDto> out = new ArrayList<>();
         LocalDateTime lastEnd = null;
         for (TaskScheduleDto s : list) {
-            if (lastEnd != null && !s.getStartTime().isAfter(lastEnd)) {
+            if (lastEnd != null && s.getStartTime().isBefore(lastEnd)) {
                 continue;
             }
             out.add(s);
@@ -1773,7 +1776,10 @@ public class ScheduleService {
             if (lastEnd != null) {
                 LocalDateTime minStart = lastEnd.plusMinutes(gapMinutes);
                 if (s.getStartTime().isBefore(minStart)) {
-                    continue;
+                    long duration = java.time.Duration.between(s.getStartTime(), s.getEndTime()).toMinutes();
+                    if (duration <= 0) continue;
+                    s.setStartTime(minStart);
+                    s.setEndTime(minStart.plusMinutes(duration));
                 }
             }
             out.add(s);
@@ -2206,7 +2212,9 @@ public class ScheduleService {
         } catch (Exception ignored) {
         }
 
-        return list.stream().map(s -> {
+        return list.stream()
+            .filter(s -> !titleMap.isEmpty() ? titleMap.containsKey(s.getTaskId()) : true)
+            .map(s -> {
             TaskScheduleDto dto = new TaskScheduleDto();
             dto.setId(s.getId());
             dto.setUserId(s.getUserId());
