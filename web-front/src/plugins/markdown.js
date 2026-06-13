@@ -114,6 +114,8 @@ function fixLlmFormatting(text) {
     .replace(/^(\s*)([-*])([^\s\-*])/gmu, '$1$2 $3')
     .replace(/([^\n#])(#{1,6})([^\s#])/gu, '$1\n$2 $3')
     .replace(/^(.+?[：:]\s*)([^\n]+(?:\s*\/\s*[^\n]+){2,})$/gmu, (_m, prefix, items) => {
+      // Skip if this looks like a URL (avoids breaking http://... into bullet list)
+      if (/https?:\/\/|ftp:\/\/|^\/\//.test(items)) return _m
       const parts = items.split(/\s*\/\s*/).map(s => s.trim()).filter(Boolean)
       if (parts.length < 2) return _m
       return prefix + '\n' + parts.map(p => '- ' + p).join('\n')

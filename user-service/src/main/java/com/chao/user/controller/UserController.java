@@ -742,8 +742,12 @@ public class UserController {
     }
 
     @PostMapping("/resources/crawl")
-    public Result<String> crawlResources(@RequestParam String topic) {
-        return resourceClient.crawlTopic(topic);
+    public Result<String> crawlResources(
+            @RequestParam String topic,
+            @AuthenticationPrincipal Jwt jwt,
+            @RequestHeader(value = "X-User-Id", required = false) Long headerUserId,
+            @RequestParam(required = false) Long userId) {
+        return resourceClient.crawlTopic(topic, resolveUserId(jwt, headerUserId, userId));
     }
 
     @GetMapping("/resources/search/advice")

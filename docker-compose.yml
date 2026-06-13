@@ -142,6 +142,16 @@ services:
       retries: 20
       start_period: 30s
 
+  # bilibili-proxy (optional — only needed on Linux bare Docker where B站 blocks bridge IPs.
+  # Uncomment and set SMARTPLANNER_HTTP_PROXY_HOST=host.docker.internal SMARTPLANNER_HTTP_PROXY_PORT=18888 in .env)
+  # bilibili-proxy:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.proxy
+  #   container_name: bilibili-proxy
+  #   restart: unless-stopped
+  #   network_mode: host
+
   # --- Microservices ---
   goal-service:
     build:
@@ -224,8 +234,10 @@ services:
       <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/sp_resource?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
       SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
-      SMARTPLANNER_HTTP_PROXY_HOST: ${SMARTPLANNER_HTTP_PROXY_HOST:-host.docker.internal}
-      SMARTPLANNER_HTTP_PROXY_PORT: ${SMARTPLANNER_HTTP_PROXY_PORT:-18888}
+      SMARTPLANNER_HTTP_PROXY_HOST: ${SMARTPLANNER_HTTP_PROXY_HOST:-}
+      SMARTPLANNER_HTTP_PROXY_PORT: ${SMARTPLANNER_HTTP_PROXY_PORT:-0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - sp-net
 

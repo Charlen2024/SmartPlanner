@@ -17,7 +17,9 @@ export const useNotifyStore = defineStore('notify', {
       SCHEDULE_FAILED: 0,
       RESOURCE_ADVICE_DONE: 0,
       RESOURCE_ADVICE_FAILED: 0,
+      CRAWL_COMPLETED: 0,
     },
+    lastSignalData: {},
   }),
   actions: {
     setOwner(userId) {
@@ -157,6 +159,7 @@ export const useNotifyStore = defineStore('notify', {
       const t = String(type || '').trim()
       if (t && Object.prototype.hasOwnProperty.call(this.signalSeq, t)) {
         this.signalSeq[t] = Number(this.signalSeq[t] || 0) + 1
+        this.lastSignalData[t] = payload
       }
     },
   },

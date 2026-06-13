@@ -34,25 +34,46 @@ public class PortraitComputeService {
 
     public UserPortraitDto recompute(Long userId) {
         LocalDateTime to = LocalDateTime.now();
-        LocalDateTime from = to.minusDays(7);
+        LocalDateTime from = to.minusDays(14);
+        LocalDateTime weekBoundary = to.minusDays(7).toLocalDate().atStartOfDay();
         String fStr = from.toString();
         String tStr = to.toString();
 
         List<PunchRecordDto> records = safeList(punchClient.listRecords(userId, null, fStr, tStr));
         List<TaskScheduleDto> schedules = safeList(scheduleClient.listTaskSchedules(userId, fStr, tStr));
-        UserInsightDto insights = computeInsights(userId, from, to, records, schedules);
+
+        List<PunchRecordDto> thisWeekRecords = new ArrayList<>();
+        List<PunchRecordDto> lastWeekRecords = new ArrayList<>();
+        if (records != null) {
+            for (PunchRecordDto r : records) {
+                LocalDateTime t = punchStartTime(r);
+                if (t != null && !t.isBefore(weekBoundary)) thisWeekRecords.add(r);
+                else lastWeekRecords.add(r);
+            }
+        }
+        List<TaskScheduleDto> thisWeekSchedules = new ArrayList<>();
+        List<TaskScheduleDto> lastWeekSchedules = new ArrayList<>();
+        if (schedules != null) {
+            for (TaskScheduleDto s : schedules) {
+                if (s.getStartTime() != null && !s.getStartTime().isBefore(weekBoundary)) thisWeekSchedules.add(s);
+                else lastWeekSchedules.add(s);
+            }
+        }
+
+        UserInsightDto insights = computeInsights(userId, weekBoundary, to, thisWeekRecords, thisWeekSchedules);
+        UserInsightDto lastWeekInsights = computeInsights(userId, from, weekBoundary, lastWeekRecords, lastWeekSchedules);
         int streak = insights.getStreak() != null ? insights.getStreak() : 0;
 
-        int morningScore = computeMorningScore(records, schedules);
-        int focusAvg = computeFocusAvgMinutes(records, schedules);
-        float proIndex = computeProcrastinationIndex(insights, records, schedules);
+        int morningScore = computeMorningScore(thisWeekRecords, thisWeekSchedules);
+        int focusAvg = computeFocusAvgMinutes(thisWeekRecords, thisWeekSchedules);
+        float proIndex = computeProcrastinationIndex(insights, thisWeekRecords, thisWeekSchedules);
 
         AiPortraitResult ai = null;
         try {
             PortraitRecomputeRequest req = new PortraitRecomputeRequest();
             req.setUserId(userId);
-            req.setPunchRecords(records);
-            req.setSchedules(schedules);
+            req.setPunchRecords(thisWeekRecords);
+            req.setSchedules(thisWeekSchedules);
             req.setStreak(streak);
             req.setOnTimeRate(insights.getOnTimeRate());
             req.setAvgDelayMinutes(insights.getAvgDelayMinutes());
@@ -88,7 +109,9 @@ public class PortraitComputeService {
                 ? ai.getRecommendation() : recommend(insights, habits));
         dto.setTips(ai != null && ai.getTips() != null && !ai.getTips().isEmpty()
                 ? ai.getTips() : insights.getTips());
-        buildComputation(dto, records, schedules);
+        buildComputation(dto, thisWeekRecords, thisWeekSchedules);
+        dto.setTrends(buildTrends(insights, lastWeekInsights));
+        dto.setBestTimeSlots(buildBestTimeSlots(thisWeekRecords));
         cachePortrait(userId, dto);
         return dto;
     }
@@ -157,10 +180,13 @@ public class PortraitComputeService {
             return dto;
         }
 
-        Map<Long, List<TaskScheduleDto>> scheduleByTask = new HashMap<>();
-        for (TaskScheduleDto s : schedules) {
-            if (s != null && s.getTaskId() != null && s.getStartTime() != null) {
-                scheduleByTask.computeIfAbsent(s.getTaskId(), k -> new ArrayList<>()).add(s);
+        Map<Long, List<PunchRecordDto>> punchesByTask = new HashMap<>();
+        for (PunchRecordDto r : records) {
+            if (r != null && r.getTaskId() != null) {
+                LocalDateTime pt = punchStartTime(r);
+                if (pt != null) {
+                    punchesByTask.computeIfAbsent(r.getTaskId(), k -> new ArrayList<>()).add(r);
+                }
             }
         }
 
@@ -169,20 +195,28 @@ public class PortraitComputeService {
         int lateCount = 0;
         long delaySum = 0;
 
-        for (PunchRecordDto r : records) {
-            if (r == null || r.getTaskId() == null) continue;
-            LocalDateTime punchTime = punchStartTime(r);
-            if (punchTime == null) continue;
-            List<TaskScheduleDto> ss = scheduleByTask.get(r.getTaskId());
-            if (ss == null || ss.isEmpty()) continue;
-            TaskScheduleDto nearest = ss.stream()
-                    .min(Comparator.comparing(s -> Math.abs(ChronoUnit.MINUTES.between(s.getStartTime(), punchTime))))
-                    .orElse(null);
-            if (nearest == null || nearest.getStartTime() == null) continue;
-            long delay = ChronoUnit.MINUTES.between(nearest.getStartTime(), punchTime);
-            if (Math.abs(delay) > 180) continue;
+        for (TaskScheduleDto s : schedules) {
+            if (s == null || s.getTaskId() == null || s.getStartTime() == null) continue;
+            List<PunchRecordDto> candidates = punchesByTask.get(s.getTaskId());
+            if (candidates == null || candidates.isEmpty()) continue;
+
+            PunchRecordDto nearest = null;
+            long nearestDist = Long.MAX_VALUE;
+            for (PunchRecordDto p : candidates) {
+                LocalDateTime pt = punchStartTime(p);
+                long dist = Math.abs(ChronoUnit.MINUTES.between(s.getStartTime(), pt));
+                if (dist <= 180 && dist < nearestDist) {
+                    nearestDist = dist;
+                    nearest = p;
+                }
+            }
+            if (nearest == null) continue;
+
+            candidates.remove(nearest);
+
+            long delay = ChronoUnit.MINUTES.between(s.getStartTime(), punchStartTime(nearest));
             matched++;
-            if (delay > 0) { delaySum += delay; lateCount++; }
+            if (delay > 10) { delaySum += delay; lateCount++; }
             if (Math.abs(delay) <= 10) onTime++;
         }
 
@@ -275,22 +309,29 @@ public class PortraitComputeService {
 
     private float computeProcrastinationIndex(UserInsightDto insights, List<PunchRecordDto> records, List<TaskScheduleDto> schedules) {
         if (insights == null) return 0f;
-        double delay = insights.getAvgDelayMinutes() != null ? insights.getAvgDelayMinutes() : 0.0;
-        double onTime = insights.getOnTimeRate() != null ? insights.getOnTimeRate() : 0.0;
-        double delayScore = Math.max(0.0, Math.min(1.0, delay / 180.0));
-        double completionRate = 0.0;
+        double completionRate;
         if (schedules != null && !schedules.isEmpty()) {
             long done = schedules.stream().filter(s -> s != null && s.getStatus() != null && s.getStatus() == 1).count();
             completionRate = done * 1.0 / schedules.size();
+        } else {
+            completionRate = 0.0;
         }
         Integer matched = insights.getMatchedPunchCount();
-        if (matched == null || matched < 3) {
-            double pro = 0.3 + (1.0 - completionRate) * 0.7;
-            pro = Math.min(0.85, pro);
-            return (float) Math.max(0.0, Math.min(1.0, pro));
+        return (float) computeProcrastinationScore(
+                insights.getAvgDelayMinutes() != null ? insights.getAvgDelayMinutes() : 0.0,
+                insights.getOnTimeRate() != null ? insights.getOnTimeRate() : 0.0,
+                completionRate,
+                matched != null ? matched : 0);
+    }
+
+    private double computeProcrastinationScore(double avgDelayMinutes, double onTimeRate,
+                                                double completionRate, int matchedCount) {
+        if (matchedCount < 3) {
+            return Math.max(0.0, Math.min(1.0, Math.min(0.85, 0.3 + (1.0 - completionRate) * 0.7)));
         }
-        double pro = delayScore * 0.45 + (1.0 - onTime) * 0.35 + (1.0 - completionRate) * 0.20;
-        return (float) Math.max(0.0, Math.min(1.0, pro));
+        double delayScore = Math.max(0.0, Math.min(1.0, avgDelayMinutes / 180.0));
+        return Math.max(0.0, Math.min(1.0,
+                delayScore * 0.45 + (1.0 - onTimeRate) * 0.35 + (1.0 - completionRate) * 0.20));
     }
 
     private SchedulePreferenceDto recommend(UserInsightDto insights, UserHabitDto habits) {
@@ -332,6 +373,66 @@ public class PortraitComputeService {
         return dto;
     }
 
+    // ---- trends ----
+
+    private Map<String, Object> buildTrends(UserInsightDto current, UserInsightDto previous) {
+        Map<String, Object> trends = new LinkedHashMap<>();
+        putTrend(trends, "onTimeRate", "准时率", pct(current.getOnTimeRate()), pct(previous.getOnTimeRate()), "%");
+        putTrend(trends, "completionRate", "完成率", pct(current.getCompletionRate()), pct(previous.getCompletionRate()), "%");
+        putTrend(trends, "streak", "连续打卡", dbl(current.getStreak()), dbl(previous.getStreak()), "天");
+        return trends;
+    }
+
+    private void putTrend(Map<String, Object> trends, String key, String label, double cur, double prev, String unit) {
+        double delta = Math.round((cur - prev) * 100.0) / 100.0;
+        String direction = delta > 0.005 ? "up" : delta < -0.005 ? "down" : "flat";
+        Map<String, Object> t = new LinkedHashMap<>();
+        t.put("label", label);
+        t.put("current", cur);
+        t.put("previous", prev);
+        t.put("delta", delta);
+        t.put("direction", direction);
+        t.put("unit", unit);
+        trends.put(key, t);
+    }
+
+    private static double pct(Double v) { return v != null ? Math.round(v * 10000.0) / 100.0 : 0; }
+    private static double dbl(Integer v) { return v != null ? v.doubleValue() : 0; }
+
+    // ---- best time slots ----
+
+    private List<Map<String, Object>> buildBestTimeSlots(List<PunchRecordDto> records) {
+        Map<Integer, int[]> hourBuckets = new LinkedHashMap<>(); // hour -> [totalMin, count]
+        if (records != null) {
+            for (PunchRecordDto r : records) {
+                LocalDateTime t = punchStartTime(r);
+                if (t == null) continue;
+                int hour = t.getHour();
+                int mins = r.getDurationSeconds() != null && r.getDurationSeconds() > 0
+                        ? (int) Math.max(1, Math.round(r.getDurationSeconds() / 60.0)) : 0;
+                if (mins == 0) continue;
+                int[] bucket = hourBuckets.computeIfAbsent(hour, h -> new int[2]);
+                bucket[0] += mins;
+                bucket[1]++;
+            }
+        }
+        return hourBuckets.entrySet().stream()
+                .filter(e -> e.getValue()[1] >= 2)
+                .map(e -> {
+                    int hour = e.getKey();
+                    int[] b = e.getValue();
+                    Map<String, Object> slot = new LinkedHashMap<>();
+                    slot.put("hour", hour);
+                    slot.put("label", String.format("%02d:00 ~ %02d:00", hour, hour + 1));
+                    slot.put("avgFocusMin", Math.round(b[0] * 1.0 / b[1]));
+                    slot.put("count", b[1]);
+                    return slot;
+                })
+                .sorted((a, b) -> Integer.compare((int) b.get("avgFocusMin"), (int) a.get("avgFocusMin")))
+                .limit(3)
+                .toList();
+    }
+
     // ---- computation details ----
 
     private void buildComputation(UserPortraitDto dto, List<PunchRecordDto> records, List<TaskScheduleDto> schedules) {
@@ -351,7 +452,7 @@ public class PortraitComputeService {
         c.put("avgDelay", Map.of(
                 "label", "平均延迟", "formula", "总延迟分钟 ÷ 迟到次数（仅统计迟到）",
                 "inputs", Map.of("totalDelayMinutes", delaySum, "lateCount", late),
-                "result", Math.round(ins.getAvgDelayMinutes() != null ? ins.getAvgDelayMinutes() : 0) + " min"));
+                "result", Math.round(ins.getAvgDelayMinutes() != null ? ins.getAvgDelayMinutes() : 0) + " 分钟"));
 
         int totalSch = ins.getTotalSchedules() != null ? ins.getTotalSchedules() : 0;
         int done = ins.getDoneCount() != null ? ins.getDoneCount() : 0;
@@ -404,26 +505,20 @@ public class PortraitComputeService {
                     "formula", "打卡总时长(分钟) ÷ 打卡次数" + (aiRefinedFocus ? " → AI微调" : ""),
                     "inputs", Map.of("totalDurationMinutes", durSum, "punchCount", durCnt,
                             "localResult", localFocus),
-                    "result", habFocus + " min"));
+                    "result", habFocus + " 分钟"));
         } else {
             int habFocus = hab != null && hab.getFocusDurationAvg() != null ? hab.getFocusDurationAvg() : 0;
             c.put("focusAvg", Map.of(
                     "label", "平均专注时长", "formula", "打卡总时长(分钟) ÷ 打卡次数",
                     "inputs", Map.of("localResult", habFocus),
-                    "result", habFocus + " min"));
+                    "result", habFocus + " 分钟"));
         }
 
         double delay = ins.getAvgDelayMinutes() != null ? ins.getAvgDelayMinutes() : 0;
         double delayScore = Math.max(0, Math.min(1, delay / 180));
         double onTimeRate = ins.getOnTimeRate() != null ? ins.getOnTimeRate() : 0;
         double completionRate = ins.getCompletionRate() != null ? ins.getCompletionRate() : 0;
-        double localProc;
-        if (matched < 3) {
-            localProc = Math.min(0.85, 0.3 + (1.0 - completionRate) * 0.7);
-        } else {
-            localProc = delayScore * 0.45 + (1.0 - onTimeRate) * 0.35 + (1.0 - completionRate) * 0.20;
-        }
-        localProc = Math.max(0.0, Math.min(1.0, localProc));
+        double localProc = computeProcrastinationScore(delay, onTimeRate, completionRate, matched);
         double habProc = hab != null && hab.getProcrastinationIndex() != null ? hab.getProcrastinationIndex() : 0.0;
         int localProcPct = (int) Math.round(localProc * 100);
         int habProcPct = (int) Math.round(habProc * 100);
@@ -485,7 +580,7 @@ public class PortraitComputeService {
                         + (aiRefinedRec ? " → AI微调" : ""),
                 "inputs", recInputs,
                 "result", rec != null
-                        ? "专注" + rec.getFocusMinutes() + "min / 休息" + rec.getBreakMinutes() + "min / 上限" + rec.getMaxDailyMinutes() + "min"
+                        ? "专注" + rec.getFocusMinutes() + "分钟 / 休息" + rec.getBreakMinutes() + "分钟 / 上限" + rec.getMaxDailyMinutes() + "分钟"
                         : "-"));
     }
 

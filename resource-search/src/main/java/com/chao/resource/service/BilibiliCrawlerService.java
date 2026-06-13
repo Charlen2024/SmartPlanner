@@ -168,17 +168,20 @@ public class BilibiliCrawlerService {
                     "https://www.bilibili.com/",
                     "https://www.bilibili.com");
             if (json == null || json.isBlank()) {
-                log.debug("Bilibili query '{}' returned empty/null response", q);
+                log.warn("Bilibili query '{}' returned empty/null response (network blocked or API unreachable)", q);
                 continue;
             }
             try {
                 JsonNode root = objectMapper.readTree(json);
                 if (root.path("code").asInt() != 0) {
-                    log.debug("Bilibili API code != 0 for '{}': code={}", q, root.path("code").asInt());
+                    log.warn("Bilibili API code != 0 for '{}': code={}, message={}", q, root.path("code").asInt(), root.path("message").asText(""));
                     continue;
                 }
                 JsonNode result = root.path("data").path("result");
-                if (!result.isArray()) continue;
+                if (!result.isArray()) {
+                    log.warn("Bilibili API result is not array for '{}': type={}", q, result.getNodeType());
+                    continue;
+                }
                 int added = 0;
                 int innerCap = Math.max(limit * 4, 24);
                 outer:
@@ -235,19 +238,19 @@ public class BilibiliCrawlerService {
                 "https://www.bilibili.com/",
                 "https://www.bilibili.com");
         if (html == null || html.isBlank()) {
-            log.debug("Bilibili web scrape: empty response for '{}'", keyword);
+            log.warn("Bilibili web scrape: empty response for '{}' (network blocked or page not available)", keyword);
             return out;
         }
         String marker = "window.__INITIAL_STATE__";
         int idx = html.indexOf(marker);
         if (idx < 0) {
-            log.debug("Bilibili web scrape: no __INITIAL_STATE__ for '{}'", keyword);
+            log.warn("Bilibili web scrape: no __INITIAL_STATE__ for '{}' (page may require JS render or is blocked)", keyword);
             return out;
         }
         int jsonStart = html.indexOf("{", idx + marker.length());
         int jsonEnd = html.lastIndexOf("};");
         if (jsonStart < 0 || jsonEnd < 0 || jsonEnd <= jsonStart) {
-            log.debug("Bilibili web scrape: failed to locate JSON for '{}'", keyword);
+            log.warn("Bilibili web scrape: failed to locate JSON for '{}'", keyword);
             return out;
         }
         String jsonStr = html.substring(jsonStart, jsonEnd + 1);
@@ -389,9 +392,9 @@ public class BilibiliCrawlerService {
     /**
      * 异步爬取指定主题（目标驱动即时爬取），不等待结果。
      */
-    public void crawlTopicAsync(String topic) {
-        if (topic == null || topic.isBlank()) return;
-        if (!bilibiliCrawlerEnabled) return;
+    public CompletableFuture<Void> crawlTopicAsync(String topic) {
+        if (topic == null || topic.isBlank()) return CompletableFuture.completedFuture(null);
+        if (!bilibiliCrawlerEnabled) return CompletableFuture.completedFuture(null);
         Runnable task = () -> {
             if (!onDemandCrawlerRunning.compareAndSet(false, true)) {
                 log.info("On-demand crawl skipped for '{}': another on-demand crawl is already running", topic);
@@ -440,9 +443,9 @@ public class BilibiliCrawlerService {
             }
         };
         if (aiTaskExecutor != null) {
-            CompletableFuture.runAsync(task, aiTaskExecutor);
+            return CompletableFuture.runAsync(task, aiTaskExecutor);
         } else {
-            CompletableFuture.runAsync(task);
+            return CompletableFuture.runAsync(task);
         }
     }
 
@@ -649,12 +652,24 @@ public class BilibiliCrawlerService {
         headers.set("Accept-Language", "zh-CN,zh;q=0.9");
         HttpEntity<Void> entity = new HttpEntity<>(headers);
 
-        String requestUrl = url;
-        if (httpProxyHost != null && !httpProxyHost.isBlank() && httpProxyPort > 0
-                && (url.contains("api.bilibili.com") || url.contains("search.bilibili.com"))) {
-            requestUrl = "http://" + httpProxyHost + ":" + httpProxyPort + "/?url=" + URLEncoder.encode(url, StandardCharsets.UTF_8);
+        boolean useProxy = httpProxyHost != null && !httpProxyHost.isBlank() && httpProxyPort > 0
+                && (url.contains("api.bilibili.com") || url.contains("search.bilibili.com"));
+        String proxyUrl = useProxy
+                ? "http://" + httpProxyHost + ":" + httpProxyPort + "/?url=" + URLEncoder.encode(url, StandardCharsets.UTF_8)
+                : null;
+
+        // Try proxy first if configured
+        if (proxyUrl != null) {
+            String result = doHttpGet(proxyUrl, entity, url, maxRetries);
+            if (result != null) return result;
+            log.warn("Bilibili proxy unreachable, falling back to direct connection for: {}", url);
         }
 
+        // Fall back to direct connection
+        return doHttpGet(url, entity, url, maxRetries);
+    }
+
+    private String doHttpGet(String requestUrl, HttpEntity<Void> entity, String logUrl, int maxRetries) {
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
             try {
                 ResponseEntity<String> resp = externalRestTemplate.exchange(
@@ -673,7 +688,8 @@ public class BilibiliCrawlerService {
                 if (attempt < maxRetries) {
                     try { Thread.sleep((attempt + 1) * 500L); } catch (InterruptedException ignored) {}
                 } else {
-                    log.debug("httpGetTextWithUA failed after {} retries: {}", maxRetries, e.getMessage());
+                    log.warn("Bilibili HTTP request failed after {} retries: requestUrl={}, error={}: {}",
+                            maxRetries, requestUrl, e.getClass().getSimpleName(), e.getMessage());
                     return null;
                 }
             }

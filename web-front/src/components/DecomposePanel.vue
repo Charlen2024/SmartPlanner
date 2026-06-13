@@ -1,11 +1,18 @@
 <script setup>
+import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { useDecomposeStore } from '../stores/decompose'
 
+const router = useRouter()
 const dc = useDecomposeStore()
 
 function phaseClass(key) {
   return dc.phases[key] || 'pending'
 }
+
+const MAX_DISPLAY = 5
+const truncated = computed(() => dc.taskCount > MAX_DISPLAY)
+const hiddenCount = computed(() => Math.max(0, dc.taskCount - MAX_DISPLAY))
 </script>
 
 <template>
@@ -88,6 +95,18 @@ function phaseClass(key) {
         <div v-if="dc.phases.done === 'done'" class="dc-complete">
           <v-icon icon="mdi-check-circle" color="success" size="16" />
           <span>共生成 {{ dc.taskCount }} 个任务</span>
+          <div v-if="truncated" class="dc-truncated-hint">
+            <span>仅展示前 {{ MAX_DISPLAY }} 条，还有 {{ hiddenCount }} 条</span>
+            <v-btn
+              size="x-small"
+              variant="text"
+              color="primary"
+              class="dc-goto-plan"
+              @click="router.push('/plan')"
+            >
+              学习计划页查看全部
+            </v-btn>
+          </div>
         </div>
       </div>
     </div>
@@ -295,11 +314,31 @@ function phaseClass(key) {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid rgba(var(--v-theme-on-surface), 0.06);
   font-size: 12px;
   font-weight: 600;
+}
+.dc-truncated-hint {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(var(--v-theme-primary), 0.06);
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.85;
+}
+.dc-goto-plan {
+  font-size: 11px !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
 }
 
 /* ── Transitions ── */

@@ -6,7 +6,7 @@ import com.chao.common.dto.ResourceAdviceJobStartRequest;
 import com.chao.common.dto.ResourceAdviceJobStartResponse;
 import com.chao.common.dto.ResourceAdviceJobStatusResponse;
 import com.chao.resource.entity.CourseResource;
-import com.chao.resource.service.BilibiliCrawlerService;
+import com.chao.resource.service.CrawlerOrchestratorService;
 import com.chao.resource.service.ResourceAdviceJobService;
 import com.chao.resource.service.ResourceService;
 import lombok.RequiredArgsConstructor;
@@ -20,7 +20,7 @@ import java.util.List;
 public class ResourceController {
     private final ResourceService resourceService;
     private final ResourceAdviceJobService resourceAdviceJobService;
-    private final BilibiliCrawlerService bilibiliCrawlerService;
+    private final CrawlerOrchestratorService crawlerOrchestrator;
 
     @PostMapping
     public Result<CourseResource> create(
@@ -76,8 +76,8 @@ public class ResourceController {
      * 目标驱动即时爬取：用户提交 Goal 后自动触发该主题的爬虫。
      */
     @PostMapping("/crawl")
-    public Result<String> crawlTopic(@RequestParam String topic) {
-        bilibiliCrawlerService.crawlTopicAsync(topic);
+    public Result<String> crawlTopic(@RequestParam String topic, @RequestParam Long userId) {
+        crawlerOrchestrator.crawlTopicAsync(topic, userId);
         return Result.success("ok");
     }
 }

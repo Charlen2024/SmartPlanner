@@ -51,12 +51,10 @@ const dayDow = computed(() => dateDowValue(scheduleDate.value))
 const dayClasses = computed(() => {
   const dow = dayDow.value
   if (!dow) return []
-  const wn = weekNumber.value
   const dowClasses = (allClasses.value ?? []).filter((c) => Number(c?.dayOfWeek) === Number(dow))
+  const wn = weekNumber.value
   if (wn != null) {
-    const filtered = dowClasses.filter((c) => matchesWeekFn(c, wn))
-    if (filtered.length > 0 || dowClasses.length === 0) return filtered
-    return dowClasses
+    return dowClasses.filter((c) => matchesWeekFn(c, wn))
   }
   return dowClasses
 })

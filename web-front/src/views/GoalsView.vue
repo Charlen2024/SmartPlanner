@@ -340,6 +340,10 @@ watch(() => notify.signalSeq?.GOAL_TASK_READY, async () => {
   await load({ showLoading: false })
   if (Number.isFinite(gid) && gid > 0) {
     await loadGoalTasksForPlan(gid)
+    // Sync real DB tasks to the decompose floating panel
+    if (decompose.active) {
+      decompose.syncTasks(planGoalTasks.value)
+    }
     const curr = Array.isArray(expanded.value) ? expanded.value : []
     if (!curr.some((x) => Number(x) === gid)) expanded.value = [...curr, gid]
   }

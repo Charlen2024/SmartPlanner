@@ -2,6 +2,9 @@
 import { ref, computed, watch, onActivated, onBeforeUnmount, onDeactivated } from 'vue'
 import api from '../plugins/api'
 import { renderMarkdown } from '../plugins/markdown'
+import { useNotifyStore } from '../stores/notify'
+
+const notify = useNotifyStore()
 
 const topic = ref('')
 const title = ref('')
@@ -28,10 +31,11 @@ const quickTopics = ['Java 多线程', 'Spring Boot', 'MySQL 索引', 'Redis 缓
 
 const adviceHtml = computed(() => {
   if (!advice.value) return ''
-  const fixed = advice.value
+  const cleaned = advice.value
+    .replace(/\*\*(.+?)\*\*/g, '$1')
     .replace(/^(#{1,6})([^\s#])/gm, '$1 $2')
     .replace(/^(\s*)([-*])([^\s])/gm, '$1$2 $3')
-  return renderMarkdown(fixed)
+  return renderMarkdown(cleaned)
 })
 
 function sleep(ms) {
@@ -49,6 +53,7 @@ function platformIcon(platform) {
   if (p.includes('youtube') || p.includes('b站')) return 'mdi-youtube'
   if (p.includes('csdn')) return 'mdi-language-css3'
   if (p.includes('掘金') || p.includes('juejin')) return 'mdi-gold'
+  if (p.includes('博客园') || p.includes('cnblogs')) return 'mdi-post-outline'
   return 'mdi-open-in-new'
 }
 
@@ -58,7 +63,41 @@ function platformColor(platform) {
   if (p.includes('zhihu') || p.includes('知乎')) return '#0066ff'
   if (p.includes('github')) return '#333333'
   if (p.includes('youtube')) return '#ff0000'
+  if (p.includes('imooc') || p.includes('慕课')) return '#e67e22'
+  if (p.includes('csdn')) return '#fc5531'
+  if (p.includes('掘金') || p.includes('juejin')) return '#1e80ff'
+  if (p.includes('博客园') || p.includes('cnblogs')) return '#2e7d32'
   return undefined
+}
+
+const crawled = ref(new Set())
+const isFallback = ref(false)
+
+function buildDefaultResults(q) {
+  const enc = encodeURIComponent(q)
+  return [
+    { title: `B站 搜索：${q}`, platform: 'Bilibili', url: `https://search.bilibili.com/all?keyword=${enc}`, summary: '适合入门视频与实战课' },
+    { title: `慕课网 搜索：${q}`, platform: '慕课网', url: `https://www.imooc.com/search/?words=${enc}`, summary: '国内主流IT技能学习平台' },
+    { title: `CSDN 搜索：${q}`, platform: 'CSDN', url: `https://so.csdn.net/so/search?q=${enc}&t=blog`, summary: '技术博客与实战教程' },
+    { title: `掘金 搜索：${q}`, platform: '掘金', url: `https://juejin.cn/search?query=${enc}`, summary: '前端/后端/面试经验社区' },
+    { title: `知乎 搜索：${q}`, platform: '知乎', url: `https://www.zhihu.com/search?q=${enc}`, summary: '概念梳理与经验贴' },
+    { title: `GitHub 搜索：${q}`, platform: 'GitHub', url: `https://github.com/search?q=${enc}`, summary: '开源项目/示例/最佳实践' },
+    { title: `博客园 搜索：${q}`, platform: '博客园', url: `https://www.cnblogs.com/search?q=${enc}`, summary: '.NET/Java/全栈技术博客' },
+  ]
+}
+
+function triggerCrawl(topicText) {
+  const t = topicText?.trim()
+  if (!t || crawled.value.has(t)) return
+  crawled.value.add(t)
+  api.post('/user/resources/crawl', null, {
+    params: { topic: t },
+    timeout: 5000
+  }).then(() => {
+    crawlMsg.value = `当前没有「${t}」的相关资源，正在后台爬取中，请稍后刷新页面`
+  }).catch(() => {
+    crawled.value.delete(t)
+  })
 }
 
 async function searchFast() {
@@ -68,21 +107,28 @@ async function searchFast() {
   error.value = ''
   advice.value = ''
   crawlMsg.value = ''
+  isFallback.value = false
   list.value = []
   try {
     const res = await api.get('/user/resources/search', {
       params: { topic: topic.value.trim() },
-      timeout: 15000
+      timeout: 10000
     })
     list.value = res?.data?.data ?? []
     if (list.value.length === 0) {
-      error.value = '未找到相关资源'
+      isFallback.value = true
+      list.value = buildDefaultResults(topic.value.trim())
+      triggerCrawl(topic.value)
+    } else {
+      isFallback.value = false
     }
   } catch (e) {
     if (e?.response?.status === 401) {
       error.value = '未登录或登录已过期，请重新登录后再检索'
     } else {
-      error.value = e?.response?.data?.message || e?.message || '检索失败'
+      isFallback.value = true
+      list.value = buildDefaultResults(topic.value.trim())
+      triggerCrawl(topic.value)
     }
   } finally {
     loading.value = false
@@ -102,6 +148,7 @@ async function searchRag() {
   error.value = ''
   advice.value = ''
   crawlMsg.value = ''
+  isFallback.value = false
   list.value = []
   try {
     const startRes = await api.post('/user/resources/search/advice/jobs', { topic: topic.value.trim() }, { timeout: 30000 })
@@ -118,6 +165,13 @@ async function searchRag() {
         const r = data?.result ?? null
         advice.value = r?.advice ?? ''
         list.value = r?.resources ?? []
+        if (list.value.length === 0) {
+          isFallback.value = true
+          list.value = buildDefaultResults(topic.value.trim())
+          triggerCrawl(topic.value)
+        } else {
+          isFallback.value = false
+        }
         return
       }
       if (data?.status === 'FAILED') {
@@ -129,10 +183,10 @@ async function searchRag() {
     if (aborted.value) return
     if (e?.response?.status === 401) {
       error.value = '未登录或登录已过期，请重新登录后再检索'
-    } else if (e?.code === 'ECONNABORTED') {
-      error.value = '请求超时，请稍后重试'
     } else {
-      error.value = e?.response?.data?.message || e?.message || '检索失败'
+      isFallback.value = true
+      list.value = buildDefaultResults(topic.value.trim())
+      triggerCrawl(topic.value)
     }
   } finally {
     if (seq === jobSeq.value) aiLoading.value = false
@@ -196,6 +250,7 @@ async function loadLocal() {
   }
   const res = await api.get('/user/resources', { params: { topic: topic.value } })
   list.value = res?.data?.data ?? []
+  isFallback.value = false
 }
 
 async function remove(id) {
@@ -215,6 +270,7 @@ watch(
       advice.value = ''
       error.value = ''
       crawlMsg.value = ''
+      isFallback.value = false
       list.value = []
       return
     }
@@ -230,6 +286,19 @@ onBeforeUnmount(() => {
 onDeactivated(() => {
   aborted.value = true
   clearTimeout(topicDebounce)
+})
+
+// Auto re-search when background crawl completes for current topic
+watch(() => notify.signalSeq['CRAWL_COMPLETED'], () => {
+  const data = notify.lastSignalData['CRAWL_COMPLETED']
+  if (data && topic.value?.trim()) {
+    const crawledTopic = data?.payload?.topic
+    if (crawledTopic === topic.value.trim()) {
+      crawlMsg.value = ''
+      isFallback.value = false
+      searchFast()
+    }
+  }
 })
 onActivated(() => {
   aborted.value = false
@@ -303,8 +372,15 @@ onActivated(() => {
 
   <!-- ====== Messages ====== -->
   <v-alert v-if="error" type="error" variant="tonal" class="mb-4" density="compact">{{ error }}</v-alert>
-  <v-alert v-if="crawlMsg" type="success" variant="tonal" class="mb-4" density="compact">
-    {{ crawlMsg }}
+  <v-alert v-if="crawlMsg" type="info" variant="tonal" class="mb-2" density="compact">
+    <span class="crawl-alert-content">
+      <v-icon icon="mdi-spider" size="18" class="spider-icon" />
+      <span class="crawl-text">{{ crawlMsg }}<span class="animated-dots"><span>.</span><span>.</span><span>.</span></span></span>
+    </span>
+  </v-alert>
+  <v-progress-linear v-if="crawlMsg" indeterminate color="info" height="3" class="mb-4" rounded />
+  <v-alert v-if="isFallback && !crawlMsg" type="warning" variant="tonal" class="mb-4" density="compact">
+    <v-icon icon="mdi-alert-circle-outline" class="mr-1" size="16" />当前没有找到相关资源，以下为各平台搜索链接，可点击前往对应网站搜索
   </v-alert>
 
   <!-- ====== AI Advice Card ====== -->
@@ -357,7 +433,7 @@ onActivated(() => {
       <div
         v-for="(r, i) in list"
         :key="r.id || i"
-        class="resource-item pa-3 mb-1 rounded"
+        :class="['resource-item pa-3 mb-1 rounded', { 'fallback-item': isFallback }]"
       >
         <div class="d-flex align-start ga-3">
           <!-- Rank badge -->
@@ -573,5 +649,64 @@ onActivated(() => {
 
 .cursor-pointer {
   cursor: pointer;
+}
+
+/* Crawling animation */
+.crawl-alert-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.crawl-text {
+  display: inline-flex;
+  align-items: baseline;
+}
+.spider-icon {
+  animation: spider-crawl 1.2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes spider-crawl {
+  0%, 100% { transform: scale(1) rotate(0deg); opacity: 1; }
+  25%  { transform: scale(1.15) rotate(-8deg); opacity: 0.75; }
+  50%  { transform: scale(1.05) rotate(5deg); opacity: 0.9; }
+  75%  { transform: scale(1.2) rotate(-3deg); opacity: 0.7; }
+}
+.animated-dots span {
+  animation: dot-blink 1.5s infinite;
+  opacity: 0;
+}
+.animated-dots span:nth-child(1) { animation-delay: 0s; }
+.animated-dots span:nth-child(2) { animation-delay: 0.3s; }
+.animated-dots span:nth-child(3) { animation-delay: 0.6s; }
+@keyframes dot-blink {
+  0%, 20% { opacity: 0; }
+  50% { opacity: 1; }
+  80%, 100% { opacity: 0; }
+}
+
+/* Fallback shimmer */
+.fallback-item {
+  position: relative;
+  overflow: hidden;
+}
+.fallback-item::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 40%,
+    rgba(var(--v-theme-on-surface), 0.03) 45%,
+    rgba(var(--v-theme-on-surface), 0.06) 50%,
+    rgba(var(--v-theme-on-surface), 0.03) 55%,
+    transparent 60%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2.2s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 </style>

@@ -2213,7 +2213,6 @@ public class ScheduleService {
         }
 
         return list.stream()
-            .filter(s -> !titleMap.isEmpty() ? titleMap.containsKey(s.getTaskId()) : true)
             .map(s -> {
             TaskScheduleDto dto = new TaskScheduleDto();
             dto.setId(s.getId());

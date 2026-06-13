@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 
+const MAX_DISPLAY = 5
+
 const PHASES = [
   { key: 'intent',   label: '分析目标意图',   icon: 'mdi-magnify' },
   { key: 'llm',      label: 'AI拆解生成任务',  icon: 'mdi-brain' },
@@ -108,6 +110,18 @@ export const useDecomposeStore = defineStore('decompose', {
         if (this.phases[key] === 'pending') this.phases[key] = 'done'
       }
       this.phases.done = 'done'
+    },
+    /** Called by views after loading real tasks from API to replace SSE titles */
+    syncTasks(taskList) {
+      const list = Array.isArray(taskList) ? taskList : []
+      this.taskCount = list.length
+      this.tasks = list.slice(0, MAX_DISPLAY).map(t => ({
+        id: t.id,
+        title: typeof t === 'string' ? t : (t.title || ''),
+        revealed: true,
+      }))
+      if (this.autoplayTimer) { clearInterval(this.autoplayTimer); this.autoplayTimer = null }
+      for (const p of PHASES) this.phases[p.key] = 'done'
     },
     complete() {
       if (this.autoplayTimer) { clearInterval(this.autoplayTimer); this.autoplayTimer = null }

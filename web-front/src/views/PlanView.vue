@@ -217,14 +217,27 @@ async function createGoalByAi() {
   }
 }
 
+function resetWizardState() {
+  step.value = 1
+  currentGoalId.value = null
+  currentGoalTitle.value = ''
+  tasks.value = []
+  tasksLoading.value = false
+  tasksAccepted.value = false
+  feedbackOpen.value = false
+  feedbackText.value = ''
+}
+
 function finishWizard() {
   safeClearWizardState()
+  resetWizardState()
   notify.success('已完成本次向导')
   router.push('/')
 }
 
 function finishWizardAndGo(to) {
   safeClearWizardState()
+  resetWizardState()
   notify.success('已结束本页流程，请在目标页完成排程')
   router.push(to)
 }
@@ -285,6 +298,10 @@ watch(
       await loadGoalTasks(currentGoalId.value)
       if (hasRealTasks(tasks.value)) {
         tasksLoading.value = false
+        // Sync real DB tasks back to the decompose floating panel
+        if (decompose.active) {
+          decompose.syncTasks(tasks.value)
+        }
       }
     } catch (e) { /* ignore, user can manually refresh */ }
   },

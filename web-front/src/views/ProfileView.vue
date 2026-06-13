@@ -7,40 +7,46 @@ const loading = ref(false)
 const error = ref('')
 const showComputation = ref(false)
 
-const topMetrics = computed(() => [
-  {
-    key: 'onTimeRate',
-    label: '准时率',
-    icon: 'mdi-clock-check-outline',
-    value: Math.round((portrait.value?.insights?.onTimeRate ?? 0) * 100),
-    suffix: '%',
-    color: 'success',
-  },
-  {
-    key: 'completionRate',
-    label: '完成率',
-    icon: 'mdi-check-circle-outline',
-    value: Math.round((portrait.value?.insights?.completionRate ?? 0) * 100),
-    suffix: '%',
-    color: 'primary',
-  },
-  {
-    key: 'streak',
-    label: '连续打卡',
-    icon: 'mdi-fire',
-    value: portrait.value?.insights?.streak ?? 0,
-    suffix: ' 天',
-    color: 'warning',
-  },
-  {
-    key: 'avgDelay',
-    label: '平均延迟',
-    icon: 'mdi-timer-sand',
-    value: Math.round(portrait.value?.insights?.avgDelayMinutes ?? 0),
-    suffix: ' min',
-    color: 'error',
-  },
-])
+const topMetrics = computed(() => {
+  const trends = portrait.value?.trends || {}
+  return [
+    {
+      key: 'onTimeRate',
+      label: '准时率',
+      icon: 'mdi-clock-check-outline',
+      value: Math.round((portrait.value?.insights?.onTimeRate ?? 0) * 100),
+      suffix: '%',
+      color: 'success',
+      trend: trends.onTimeRate,
+    },
+    {
+      key: 'completionRate',
+      label: '完成率',
+      icon: 'mdi-check-circle-outline',
+      value: Math.round((portrait.value?.insights?.completionRate ?? 0) * 100),
+      suffix: '%',
+      color: 'primary',
+      trend: trends.completionRate,
+    },
+    {
+      key: 'streak',
+      label: '连续打卡',
+      icon: 'mdi-fire',
+      value: portrait.value?.insights?.streak ?? 0,
+      suffix: ' 天',
+      color: 'warning',
+      trend: trends.streak,
+    },
+    {
+      key: 'avgDelay',
+      label: '平均延迟',
+      icon: 'mdi-timer-sand',
+      value: Math.round(portrait.value?.insights?.avgDelayMinutes ?? 0),
+      suffix: ' 分钟',
+      color: 'error',
+    },
+  ]
+})
 
 const habitBars = computed(() => [
   {
@@ -59,7 +65,7 @@ const habitBars = computed(() => [
     icon: 'mdi-brain',
     value: portrait.value?.habits?.focusDurationAvg ?? 0,
     max: 120,
-    suffix: ' min',
+    suffix: ' 分钟',
     hint: '单次学习的平均时长',
     color: 'primary',
   },
@@ -75,6 +81,8 @@ const habitBars = computed(() => [
   },
 ])
 
+const cardCols = computed(() => portrait.value?.bestTimeSlots?.length ? 4 : 6)
+
 const metricHelp = {
   onTimeRate: '实际打卡时间与排程开始时间偏差 ≤ 10 分钟即算"准时"。准时率 = 准时次数 ÷ 可匹配的打卡次数。',
   avgDelay: '统计所有迟到的打卡（打卡时间晚于排程时间），取平均延迟分钟数。准时或提前到达不计入。',
@@ -83,7 +91,7 @@ const metricHelp = {
   morningScore: '分析 10:00 前的打卡和排程占比，得分越高越偏晨型。打卡权重 60%，排程权重 40%。',
   focusAvg: '统计有学习时长的打卡记录，取实际学习分钟数的均值。无打卡时用已完成排程时长降级估算。',
   procrastination: '综合延迟程度(45%)、不准时率(35%)、未完成率(20%)。越高越拖延，冷启动(<3次)用完成率估算。',
-  recommendation: '专注=连续映射(avg×0.8→clamp[25,90])−拖延罚分; 休息=专注×0.25比例缩放; 上限=完成率分档−拖延罚分, streak<2封顶150。',
+  recommendation: '专注=连续映射(avg×0.8→clamp[25,90])−拖延罚分; 休息=专注×0.25比例缩放; 上限=完成率分档−拖延罚分, 连续打卡<2封顶150。',
 }
 
 function metricIcon(key) {
@@ -217,9 +225,13 @@ onActivated(() => { if (_ready) load(); _ready = true })
           <v-icon :icon="m.icon" size="18" :color="m.color" />
           <span class="text-caption font-weight-medium text-medium-emphasis">{{ m.label }}</span>
         </div>
-        <div class="d-flex align-baseline ga-1">
+        <div class="d-flex align-baseline ga-2">
           <span class="metric-value">{{ m.value }}</span>
           <span class="text-caption text-medium-emphasis">{{ m.suffix }}</span>
+          <span v-if="m.trend && m.trend.direction !== 'flat'" class="trend-badge" :class="'trend--' + m.trend.direction">
+            <v-icon :icon="m.trend.direction === 'up' ? 'mdi-arrow-up-thin' : 'mdi-arrow-down-thin'" size="12" />
+            {{ Math.abs(m.trend.delta) }}{{ m.trend.unit }}
+          </span>
         </div>
         <v-progress-linear
           :model-value="m.value"
@@ -257,7 +269,7 @@ onActivated(() => { if (_ready) load(); _ready = true })
   </v-card>
 
   <v-row class="mb-4">
-    <v-col cols="12" md="6">
+    <v-col cols="12" :md="cardCols">
       <v-card class="h-100">
         <v-card-title class="d-flex align-center pb-1">
           <v-icon icon="mdi-tune" class="mr-2" />
@@ -273,28 +285,49 @@ onActivated(() => { if (_ready) load(); _ready = true })
               <v-icon icon="mdi-timer-outline" size="20" color="primary" class="mr-3" />
               <span class="text-body-2 text-medium-emphasis rec-label">专注时长</span>
               <v-spacer />
-              <span class="text-body-2 font-weight-bold">{{ portrait.recommendation.focusMinutes }} min</span>
+              <span class="text-body-2 font-weight-bold">{{ portrait.recommendation.focusMinutes }} 分钟</span>
             </div>
             <v-divider class="my-2" />
             <div class="rec-row">
               <v-icon icon="mdi-coffee-outline" size="20" color="warning" class="mr-3" />
               <span class="text-body-2 text-medium-emphasis rec-label">休息时长</span>
               <v-spacer />
-              <span class="text-body-2 font-weight-bold">{{ portrait.recommendation.breakMinutes }} min</span>
+              <span class="text-body-2 font-weight-bold">{{ portrait.recommendation.breakMinutes }} 分钟</span>
             </div>
             <v-divider class="my-2" />
             <div class="rec-row">
               <v-icon icon="mdi-calendar-check-outline" size="20" color="success" class="mr-3" />
               <span class="text-body-2 text-medium-emphasis rec-label">当日上限</span>
               <v-spacer />
-              <span class="text-body-2 font-weight-bold">{{ portrait.recommendation.maxDailyMinutes }} min</span>
+              <span class="text-body-2 font-weight-bold">{{ portrait.recommendation.maxDailyMinutes }} 分钟</span>
             </div>
           </div>
         </v-card-text>
       </v-card>
     </v-col>
 
-    <v-col cols="12" md="6">
+    <v-col v-if="portrait?.bestTimeSlots?.length" cols="12" :md="cardCols">
+      <v-card class="h-100">
+        <v-card-title class="d-flex align-center pb-1">
+          <v-icon icon="mdi-lightning-bolt-outline" class="mr-2" color="warning" />
+          <span class="text-body-1 font-weight-semibold">最佳时段</span>
+        </v-card-title>
+        <v-divider />
+        <v-card-text>
+          <div v-for="(slot, i) in portrait.bestTimeSlots" :key="i" class="time-slot-row">
+            <div class="d-flex align-center">
+              <span class="time-slot-rank" :class="'rank-' + (i + 1)">{{ i + 1 }}</span>
+              <span class="text-body-2 font-weight-medium ml-2">{{ slot.label }}</span>
+              <v-spacer />
+              <span class="text-body-2 font-weight-bold">{{ slot.avgFocusMin }} 分钟</span>
+            </div>
+            <div class="text-caption text-medium-emphasis ml-6">平均专注，{{ slot.count }} 次打卡</div>
+          </div>
+        </v-card-text>
+      </v-card>
+    </v-col>
+
+    <v-col cols="12" :md="cardCols">
       <v-card class="h-100">
         <v-card-title class="d-flex align-center pb-1">
           <v-icon icon="mdi-chart-bar" class="mr-2" />
@@ -367,17 +400,17 @@ onActivated(() => { if (_ready) load(); _ready = true })
                       <div class="rec-step-body">
                         <div class="text-caption text-medium-emphasis">专注时长 · 连续映射</div>
                         <div class="text-caption mt-1">
-                          round(<strong>{{ item.inputs.focusAvgInput }}</strong> × 0.8 ÷ 5) × 5 = <strong>{{ item.inputs.focusBase }} min</strong>，限制 [25, 90]
+                          (<strong>{{ item.inputs.focusAvgInput }}</strong> × 0.8 ÷ 5) 四舍五入 × 5 = <strong>{{ item.inputs.focusBase }} 分钟</strong>，限制 [25, 90]
                         </div>
                         <div class="rec-rule mt-1">
                           <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.focusPenalty === 0 }">拖延 ≤ 0.4 · 无调整</span>
-                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.focusPenalty === 5 }">拖延 0.4~0.6 · −5min</span>
-                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.focusPenalty === 10 }">拖延 > 0.6 · −10min</span>
+                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.focusPenalty === 5 }">拖延 0.4~0.6 · −5分钟</span>
+                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.focusPenalty === 10 }">拖延 > 0.6 · −10分钟</span>
                         </div>
                         <div class="text-caption mt-1">
                           当前拖延 <strong>{{ item.inputs.procrastinationInput }}</strong>
                           <span v-if="item.inputs.focusPenalty === 0">≤ 0.4，专注不变</span>
-                          <span v-else>→ 专注 −<strong>{{ item.inputs.focusPenalty }} min</strong></span>
+                          <span v-else>→ 专注 −<strong>{{ item.inputs.focusPenalty }} 分钟</strong></span>
                         </div>
                       </div>
                     </div>
@@ -389,7 +422,7 @@ onActivated(() => { if (_ready) load(); _ready = true })
                       <div class="rec-step-body">
                         <div class="text-caption text-medium-emphasis">休息时长 · 比例缩放</div>
                         <div class="text-caption mt-1">
-                          round(专注 × 0.25 ÷ 5) × 5，限制 [5, 25]
+                          (专注 × 0.25 ÷ 5) 四舍五入 × 5，限制 [5, 25]
                         </div>
                         <div class="text-caption mt-1">
                           专注时长决定休息：约 <strong>25%</strong> 比例，四舍五入到 5 的倍数
@@ -405,32 +438,32 @@ onActivated(() => { if (_ready) load(); _ready = true })
                         <div class="text-caption text-medium-emphasis">每日上限 · 多维决策</div>
                         <div class="text-caption mt-1">① 完成率分档</div>
                         <div class="rec-rule">
-                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.completionTier === 120 }">完成率 &lt; 30% → 120min</span>
-                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.completionTier === 180 }">30% ~ 60% → 180min</span>
-                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.completionTier === 240 }">≥ 60% → 240min</span>
+                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.completionTier === 120 }">完成率 &lt; 30% → 120分钟</span>
+                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.completionTier === 180 }">30% ~ 60% → 180分钟</span>
+                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.completionTier === 240 }">≥ 60% → 240分钟</span>
                         </div>
                         <div class="text-caption mt-1">
-                          当前完成率 <strong>{{ Math.round(item.inputs.completionRateInput * 100) }}%</strong> → 基础 <strong>{{ item.inputs.completionTier }} min</strong>
+                          当前完成率 <strong>{{ Math.round(item.inputs.completionRateInput * 100) }}%</strong> → 基础 <strong>{{ item.inputs.completionTier }} 分钟</strong>
                         </div>
                         <div class="text-caption mt-1">② 拖延罚分</div>
                         <div class="rec-rule">
                           <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.procPenalty === 0 }">拖延 ≤ 0.5 · 无罚分</span>
-                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.procPenalty === 30 }">拖延 0.5~0.7 · −30min</span>
-                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.procPenalty === 60 }">拖延 > 0.7 · −60min</span>
+                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.procPenalty === 30 }">拖延 0.5~0.7 · −30分钟</span>
+                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.procPenalty === 60 }">拖延 > 0.7 · −60分钟</span>
                         </div>
                         <div class="text-caption mt-1">
                           当前拖延 <strong>{{ item.inputs.procrastinationInput }}</strong>
                           <span v-if="item.inputs.procPenalty === 0">≤ 0.5，无罚分</span>
-                          <span v-else>→ 上限 −<strong>{{ item.inputs.procPenalty }} min</strong></span>
+                          <span v-else>→ 上限 −<strong>{{ item.inputs.procPenalty }} 分钟</strong></span>
                         </div>
                         <div class="text-caption mt-1">③ 新手保护</div>
                         <div class="rec-rule">
-                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.streakCapped }">streak &lt; 2 → 封顶 150min</span>
-                          <span class="rec-chip" :class="{ 'rec-chip-active': !item.inputs.streakCapped }">streak ≥ 2 → 无封顶</span>
+                          <span class="rec-chip" :class="{ 'rec-chip-active': item.inputs.streakCapped }">连续打卡 &lt; 2 → 封顶 150分钟</span>
+                          <span class="rec-chip" :class="{ 'rec-chip-active': !item.inputs.streakCapped }">连续打卡 ≥ 2 → 无封顶</span>
                         </div>
                         <div class="text-caption mt-1">
                           连续打卡 <strong>{{ item.inputs.streakInput }} 天</strong>
-                          <span v-if="item.inputs.streakCapped">→ 触发封顶 150min</span>
+                          <span v-if="item.inputs.streakCapped">→ 触发封顶 150分钟</span>
                           <span v-else>→ 无封顶限制</span>
                         </div>
                       </div>
@@ -717,4 +750,46 @@ onActivated(() => { if (_ready) load(); _ready = true })
 }
 .text-success { color: rgb(var(--v-theme-success)); }
 .text-error { color: rgb(var(--v-theme-error)); }
+
+/* ── Trend Badge ── */
+.trend-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.trend--up {
+  color: rgb(var(--v-theme-success));
+  background: rgba(var(--v-theme-success), 0.1);
+}
+.trend--down {
+  color: rgb(var(--v-theme-error));
+  background: rgba(var(--v-theme-error), 0.1);
+}
+
+/* ── Time Slots ── */
+.time-slot-row {
+  padding: 10px 0;
+}
+.time-slot-row + .time-slot-row {
+  border-top: 1px solid rgba(var(--v-theme-on-surface), 0.06);
+}
+.time-slot-rank {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.rank-1 { background: #FFD700; color: #5D4037; }
+.rank-2 { background: #C0C0C0; color: #37474F; }
+.rank-3 { background: #CD7F32; color: #3E2723; }
 </style>

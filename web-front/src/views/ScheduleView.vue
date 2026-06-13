@@ -300,6 +300,11 @@ watch(() => date.value, async () => {
   await Promise.all([loadSchedules(), loadFree(), loadClasses(date.value)])
 })
 
+watch(() => notify.signalSeq?.GOAL_TASK_READY, async () => {
+  await Promise.all([loadSchedules(), loadFree()])
+  if (date.value) await loadClasses(date.value)
+})
+
 watch(() => notify.signalSeq?.SCHEDULE_DONE, async () => {
   await Promise.all([loadSchedules(), loadFree()])
   if (date.value) await loadClasses(date.value)

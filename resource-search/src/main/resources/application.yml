@@ -58,6 +58,26 @@ smartplanner:
       per-topic-limit: 8
       initial-delay-ms: 120000
       query-suffixes: "教程,入门,基础,实战,考试,备考,面试,项目"
+    github:
+      enabled: true
+      per-topic-limit: 5
+      query-suffixes: "tutorial,guide,project,examples,course"
+    juejin:
+      enabled: true
+      per-topic-limit: 5
+      query-suffixes: "教程,入门,实战,面试,项目"
+    imooc:
+      enabled: true
+      per-topic-limit: 5
+      query-suffixes: "入门,实战,项目"
+    csdn:
+      enabled: true
+      per-topic-limit: 5
+      query-suffixes: "教程,入门,实战,面试"
+    cnblogs:
+      enabled: true
+      per-topic-limit: 5
+      query-suffixes: "教程,入门,实战,面试"
 
 mybatis-plus:
   configuration:

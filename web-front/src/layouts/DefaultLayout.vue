@@ -164,6 +164,14 @@ function startSse(token) {
       notify.error(data.content || '资源推荐失败')
     } catch (err) { console.warn('SSE event parse error:', err) }
   })
+  sseSource.addEventListener('CRAWL_COMPLETED', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      notify.addReminder(data)
+      notify.signal('CRAWL_COMPLETED', data)
+      notify.success(data.content || '爬取完成，资源列表已更新')
+    } catch (err) { console.warn('SSE event parse error:', err) }
+  })
   sseSource.onerror = () => {
     stopSse()
     if (sseRetryCount >= SSE_MAX_RETRIES) {
@@ -424,7 +432,7 @@ function onResizeEnd() {
 <template>
   <v-layout class="sp-shell">
     <v-app-bar elevation="0" height="64" class="sp-appbar">
-      <div class="sp-hamburger" :class="{ 'sp-hamburger-rail': rail }">
+      <div v-show="display.mobile.value" class="sp-hamburger" :class="{ 'sp-hamburger-rail': rail }">
         <v-app-bar-nav-icon @click="drawer = !drawer" />
       </div>
       <v-app-bar-title class="font-weight-semibold">
@@ -432,9 +440,7 @@ function onResizeEnd() {
         <span v-if="userLabel" class="sp-user">{{ userLabel }}</span>
       </v-app-bar-title>
       <v-spacer />
-      <v-btn  class="mr-2" @click="toggleTheme">
-        {{ isDark ? '浅色' : '深色' }}
-      </v-btn>
+      <v-btn class="mr-2" :icon="isDark ? 'mdi-weather-sunny' : 'mdi-weather-night'" @click="toggleTheme" />
       <v-menu v-model="notifMenu" :close-on-content-click="false" location="bottom end">
         <template #activator="{ props: menuProps }">
           <span class="bell-wrap">
@@ -473,7 +479,7 @@ function onResizeEnd() {
           </v-list>
         </v-card>
       </v-menu>
-      <v-btn variant="tonal" color="primary" class="ml-2" @click="logout">退出</v-btn>
+      <v-btn variant="plain" class="ml-2" @click="logout">退出</v-btn>
     </v-app-bar>
 
     <v-navigation-drawer
@@ -757,6 +763,12 @@ function onResizeEnd() {
   margin-left: 10px;
   font-size: 12px;
   opacity: 0.75;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: middle;
 }
 .sp-agent {
   position: fixed;

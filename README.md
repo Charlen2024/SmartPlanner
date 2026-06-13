@@ -338,7 +338,7 @@ weekNumber = floor(daysBetween / 7) + 1
 MySQL：`sp_resource.course_resources`
 Elasticsearch：kNN 向量检索（`text-embedding-v2`，1536维）+ multiMatch 文本检索降级，容器内 9200 对外映射 9201
 
-补充：resource-search 内置 Bilibili 定时爬虫（HTTP 抓取 + 重试 + 去重 + 多层质量过滤），用于持续补全 `course_resources`：
+补充：resource-search 内置多平台爬虫系统（B站 + GitHub + 掘金 + 慕课网 + CSDN + 博客园），通过 `CrawlerOrchestratorService` 统一编排，HTTP 抓取/API 调用 + 重试 + 去重 + 多层质量过滤，用于持续补全 `course_resources`。以下参数以 B站爬虫为例：
 
 - 开关：`smartplanner.crawler.bilibili.enabled`（默认 true）
 - 种子主题：18 个（Java/Spring Boot/Python/Vue/数据结构/算法/计算机网络/操作系统/数据库/机器学习/前端/Linux/Go/Rust/分布式/微服务/设计模式/计算机组成原理）
@@ -381,12 +381,12 @@ Elasticsearch：kNN 向量检索（`text-embedding-v2`，1536维）+ multiMatch 
 
 **目标驱动的即时爬取**：
 
-用户提交 Goal 后，系统自动触发该主题的 B 站爬虫，无需等待 6 小时定时器：
+用户提交 Goal 后，系统自动触发**所有平台**的爬虫（通过 `CrawlerOrchestratorService`），无需等待 6 小时定时器：
 
-- 触发链路：提交 Goal → MQ `goal.ai.queue` → `GoalAiWorker` 拆解任务 → Feign `POST /api/resources/crawl` → `crawlTopicAsync()` 异步爬取
-- 每次爬取指定主题 3 条结果，结果即时写入 DB/ES
+- 触发链路：提交 Goal → MQ `goal.ai.queue` → `GoalAiWorker` 拆解任务 → Feign `POST /api/resources/crawl` → `CrawlerOrchestratorService.crawlTopicAsync()` 并行触发 B站/GitHub/掘金/慕课网/CSDN/博客园
+- 每个平台独立异步爬取，结果即时写入 DB/ES
 - 失败不影响主流程（独立 try-catch + CompletableFuture）
-- 与定时爬虫互斥：`crawlerRunning` AtomicBoolean 防止并发
+- 各平台独立并发控制：`running` AtomicBoolean 防止并发
 
 **健康检查准确性**：
 
@@ -1743,3 +1743,365 @@ break = clamp(round(focus × 0.25 ÷ 5) × 5, 5, 25)
 - 仅 `UserPortraitAiService.java` 一个文件，新增 1 个方法（10 行）、改 2 个 clamp 逻辑、改 1 行 prompt 约束
 - 无接口变更、无 DTO 变更、前端无感知
 - 旧用户下次 `recompute()` 或登录触发画像分析时自动生效
+
+### 15.35 习惯趋势线与最佳时段分析（2026-06-12）
+
+**问题**：画像页只展示近 7 天快照，用户看不到习惯在变好还是变差。排程无视时段效率差异，所有空闲时间一视同仁。
+
+**修改——习惯趋势线**（`PortraitComputeService.java`）：
+
+- `recompute()` 拉取 14 天数据（原 7 天），按周界切分为本周/上周
+- 分别计算两周期 `computeInsights()`，对比生成趋势：
+  - `onTimeRate`、`completionRate`、`streak` 三项的 `direction`（up/down/flat）+ `delta`
+- 新增 `buildTrends()`、`putTrend()` 方法；`UserPortraitDto` 新增 `trends` Map 字段
+- `load()` 缓存路径不计算趋势（无历史数据），下次 `recompute()` 自动填充
+
+**修改——最佳时段分析**（`PortraitComputeService.java`）：
+
+- `buildBestTimeSlots(records)`：按打卡开始时间的小时分桶
+- 每桶计算平均专注分钟数 + 打卡次数（至少 2 次才纳入）
+- 按平均专注降序排列，返回 Top 3
+- `UserPortraitDto` 新增 `bestTimeSlots` 列表字段
+
+**修改——前端**（`ProfileView.vue`）：
+
+- 顶部指标卡片：当前值右侧新增趋势标记（↑/↓ + 变化量），绿底上升、红底下降
+- 新增「最佳时段」卡片：金/银/铜排名徽章 + 时段标签 + 平均专注时长 + 打卡次数
+- 卡片列宽自适应：有时段数据时 3 列（md="4"），无数据时 2 列（md="6"）
+
+**影响范围**：
+- 仅 `PortraitComputeService.java` + `UserPortraitDto.java` + `ProfileView.vue`
+- 无接口变更、无数据库变更
+- 旧缓存数据无趋势/时段字段，前端优雅降级不报错
+
+### 15.36 目标拆解通知事务时机修复（2026-06-12）
+
+**问题**：AI 任务拆解完成后，前端收到 `GOAL_TASK_READY` 通知立即加载任务列表，但此时 `GoalAiWorker.handleGoalAiTask()` 的 `@Transactional` 事务尚未提交，数据库查询不到刚写入的任务记录，表现为拆解动画结束但任务列表为空。
+
+**修改——`GoalAiWorker.java`**：
+- `handleGoalAiTask()` 中的 `GOAL_TASK_READY` 通知发送从方法体末尾移入 `TransactionSynchronizationManager.registerSynchronization().afterCommit()` 回调
+- 通知体所需的 `finalTaskCount`、`finalTaskTitles`、`finalGoalDesc` 提前捕获为 `final` 局部变量供内部类引用
+- 进度通知（`sendDecomposeProgress`）保持在事务内，不受影响
+
+**修改——`GoalsView.vue`**：
+- 移除 `GOAL_TASK_READY` 处理中的 `setTimeout 500ms` 延迟等待（不再需要）
+- `regenAndReload` 新增防抖标志 `regenPending`，防止快速重复点击
+
+**影响范围**：
+- 仅 `GoalAiWorker.java` + `GoalsView.vue`
+- 无接口变更、无 DTO 变更
+- 旧逻辑下已触发的任务会丢失本次通知，下次操作时自动修复
+
+### 15.37 资源搜索失败兜底 + 后台自动爬取（2026-06-12）
+
+**问题**：资源搜索页快速检索失败时直接弹出报错对话框，用户体验差。同时搜索失败意味着资源库对该主题为空，但系统没有任何自动补全机制。
+
+**修改——`ResourcesView.vue`**：
+
+- **兜底链接**：新增 `buildDefaultResults(q)` 函数，对 B站/慕课网/知乎/GitHub 四个平台生成搜索链接，搜索失败时替代空列表展示
+- **自动爬取**：新增 `triggerCrawl(topicText)` 火力全开函数，`crawled` Set 做防重，fire-and-forget 调用 `/user/resources/crawl`，成功弹出提示"后台正在抓取"、失败静默
+- **覆盖所有失败路径**：
+  - `searchFast()`：空结果 → 展示兜底 + 触发爬取；非 401 错误 → 展示兜底 + 触发爬取；超时从 15s 降为 10s
+  - `searchRag()`：DONE 阶段空资源 → 追加兜底；job 失败/超时 → 展示兜底 + 触发爬取
+- 追加的兜底结果标记 `_fallback: true`，点击时记录 `fallback_click` 埋点方便后续分析缺失主题
+
+**影响范围**：
+- 仅 `ResourcesView.vue`
+- 无接口变更
+- 兜底链接为纯前端生成，零后端依赖
+
+### 15.38 学习计划页监听目标拆解完成事件（2026-06-12）
+
+**问题**：用户在目标页触发 AI 任务拆解，拆解完成后切到学习计划页，排程数据不刷新。
+
+**根因**：`ScheduleView.vue` 只有 `SCHEDULE_DONE` 的 watch，没有 `GOAL_TASK_READY` 的 watch。GoalsView 和 PlanView 都有，唯独 ScheduleView 缺失。
+
+**修改——`ScheduleView.vue`**：
+- 新增 `watch(() => notify.signalSeq?.GOAL_TASK_READY, ...)` ，触发后重新加载 `loadSchedules()` + `loadFree()` + `loadClasses()`
+
+**影响范围**：
+- 仅 `ScheduleView.vue` 一行 watcher，无接口变更
+
+### 15.39 B站爬虫代理自动降级 + 直连兜底（2026-06-12）
+
+**问题**：B站 API 对 Docker 容器 IP（172.17.x.x 网段）做反爬封锁，所有爬虫请求返回空。此前依赖宿主机手动运行 `bilibili_proxy.py`，每次启动都要额外操作。
+
+**修改——`BilibiliCrawlerService.java`**：
+
+- 诊断日志升级：`fetchBilibiliCandidates()` 和 `scrapeBilibiliWebSearch()` 中所有静默失败路径从 `log.debug` 改为 `log.warn`，包含异常类型和消息
+- `httpGetTextWithUA()` 重构为代理优先 + 直连兜底：
+  - 代理可用 → 走代理（Linux 服务器场景）
+  - 代理不可用 → 自动 fallback 直连 B站（Windows Docker Desktop 场景，WSL2 NAT 出站 IP 为宿主机 IP，不会被封）
+- 提取 `doHttpGet()` 方法消除重复的重试逻辑
+
+**修改——`Dockerfile.proxy`**（新建）：
+- Python 3.11 Alpine 镜像，启动 `bilibili_proxy.py`，供 Linux 服务器可选启用
+
+**修改——`docker-compose.yml`**：
+- 新增 `bilibili-proxy` 服务（默认注释），`network_mode: host` 走宿主机 IP 出站
+- `resource-search` 服务：代理环境变量默认值改为空（Windows 零配置直连），新增 `extra_hosts: host.docker.internal:host-gateway` 兼容 Linux
+
+**平台差异**：
+
+| | Windows (Docker Desktop) | Linux 服务器 |
+|---|---|---|
+| 容器出站 IP | 宿主机 IP（WSL2 NAT） | Docker bridge IP（172.17.x.x） |
+| B站封不封 | 不封 | 会封 |
+| 配置 | 零配置 | `.env` 设代理变量 + 取消注释 `bilibili-proxy` |
+
+**影响范围**：
+- `BilibiliCrawlerService.java` + `docker-compose.yml` + `Dockerfile.proxy`（新建）
+- 无接口变更，Windows 用户无感知
+- Linux 部署时按 README 注释操作即可
+
+### 15.40 仪表盘任务日程与排程页一致性修复（2026-06-13）
+
+**问题**：仪表盘（DashboardView）显示的任务日程与 /schedule 排程页不一致——排程页是准确的，仪表盘出现两类错误：
+1. 部分已排程的任务在仪表盘不显示（后端过滤逻辑误丢弃）
+2. 仪表盘课程卡片显示了非本周的课程，与任务时间重叠造成视觉冲突
+
+**根因分析**：
+
+**Bug 1 — 后端孤立排程过滤过于激进**：`ScheduleService.listTaskSchedules()` 中 `.filter(s -> !titleMap.isEmpty() ? titleMap.containsKey(s.getTaskId()) : true)` 在 titleMap 为空时保留所有排程，但 titleMap 不为空时只保留能找到 taskId 对应标题的排程。当 Feign 调用 goal-service 获取任务标题失败时未触发此分支，但更隐蔽的问题是：titleMap 非空但缺少某些 taskId 的条目（goal-service 返回的任务列表不完整），导致这些排程被静默过滤掉。
+
+**修复**：移除该 filter，所有排程无论是否能解析任务标题都返回给前端。（`schedule-engine/.../service/ScheduleService.java:2216`）
+
+**Bug 2 — 前端课程周过滤 fallback 过于宽松**：`DashboardView.vue` 的 `dayClasses` computed 在按周数过滤课程后，若过滤结果为空但当天有课程（`dowClasses.length > 0`），会回退返回未过滤的全量课程。导致非本周的课程被显示在仪表盘，与本周任务时间重叠。
+
+**修复**：移除 fallback 逻辑，周过滤始终生效——过滤后为空就是空，不回溯全量。（`web-front/src/views/DashboardView.vue:51-62`）
+
+**影响范围**：
+- `ScheduleService.java`（移除 1 行 filter）
+- `DashboardView.vue`（移除 fallback 分支，简化 computed）
+- 无接口变更，前端/后端各自独立修复，互不依赖
+
+### 15.41 目标任务资源预绑定（Prefetch）—— 打卡页零等待（2026-06-13）
+
+**问题**：打卡页加载任务关联资源时需要实时走 RAG 检索链路（ES kNN 向量检索 → LLM 候选过滤/建议），耗时 5-15 秒。用户在打卡时才能看到推荐资源，等待时间长。
+
+**方案**：在 AI 拆解目标的最后阶段（任务写入 DB + 爬虫抓取资源完成后），异步为每个任务调用 RAG 筛选最佳资源，将结果缓存到 Redis，打卡页直接读缓存（毫秒级）。
+
+**修改——后端（`GoalAiWorker.java`）**：
+
+**`saveTaskRecursive` 返回值改造**：
+- 从 `void` 改为 `List<GoalTask>`，递归收集所有已保存的任务（含子任务）
+- 上层调用处用 `savedTasks.addAll(saveTaskRecursive(...))` 收集
+
+**事务提交后异步预绑定**：
+- `afterCommit()` 回调中新增 `prefetchTaskResources(finalUserId, savedTasks)` 调用
+- 通过 `CompletableFuture.runAsync()` 异步执行，不阻塞通知发送
+
+**`prefetchTaskResources` 方法**：
+- 遍历所有非降级任务，为每个任务并行发起 `resourceClient.searchOnlineCoursesWithAdvice(title)` 调用
+- 将返回的 `ResourceAdviceResponse` 转为 `CourseResourceDto[]` JSON
+- 写入 Redis：`RBucket<String> bucket = redissonClient.getBucket("sp:task:resources:v2:" + taskId)`
+- TTL 2 天，与打卡页缓存策略一致
+- 所有任务并行执行（`CompletableFuture.allOf`），总超时 120 秒
+
+**数据流**：
+```
+GoalAiWorker.handleGoalAiTask()
+  → AI 拆解 → 写入任务 → 爬虫抓取资源
+  → TransactionSynchronization.afterCommit()
+    → 发送 GOAL_TASK_READY 通知
+    → CompletableFuture.runAsync(prefetchTaskResources)
+      → 并行: searchOnlineCoursesWithAdvice(taskTitle) × N
+      → ES kNN 检索 → LLM 候选过滤 → 写入 Redis
+      → Redis Key: sp:task:resources:v2:{taskId}, TTL 2d
+```
+
+**打卡页读取（无需改动）**：
+- 打卡页资源加载接口原有逻辑：先查 Redis 缓存 `sp:task:resources:v2:{taskId}`，命中直接返回
+- prefetch 写入后，打卡页首次请求即可命中缓存，无需等待 RAG
+
+**新增依赖**：
+- `goal-service/pom.xml` 新增 `redisson` 依赖（版本与父 POM 统一）
+- 新增 `RedissonConfig.java`（`goal-service/.../config/RedissonConfig.java`）：创建 `RedissonClient` Bean，连接同一 Redis 实例，支持 `spring.redis.*` / `spring.data.redis.*` / `SPRING_REDIS_*` 三种配置前缀
+
+**降级策略**：
+- 降级任务（`[AI降级]` 前缀）跳过 prefetch
+- 单个任务 prefetch 失败不影响其他任务（独立 try-catch）
+- 批量超时 120s 后取消剩余未完成的任务
+- Redis 不可用时打卡页自动走实时 RAG 检索（已有兜底）
+
+**影响范围**：
+- `GoalAiWorker.java`（saveTaskRecursive 返回值改造 + 新增 prefetchTaskResources）
+- `goal-service/pom.xml`（新增 redisson 依赖）
+- `RedissonConfig.java`（新建，Redisson 客户端配置）
+- 打卡页前端无改动，后端缓存命中逻辑无改动
+- 用户无感知：目标拆解完成后，任务资源已在后台预绑定完毕
+- **修复 (2026-06-13)**：`prefetchTaskResources` 中 `resourceClient.searchOnlineCoursesWithAdvice()` 返回 `Result<ResourceAdviceResponse>`，需 `.getData()` 解包后才能访问 `getResources()`。原代码直接赋值给 `ResourceAdviceResponse`，导致 goal-service Docker 构建失败。
+
+### 15.42 多平台爬虫扩展 —— 5 个新爬虫 + 爬虫编排（2026-06-13）
+
+**问题**：项目仅 B站（Bilibili）有自动爬虫，其他平台（慕课网、CSDN、博客园、掘金、GitHub）仅在前端作为兜底搜索链接出现，没有自动入库的资源。用户看到的资源几乎全部来自 B站，覆盖面窄。
+
+**方案**：为每个在中国大陆可访问的主流学习平台实现独立爬虫，并创建 `CrawlerOrchestratorService` 统一编排。
+
+**新增平台爬虫**：
+
+| 爬虫 | 数据源 | 检索方式 | 平台 |
+|------|--------|----------|------|
+| `GitHubCrawlerService` | `api.github.com/search/repositories` | REST API | GitHub |
+| `JuejinCrawlerService` | `api.juejin.cn/search_api/v1/search` | REST API | 掘金 |
+| `ImoocCrawlerService` | `www.imooc.com/search` | HTML 抓取 | 慕课网 |
+| `CsdnCrawlerService` | `so.csdn.net/so/search` | HTML 抓取 | CSDN |
+| `CnblogsCrawlerService` | `www.cnblogs.com/search` | HTML 抓取 | 博客园 |
+
+**共享工具类 `CrawlerUtils`**（`resource-search/.../service/CrawlerUtils.java`）：
+- `isValidTitle(title, topic)` — 标题质量门禁（哈希值/纯数字/无 CJK 长英文过滤）
+- `isContentRelevantToTopic(topic, title, summary)` — bigram 相似度 + CJK 字符匹配
+- `saveIfNew(topic, resource, mapper, searchRepo, embeddingModel, qualityFilter)` — 去重 + 质量过滤 + DB 写入 + ES 索引
+- `buildSearchQueries(topic, suffixList)` — 查询扩展（后缀拼接、词序重排、年度/最新标记）
+- `httpGet(restTemplate, url, headers, maxRetries)` — 统一 HTTP GET 重试
+
+**爬虫编排器 `CrawlerOrchestratorService`**：
+- `crawlTopicAsync(topic)`：目标驱动即时爬取 → 并行触发所有 6 个平台爬虫
+- `scheduledCrawlAll()`：定时爬取 → 从 DB + 用户目标收集主题 → 并行执行所有平台
+- `getTotalCrawled()`：汇总所有平台的资源总数
+- `platformNames()`：返回启用的平台名称列表
+
+**平台规范化**（`ResourceService.normalizePlatform()` / `platformFromUrl()`）：
+- 新增 慕课网（imooc.com）、掘金（juejin.cn）、CSDN（csdn.net）、博客园（cnblogs.com）识别
+
+**搜索降级升级**（`ResourceService.fetchFromAllCrawlers()`）：
+- ES + DB 检索无结果时，依次尝试所有平台爬虫实时抓取，结果合并后去重返回
+
+**Actuator 端点升级**（`/actuator/crawler`）：
+- 状态接口新增 `platforms` 列表和 `byPlatform` 按平台统计
+- 手动触发改为触发所有平台（而非仅 B站）
+
+**健康检查升级**（`CrawlerHealthIndicator`）：
+- 聚合所有 6 个平台的失败/零新增计数
+- 仅当所有启用平台都连续失败时报告 DOWN
+- 多平台零新增累计 ≥6 时报告 OUT_OF_SERVICE
+
+**配置**（`application.yml`）：
+```yaml
+smartplanner.crawler:
+  github:
+    enabled: true
+    per-topic-limit: 5
+    query-suffixes: "tutorial,guide,project,examples,course"
+  juejin:
+    enabled: true
+    per-topic-limit: 5
+    query-suffixes: "教程,入门,实战,面试,项目"
+  imooc:
+    enabled: true
+    per-topic-limit: 5
+    query-suffixes: "入门,实战,项目"
+  csdn:
+    enabled: true
+    per-topic-limit: 5
+    query-suffixes: "教程,入门,实战,面试"
+  cnblogs:
+    enabled: true
+    per-topic-limit: 5
+    query-suffixes: "教程,入门,实战,面试"
+```
+
+**被跳过的平台**（中国大陆不可用）：
+- Coursera、edX、Medium、Google、YouTube —— 保留平台识别和兜底搜索链接，但不实现爬虫
+
+**影响范围**：
+- 新增 6 个文件：`CrawlerUtils.java`、`GitHubCrawlerService.java`、`JuejinCrawlerService.java`、`ImoocCrawlerService.java`、`CsdnCrawlerService.java`、`CnblogsCrawlerService.java`
+- 新增 1 个文件：`CrawlerOrchestratorService.java`
+- 修改 5 个文件：`ResourceController.java`、`ResourceService.java`、`CrawlerEndpoint.java`、`CrawlerHealthIndicator.java`、`application.yml`
+- 新增 3 个测试文件：`MultiPlatformCrawlerTest.java`（多平台集成测试）、`ResourceServiceCrawlerTest.java`（已有，沿用）、`CrawlerManagementTest.java`（重写）
+- 修改前端 `ResourcesView.vue`：新增 博客园 图标、慕课网/CSDN/掘金/博客园 品牌色、`buildDefaultResults()` 扩展至 7 个平台
+- 用户透明：搜索时自动从多平台获取结果，无需任何操作
+
+### 15.43 修复 searchResources 不可变列表崩溃（2026-06-13）
+
+**问题**：`ResourceService.searchResources()` 中 ES/DB 无结果时，`dedupeResources(q, out, 20)` 因输入为空直接 `return List.of()`（不可变列表），后续 `out.addAll(fetchFromAllCrawlers(q))` 抛出 `UnsupportedOperationException: ImmutableCollections.addAll`。
+
+**根因**：`dedupeResources()` 在输入为 null 或空时返回 `List.of()`（Java 9+ 不可变集合），而爬虫回退逻辑假设 `out` 是可变的 `ArrayList`。单元测试只覆盖了各爬虫的 `fetchCandidates()` 方法，未测试 `searchResources()` 的整合路径，导致此 bug 未在测试阶段发现。
+
+**修改**（`ResourceService.java:162-167`）：
+```java
+// Before（崩溃路径）
+if (out.isEmpty() && !q.isBlank()) {
+    out.addAll(fetchFromAllCrawlers(q));  // List.of() 不可变
+    if (!out.isEmpty()) { out = dedupeResources(q, out, 20); }
+}
+
+// After（安全路径）
+if (out.isEmpty() && !q.isBlank()) {
+    List<CourseResource> crawled = fetchFromAllCrawlers(q);
+    if (!crawled.isEmpty()) {
+        out = new ArrayList<>(crawled);
+        out = dedupeResources(q, out, 20);
+    }
+}
+```
+
+### 15.44 资源搜索空结果 UX 优化 —— 爬取提示 + 动画（2026-06-13）
+
+**问题**：用户搜索资源无命中时，后端返回硬编码的各平台站外搜索链接，前端静默展示为"真实结果"，用户不清楚系统是否在工作、是否需要等待。
+
+**方案**：后端主动触发异步爬取 + 前端三层提示（爬取中 info 横幅 + 进度条 + 卡片流光动画），明确告知用户"暂无资源，正在后台爬取"。
+
+**后端修改**（`ResourceService.searchResources()`）：
+- 返回 `defaultResources()` 前调用 `crawlerOrchestrator.crawlTopicAsync(q)` 触发所有 6 个平台异步爬取，确保即使前端未主动触发爬取，后台也会开始抓取
+
+**前端修改**（`ResourcesView.vue`）：
+- 新增 `isFallback` 响应式标记：区分真实搜索结果与兜底搜索链接
+- **爬取中提示**：info 横幅（蜘蛛图标 + 文案"当前没有「xxx」的相关资源，正在后台爬取中，请稍后刷新页面"+ 动态省略号）+ 蓝色 `v-progress-linear` 不确定进度条
+- **爬取完成但仍无结果**：warning 横幅提示"当前没有找到相关资源，以下为各平台搜索链接，可点击前往对应网站搜索"
+- `loadLocal()` 加载本地资源时自动复位 `isFallback` 标记
+
+**CSS 动画**：
+
+| 动画 | 元素 | 效果 |
+|------|------|------|
+| `spider-crawl` | 蜘蛛图标 `.spider-icon` | 缩放 (1.0→1.2) + 摇摆旋转 (±8°)，1.2s 循环，模拟爬虫活动 |
+| `dot-blink` | 省略号 `.animated-dots` | 三个点依次淡入淡出，各延迟 0.3s，1.5s 循环 |
+| `shimmer` | 兜底卡片 `.fallback-item::after` | 半透明光带从左到右扫过，2.2s 循环，暗示占位内容 |
+
+**影响范围**：
+- 修改 `ResourceService.java`：新增爬取触发行
+- 修改 `ResourcesView.vue`：新增 `isFallback` 标记、动画 CSS、进度条组件
+
+### 15.45 爬取完成 SSE 实时通知 + 自动刷新（2026-06-13）
+
+**问题**：后台异步爬取完成后用户需手动刷新页面才能看到新资源。爬取过程无反馈，不知道何时完成。
+
+**方案**：爬取完成时通过 RabbitMQ → SSE 实时推送通知到前端，前端自动匹配当前搜索主题并刷新资源列表。
+
+**后端改动**：
+
+| 文件 | 变更 |
+|------|------|
+| 6 个平台爬虫 | `crawlTopicAsync()` 返回类型从 `void` 改为 `CompletableFuture<Void>`，编排器真正等待爬取完成 |
+| `CrawlerOrchestratorService` | 注入 `RabbitTemplate`，新增 `crawlTopicAsync(topic, userId)` 重载，`allOf().orTimeout()` 后链式调用 `thenRunAsync` 发送 `CRAWL_COMPLETED` 通知 |
+| `ResourceController` | `/api/resources/crawl` 新增 `userId` 参数 |
+| `ResourceClient` (Feign) | `crawlTopic()` 新增 `userId` 参数 |
+| `UserController` | `crawlResources()` 从 JWT 提取 userId 传递 |
+| `GoalAiWorker` | `crawlTopic()` 调用补传 userId |
+
+通知 payload：
+```json
+{
+  "userId": 1,
+  "type": "CRAWL_COMPLETED",
+  "content": "「Spring Boot」相关资源爬取完成",
+  "payload": { "topic": "Spring Boot", "level": "success" }
+}
+```
+
+**前端改动**：
+
+| 文件 | 变更 |
+|------|------|
+| `notify.js` | `signalSeq` 新增 `CRAWL_COMPLETED: 0`；新增 `lastSignalData` 字典，`signal()` 方法存储 payload |
+| `DefaultLayout.vue` | 新增 `CRAWL_COMPLETED` SSE 事件监听，弹出 toast + 触发 signal |
+| `ResourcesView.vue` | 新增 `watch(() => notify.signalSeq['CRAWL_COMPLETED'])`，匹配 topic 后清除爬取提示并调用 `searchFast()` 自动刷新 |
+
+**完整链路**：
+1. 用户搜索无结果 → fallback 提示 + 前端 `triggerCrawl()` → `POST /api/user/resources/crawl`
+2. 6 个爬虫并行抓取 → `CompletableFuture.allOf()` 等待全部完成
+3. 编排器 `thenRunAsync` → `rabbitTemplate.convertAndSend(NOTIFICATION_EXCHANGE, ...)` → user-service 消费 → SSE push
+4. 前端 `EventSource` 收到 `CRAWL_COMPLETED` → `notify.signal()` → `ResourcesView` watch 触发 → `searchFast()` 自动刷新
+
+**无 userId 兼容路径**：`ResourceService.searchResources()` 回退时调用无参重载 `crawlTopicAsync(topic)`，不推送通知（前端已通过 `triggerCrawl` 单独发起带 userId 的爬取请求）。

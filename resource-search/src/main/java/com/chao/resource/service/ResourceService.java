@@ -51,6 +51,7 @@ public class ResourceService {
     private final OpenAiCompatClient openAiCompatClient;
     private final ObjectMapper objectMapper;
     private final BilibiliCrawlerService bilibiliCrawlerService;
+    private final CrawlerOrchestratorService crawlerOrchestrator;
 
     @Value("${smartplanner.ai.rag-timeout-seconds:45}")
     private int ragTimeoutSeconds;
@@ -157,25 +158,18 @@ public class ResourceService {
                     .collect(Collectors.toList());
 
             out = dedupeResources(q, out, 20);
-                        // Try Bilibili real-time before default fallback
+            // Try all platform crawlers in real-time before default fallback
             if (out.isEmpty() && !q.isBlank()) {
-                try {
-                    List<ResourceClient.CourseResource> bilibiliResults = bilibiliCrawlerService.fetchBilibiliCandidates(q, q, 6);
-                    if (bilibiliResults != null && !bilibiliResults.isEmpty()) {
-                        for (ResourceClient.CourseResource r : bilibiliResults) {
-                            if (r != null && r.getUrl() != null) {
-                                out.add(r);
-                            }
-                        }
-                        // Persist crawled results
-                        for (ResourceClient.CourseResource r : bilibiliResults) {
-                            bilibiliCrawlerService.saveIfNew(q, r);
-                        }
-                    }
-                } catch (Exception ignored) {
+                List<ResourceClient.CourseResource> crawled = fetchFromAllCrawlers(q);
+                if (!crawled.isEmpty()) {
+                    out = new ArrayList<>(crawled);
+                    out = dedupeResources(q, out, 20);
                 }
             }
-            if (out.isEmpty()) return defaultResources(topic);
+            if (out.isEmpty()) {
+                crawlerOrchestrator.crawlTopicAsync(q);
+                return defaultResources(topic);
+            }
             return out;
         } catch (Exception e) {
             log.error("检索资源失败", e);
@@ -992,6 +986,10 @@ public class ResourceService {
         if (lowered.contains("edx")) return "edX";
         if (lowered.contains("medium")) return "Medium";
         if (lowered.contains("google")) return "Google";
+        if (lowered.contains("imooc") || lowered.contains("慕课")) return "慕课网";
+        if (lowered.contains("juejin") || lowered.contains("掘金")) return "掘金";
+        if (lowered.contains("csdn")) return "CSDN";
+        if (lowered.contains("cnblogs") || lowered.contains("博客园")) return "博客园";
         if (p.length() > 30) return p.substring(0, 30);
         return p;
     }
@@ -1009,6 +1007,10 @@ public class ResourceService {
             if (host.contains("edx.org")) return "edX";
             if (host.contains("medium.com")) return "Medium";
             if (host.contains("google.com")) return "Google";
+            if (host.contains("imooc.com")) return "慕课网";
+            if (host.contains("juejin.cn")) return "掘金";
+            if (host.contains("csdn.net")) return "CSDN";
+            if (host.contains("cnblogs.com")) return "博客园";
             return null;
         } catch (Exception e) {
             return null;
@@ -1326,6 +1328,71 @@ public class ResourceService {
         return (2.0 * inter) / (nx + ny);
     }
 
+    /**
+     * Try all platform crawlers for real-time results as search fallback.
+     */
+    private List<ResourceClient.CourseResource> fetchFromAllCrawlers(String topic) {
+        List<ResourceClient.CourseResource> out = new ArrayList<>();
+        // Bilibili (existing)
+        try {
+            List<ResourceClient.CourseResource> r = bilibiliCrawlerService.fetchBilibiliCandidates(topic, topic, 6);
+            if (r != null) {
+                for (ResourceClient.CourseResource c : r) {
+                    if (c != null && c.getUrl() != null) {
+                        out.add(c);
+                        bilibiliCrawlerService.saveIfNew(topic, c);
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        // GitHub
+        try {
+            List<ResourceClient.CourseResource> r = crawlerOrchestrator.github().fetchCandidates(topic, topic, 3);
+            if (r != null) {
+                for (ResourceClient.CourseResource c : r) {
+                    if (c != null && c.getUrl() != null) out.add(c);
+                }
+            }
+        } catch (Exception ignored) {}
+        // Juejin
+        try {
+            List<ResourceClient.CourseResource> r = crawlerOrchestrator.juejin().fetchCandidates(topic, topic, 3);
+            if (r != null) {
+                for (ResourceClient.CourseResource c : r) {
+                    if (c != null && c.getUrl() != null) out.add(c);
+                }
+            }
+        } catch (Exception ignored) {}
+        // Imooc
+        try {
+            List<ResourceClient.CourseResource> r = crawlerOrchestrator.imooc().fetchCandidates(topic, topic, 3);
+            if (r != null) {
+                for (ResourceClient.CourseResource c : r) {
+                    if (c != null && c.getUrl() != null) out.add(c);
+                }
+            }
+        } catch (Exception ignored) {}
+        // CSDN
+        try {
+            List<ResourceClient.CourseResource> r = crawlerOrchestrator.csdn().fetchCandidates(topic, topic, 3);
+            if (r != null) {
+                for (ResourceClient.CourseResource c : r) {
+                    if (c != null && c.getUrl() != null) out.add(c);
+                }
+            }
+        } catch (Exception ignored) {}
+        // Cnblogs
+        try {
+            List<ResourceClient.CourseResource> r = crawlerOrchestrator.cnblogs().fetchCandidates(topic, topic, 3);
+            if (r != null) {
+                for (ResourceClient.CourseResource c : r) {
+                    if (c != null && c.getUrl() != null) out.add(c);
+                }
+            }
+        } catch (Exception ignored) {}
+        return out;
+    }
+
     private List<ResourceClient.CourseResource> defaultResources(String topic) {
         String t = topic != null ? topic.trim() : "";
         if (t.isBlank()) {
@@ -1334,8 +1401,11 @@ public class ResourceService {
         List<ResourceClient.CourseResource> out = new ArrayList<>();
         out.add(make("B站 搜索：" + t, "Bilibili", "https://search.bilibili.com/all?keyword=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "适合入门视频与实战课"));
         out.add(make("慕课网 搜索：" + t, "慕课网", "https://www.imooc.com/search/?words=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "国内主流IT技能学习平台"));
-        out.add(make("知乎 搜索：" + t, "知乎", "https://www.zhihu.com/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "适合概念梳理与经验贴"));
-        out.add(make("GitHub 搜索：" + t, "GitHub", "https://github.com/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "找开源项目/示例/最佳实践"));
+        out.add(make("CSDN 搜索：" + t, "CSDN", "https://so.csdn.net/so/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8) + "&t=blog", "技术博客与实战教程"));
+        out.add(make("掘金 搜索：" + t, "掘金", "https://juejin.cn/search?query=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "前端/后端/面试经验社区"));
+        out.add(make("知乎 搜索：" + t, "知乎", "https://www.zhihu.com/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "概念梳理与经验贴"));
+        out.add(make("GitHub 搜索：" + t, "GitHub", "https://github.com/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "开源项目/示例/最佳实践"));
+        out.add(make("博客园 搜索：" + t, "博客园", "https://www.cnblogs.com/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8), ".NET/Java/全栈技术博客"));
         return out;
     }
 

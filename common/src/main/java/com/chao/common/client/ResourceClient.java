@@ -52,7 +52,7 @@ public interface ResourceClient {
             @PathVariable("jobId") String jobId);
 
     @PostMapping("/api/resources/crawl")
-    Result<String> crawlTopic(@RequestParam("topic") String topic);
+    Result<String> crawlTopic(@RequestParam("topic") String topic, @RequestParam("userId") Long userId);
 
     @Data
     class CourseResource {
