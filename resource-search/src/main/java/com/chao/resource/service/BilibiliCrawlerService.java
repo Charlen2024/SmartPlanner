@@ -36,6 +36,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 import com.chao.common.client.GoalClient;
+import com.chao.common.dto.ResourceAdviceResult;
+import com.chao.common.dto.SearchResourceItem;
 import com.chao.common.dto.Result;
 import jakarta.annotation.PostConstruct;
 
@@ -149,8 +151,8 @@ public class BilibiliCrawlerService {
     }
 
     // exposed for search fallback in ResourceService
-    public List<ResourceClient.CourseResource> fetchBilibiliCandidates(String query, String topic, int limit) {
-        List<ResourceClient.CourseResource> out = new ArrayList<>();
+    public List<SearchResourceItem> fetchBilibiliCandidates(String query, String topic, int limit) {
+        List<SearchResourceItem> out = new ArrayList<>();
         Set<String> seenUrls = new HashSet<>();
         List<String> queries = buildSearchQueries(query);
         log.debug("Fetching Bilibili candidates: queries={}, limit={}", queries, limit);
@@ -209,7 +211,7 @@ public class BilibiliCrawlerService {
                         summary.append("播放: ").append(play);
                         if (duration > 0) summary.append(" | ").append(duration).append("分钟");
                         if (!description.isBlank()) summary.append(" | ").append(description);
-                        ResourceClient.CourseResource r = new ResourceClient.CourseResource();
+                        SearchResourceItem r = new SearchResourceItem();
                         r.setTitle(title);
                         r.setPlatform("B站");
                         r.setUrl(url);
@@ -230,8 +232,8 @@ public class BilibiliCrawlerService {
     /**
      * B站网页搜索降级抓取 — 直接抓 search.bilibili.com 的 HTML，解析内嵌 JSON。
      */
-    List<ResourceClient.CourseResource> scrapeBilibiliWebSearch(String keyword, int limit) {
-        List<ResourceClient.CourseResource> out = new ArrayList<>();
+    List<SearchResourceItem> scrapeBilibiliWebSearch(String keyword, int limit) {
+        List<SearchResourceItem> out = new ArrayList<>();
         String url = "https://search.bilibili.com/all?keyword=" + URLEncoder.encode(keyword, StandardCharsets.UTF_8) + "&search_type=video";
         String html = httpGetTextWithUA(url,
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -283,7 +285,7 @@ public class BilibiliCrawlerService {
                 summary.append("播放: ").append(play);
                 if (durSec > 0) summary.append(" | ").append(durSec).append("分钟");
                 if (!desc.isBlank()) summary.append(" | ").append(desc);
-                ResourceClient.CourseResource r = new ResourceClient.CourseResource();
+                SearchResourceItem r = new SearchResourceItem();
                 r.setTitle(title);
                 r.setPlatform("B站");
                 r.setUrl(videoUrl);
@@ -352,8 +354,8 @@ public class BilibiliCrawlerService {
             int i = 0;
             for (String topic : topics) {
                 try {
-                    List<ResourceClient.CourseResource> candidates = fetchBilibiliCandidates(topic, topic, bilibiliCrawlerPerTopicLimit);
-                    for (ResourceClient.CourseResource c : candidates) {
+                    List<SearchResourceItem> candidates = fetchBilibiliCandidates(topic, topic, bilibiliCrawlerPerTopicLimit);
+                    for (SearchResourceItem c : candidates) {
                         if (saveIfNew(topic, c)) totalNew++;
                     }
                 } catch (Exception e) {
@@ -401,11 +403,11 @@ public class BilibiliCrawlerService {
                 return;
             }
             try {
-                List<ResourceClient.CourseResource> candidates = fetchBilibiliCandidates(topic, topic, bilibiliCrawlerPerTopicLimit);
+                List<SearchResourceItem> candidates = fetchBilibiliCandidates(topic, topic, bilibiliCrawlerPerTopicLimit);
                 log.info("Crawl '{}': fetched {} candidates, filtering...", topic, candidates.size());
                 int saved = 0;
                 int dups = 0, titleRejects = 0, qualityRejects = 0;
-                for (ResourceClient.CourseResource c : candidates) {
+                for (SearchResourceItem c : candidates) {
                     Long cnt = courseResourceMapper.selectCount(
                             new LambdaQueryWrapper<CourseResource>().eq(CourseResource::getSourceUrl, c.getUrl()));
                     if (cnt != null && cnt > 0) { dups++; continue; }
@@ -425,9 +427,9 @@ public class BilibiliCrawlerService {
                 if (saved < 2 && bilibiliUseWebScrapeFallback) {
                     log.info("Crawl '{}': API results insufficient (saved={}), trying web scrape fallback", topic, saved);
                     try {
-                        List<ResourceClient.CourseResource> scraped = scrapeBilibiliWebSearch(topic, bilibiliCrawlerPerTopicLimit);
+                        List<SearchResourceItem> scraped = scrapeBilibiliWebSearch(topic, bilibiliCrawlerPerTopicLimit);
                         log.info("Crawl '{}': web scrape returned {} candidates", topic, scraped.size());
-                        for (ResourceClient.CourseResource c : scraped) {
+                        for (SearchResourceItem c : scraped) {
                             if (saveIfNew(topic, c)) saved++;
                         }
                         if (saved > 0) consecutiveZeroNew = 0;
@@ -450,7 +452,7 @@ public class BilibiliCrawlerService {
     }
 
     // exposed for search fallback in ResourceService
-    public boolean saveIfNew(String topic, ResourceClient.CourseResource c) {
+    public boolean saveIfNew(String topic, SearchResourceItem c) {
         if (topic == null || c == null || c.getUrl() == null) return false;
         Long count = courseResourceMapper.selectCount(
                 new LambdaQueryWrapper<CourseResource>().eq(CourseResource::getSourceUrl, c.getUrl()));
@@ -492,7 +494,7 @@ public class BilibiliCrawlerService {
         return true;
     }
 
-    private boolean saveDirect(String topic, ResourceClient.CourseResource c) {
+    private boolean saveDirect(String topic, SearchResourceItem c) {
         CourseResource entity = new CourseResource();
         entity.setTopic(topic);
         entity.setTitle(c.getTitle());

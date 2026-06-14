@@ -2,6 +2,7 @@ package com.chao.resource.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.client.ResourceClient;
+import com.chao.common.dto.SearchResourceItem;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.chao.resource.entity.CourseResource;
 import com.chao.resource.mapper.CourseResourceMapper;
@@ -82,7 +83,7 @@ public final class CrawlerUtils {
      * Save a candidate resource to DB + ES, with dedup and quality filtering.
      * Returns true if the resource was newly saved.
      */
-    public static boolean saveIfNew(String topic, ResourceClient.CourseResource c,
+    public static boolean saveIfNew(String topic, SearchResourceItem c,
                                      CourseResourceMapper mapper,
                                      CourseResourceSearchRepository searchRepo,
                                      EmbeddingModel embeddingModel,
@@ -99,7 +100,7 @@ public final class CrawlerUtils {
     /**
      * Save directly (caller already performed dedup and quality checks).
      */
-    public static boolean saveDirect(String topic, ResourceClient.CourseResource c,
+    public static boolean saveDirect(String topic, SearchResourceItem c,
                                       CourseResourceMapper mapper,
                                       CourseResourceSearchRepository searchRepo,
                                       EmbeddingModel embeddingModel) {

@@ -2,6 +2,7 @@ package com.chao.resource.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.client.ResourceClient;
+import com.chao.common.dto.SearchResourceItem;
 import com.chao.resource.mapper.CourseResourceMapper;
 import com.chao.resource.search.CourseResourceSearchRepository;
 import org.junit.jupiter.api.Assertions;
@@ -29,11 +30,11 @@ public class ResourceServiceCrawlerTest {
         System.out.println("Raw JSON preview: " + (json != null ? json.substring(0, Math.min(200, json.length())) : "null"));
 
         @SuppressWarnings("unchecked")
-        List<ResourceClient.CourseResource> resources = svc.fetchBilibiliCandidates("Java", "Java", 3);
+        List<SearchResourceItem> resources = svc.fetchBilibiliCandidates("Java", "Java", 3);
 
         Assertions.assertNotNull(resources);
         System.out.println("Bilibili result count: " + resources.size());
-        for (ResourceClient.CourseResource r : resources) {
+        for (SearchResourceItem r : resources) {
             System.out.println("  - " + r.getTitle() + " [" + r.getPlatform() + "] " + r.getUrl());
         }
     }
@@ -42,7 +43,7 @@ public class ResourceServiceCrawlerTest {
     public void testCrawlWithEmptyQuery() throws Exception {
         BilibiliCrawlerService svc = createMinimalService();
 
-        List<ResourceClient.CourseResource> resources = svc.fetchBilibiliCandidates("", "test", 3);
+        List<SearchResourceItem> resources = svc.fetchBilibiliCandidates("", "test", 3);
         Assertions.assertTrue(resources.isEmpty());
     }
 

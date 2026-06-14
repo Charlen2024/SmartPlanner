@@ -1,5 +1,7 @@
 package com.chao.resource.controller;
 
+import com.chao.common.dto.ResourceAdviceResult;
+import com.chao.common.dto.SearchResourceItem;
 import com.chao.common.dto.Result;
 import com.chao.common.client.ResourceClient;
 import com.chao.common.dto.ResourceAdviceJobStartRequest;
@@ -53,12 +55,12 @@ public class ResourceController {
      * 语义检索 + 向量检索
      */
     @GetMapping("/search")
-    public Result<List<ResourceClient.CourseResource>> searchResources(@RequestParam String topic) {
+    public Result<List<SearchResourceItem>> searchResources(@RequestParam String topic) {
         return Result.success(resourceService.searchResources(topic));
     }
 
     @GetMapping("/search/advice")
-    public Result<ResourceClient.ResourceAdviceResponse> searchResourcesWithAdvice(@RequestParam String topic) {
+    public Result<ResourceAdviceResult> searchResourcesWithAdvice(@RequestParam String topic) {
         return Result.success(resourceService.searchResourcesWithAdvice(topic));
     }
 

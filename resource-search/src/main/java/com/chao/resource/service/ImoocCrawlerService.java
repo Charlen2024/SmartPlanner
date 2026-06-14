@@ -2,6 +2,7 @@ package com.chao.resource.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.client.ResourceClient;
+import com.chao.common.dto.SearchResourceItem;
 import com.chao.resource.mapper.CourseResourceMapper;
 import com.chao.resource.search.CourseResourceSearchRepository;
 import lombok.extern.slf4j.Slf4j;
@@ -95,8 +96,8 @@ public class ImoocCrawlerService {
     public int getConsecutiveFailures() { return consecutiveFailures; }
     public int getConsecutiveZeroNew() { return consecutiveZeroNew; }
 
-    public List<ResourceClient.CourseResource> fetchCandidates(String query, String topic, int limit) {
-        List<ResourceClient.CourseResource> out = new ArrayList<>();
+    public List<SearchResourceItem> fetchCandidates(String query, String topic, int limit) {
+        List<SearchResourceItem> out = new ArrayList<>();
         Set<String> seenUrls = new HashSet<>();
         List<String> queries = CrawlerUtils.buildSearchQueries(query, querySuffixes);
 
@@ -127,7 +128,7 @@ public class ImoocCrawlerService {
                     if (!card.level.isBlank()) summary.append(" | 难度: ").append(card.level);
                     if (!card.desc.isBlank()) summary.append(" | ").append(CrawlerUtils.compactSummary(card.desc, 200));
 
-                    ResourceClient.CourseResource r = new ResourceClient.CourseResource();
+                    SearchResourceItem r = new SearchResourceItem();
                     r.setTitle(card.title);
                     r.setPlatform("慕课网");
                     r.setUrl(card.url);
@@ -189,9 +190,9 @@ public class ImoocCrawlerService {
         Runnable task = () -> {
             if (!onDemandRunning.compareAndSet(false, true)) return;
             try {
-                List<ResourceClient.CourseResource> candidates = fetchCandidates(topic, topic, perTopicLimit);
+                List<SearchResourceItem> candidates = fetchCandidates(topic, topic, perTopicLimit);
                 int saved = 0;
-                for (ResourceClient.CourseResource c : candidates) {
+                for (SearchResourceItem c : candidates) {
                     if (CrawlerUtils.saveIfNew(topic, c, courseResourceMapper, searchRepository, embeddingModel, qualityFilterEnabled))
                         saved++;
                 }
@@ -218,8 +219,8 @@ public class ImoocCrawlerService {
             int failedTopics = 0;
             for (String topic : topics) {
                 try {
-                    List<ResourceClient.CourseResource> candidates = fetchCandidates(topic, topic, perTopicLimit);
-                    for (ResourceClient.CourseResource c : candidates) {
+                    List<SearchResourceItem> candidates = fetchCandidates(topic, topic, perTopicLimit);
+                    for (SearchResourceItem c : candidates) {
                         if (CrawlerUtils.saveIfNew(topic, c, courseResourceMapper, searchRepository, embeddingModel, qualityFilterEnabled))
                             totalNew++;
                     }

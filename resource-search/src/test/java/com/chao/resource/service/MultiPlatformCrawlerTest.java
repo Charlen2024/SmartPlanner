@@ -2,6 +2,7 @@ package com.chao.resource.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.client.ResourceClient;
+import com.chao.common.dto.SearchResourceItem;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -18,10 +19,10 @@ public class MultiPlatformCrawlerTest {
     @Test
     public void testGitHubCrawl() {
         GitHubCrawlerService svc = createGitHubService();
-        List<ResourceClient.CourseResource> results = svc.fetchCandidates("Java", "Java", 3);
+        List<SearchResourceItem> results = svc.fetchCandidates("Java", "Java", 3);
         Assertions.assertNotNull(results);
         System.out.println("GitHub: " + results.size() + " results");
-        for (ResourceClient.CourseResource r : results) {
+        for (SearchResourceItem r : results) {
             System.out.println("  - [" + r.getPlatform() + "] " + r.getTitle() + " -> " + r.getUrl());
             Assertions.assertEquals("GitHub", r.getPlatform());
             Assertions.assertNotNull(r.getTitle());
@@ -32,10 +33,10 @@ public class MultiPlatformCrawlerTest {
     @Test
     public void testGitHubCrawlPython() {
         GitHubCrawlerService svc = createGitHubService();
-        List<ResourceClient.CourseResource> results = svc.fetchCandidates("Python tutorial", "Python", 3);
+        List<SearchResourceItem> results = svc.fetchCandidates("Python tutorial", "Python", 3);
         Assertions.assertNotNull(results);
         System.out.println("GitHub Python: " + results.size() + " results");
-        for (ResourceClient.CourseResource r : results) {
+        for (SearchResourceItem r : results) {
             System.out.println("  - " + r.getTitle() + " | Stars: " + r.getSummary());
         }
     }
@@ -43,10 +44,10 @@ public class MultiPlatformCrawlerTest {
     @Test
     public void testJuejinCrawl() {
         JuejinCrawlerService svc = createJuejinService();
-        List<ResourceClient.CourseResource> results = svc.fetchCandidates("Java", "Java", 3);
+        List<SearchResourceItem> results = svc.fetchCandidates("Java", "Java", 3);
         Assertions.assertNotNull(results);
         System.out.println("Juejin: " + results.size() + " results");
-        for (ResourceClient.CourseResource r : results) {
+        for (SearchResourceItem r : results) {
             System.out.println("  - [" + r.getPlatform() + "] " + r.getTitle() + " -> " + r.getUrl());
             if (!results.isEmpty()) {
                 Assertions.assertEquals("掘金", r.getPlatform());
@@ -58,10 +59,10 @@ public class MultiPlatformCrawlerTest {
     @Test
     public void testImoocCrawl() {
         ImoocCrawlerService svc = createImoocService();
-        List<ResourceClient.CourseResource> results = svc.fetchCandidates("Java", "Java", 3);
+        List<SearchResourceItem> results = svc.fetchCandidates("Java", "Java", 3);
         Assertions.assertNotNull(results);
         System.out.println("Imooc: " + results.size() + " results");
-        for (ResourceClient.CourseResource r : results) {
+        for (SearchResourceItem r : results) {
             System.out.println("  - [" + r.getPlatform() + "] " + r.getTitle() + " -> " + r.getUrl());
         }
         // Imooc may return empty if page structure changed, that's OK
@@ -70,10 +71,10 @@ public class MultiPlatformCrawlerTest {
     @Test
     public void testCsdnCrawl() {
         CsdnCrawlerService svc = createCsdnService();
-        List<ResourceClient.CourseResource> results = svc.fetchCandidates("Java", "Java", 3);
+        List<SearchResourceItem> results = svc.fetchCandidates("Java", "Java", 3);
         Assertions.assertNotNull(results);
         System.out.println("CSDN: " + results.size() + " results");
-        for (ResourceClient.CourseResource r : results) {
+        for (SearchResourceItem r : results) {
             System.out.println("  - [" + r.getPlatform() + "] " + r.getTitle() + " -> " + r.getUrl());
         }
     }
@@ -81,10 +82,10 @@ public class MultiPlatformCrawlerTest {
     @Test
     public void testCnblogsCrawl() {
         CnblogsCrawlerService svc = createCnblogsService();
-        List<ResourceClient.CourseResource> results = svc.fetchCandidates("Java", "Java", 3);
+        List<SearchResourceItem> results = svc.fetchCandidates("Java", "Java", 3);
         Assertions.assertNotNull(results);
         System.out.println("Cnblogs: " + results.size() + " results");
-        for (ResourceClient.CourseResource r : results) {
+        for (SearchResourceItem r : results) {
             System.out.println("  - [" + r.getPlatform() + "] " + r.getTitle() + " -> " + r.getUrl());
         }
     }
@@ -97,10 +98,10 @@ public class MultiPlatformCrawlerTest {
         validateResults("Cnblogs", createCnblogsService().fetchCandidates("Spring Boot", "Spring Boot", 2));
     }
 
-    private void validateResults(String platform, List<ResourceClient.CourseResource> results) {
+    private void validateResults(String platform, List<SearchResourceItem> results) {
         System.out.println("Testing " + platform + ": " + results.size() + " results");
         Assertions.assertNotNull(results, platform + " returned null");
-        for (ResourceClient.CourseResource r : results) {
+        for (SearchResourceItem r : results) {
             Assertions.assertNotNull(r.getTitle(), platform + " title is null");
             Assertions.assertFalse(r.getTitle().isBlank(), platform + " title is blank");
             Assertions.assertNotNull(r.getUrl(), platform + " url is null");
