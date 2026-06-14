@@ -18,3 +18,22 @@ spring:
       monitor:
         default-timeout: 10000
         default-retries: 2
+      notify:
+        dingtalk:
+          enabled: ${SBA_DINGTALK_ENABLED:false}
+          webhook-url: ${SBA_DINGTALK_WEBHOOK:}
+          secret: ${SBA_DINGTALK_SECRET:}
+        reminder:
+          enabled: true
+          check-reminder-in-seconds: 300
+          reminder-interval-seconds: 7200
+          max-number-of-reminders: 3
+          ignore-changes-until-status-is-no-longer-down: true
+    instance-auth:
+      default-user-name: ${SBA_ADMIN_USER:admin}
+      default-password: ${SBA_ADMIN_PASSWORD:admin123}
+
+info:
+  app:
+    name: '@project.artifactId@'
+    version: '@project.version@'
