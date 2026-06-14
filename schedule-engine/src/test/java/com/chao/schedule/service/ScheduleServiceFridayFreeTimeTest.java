@@ -2,6 +2,8 @@ package com.chao.schedule.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.client.ScheduleClient;
+import com.chao.schedule.config.ScheduleAiConfig;
+import com.chao.schedule.config.ScheduleAiPrompts;
 import com.chao.schedule.entity.ClassSchedule;
 import com.chao.schedule.mapper.ClassScheduleMapper;
 import com.chao.schedule.mapper.PlanCandidateMapper;
@@ -61,9 +63,17 @@ public class ScheduleServiceFridayFreeTimeTest {
                 UserScheduleConfigMapper.class.getClassLoader(), new Class[]{UserScheduleConfigMapper.class},
                 (proxy, method, args) -> nullDefault(method.getReturnType()));
 
+        ScheduleAiConfig aiConfig = new ScheduleAiConfig();
+        ScheduleAiPrompts aiPrompts = new ScheduleAiPrompts();
+        ScheduleUtils scheduleUtils = new ScheduleUtils(objectMapper);
+        ScheduleValidator scheduleValidator = new ScheduleValidator();
+        TaskScheduleService taskScheduleService = new TaskScheduleService(taskScheduleMapper, null);
+        FreeTimeCalculator freeTimeCalculator = new FreeTimeCalculator(classScheduleMapper, userScheduleConfigMapper);
+        ScheduleImportService scheduleImportService = new ScheduleImportService(classScheduleMapper, userScheduleConfigMapper);
+
         ScheduleService scheduleService = new ScheduleService(
                 classScheduleMapper, taskScheduleMapper, planCandidateMapper,
-                userScheduleConfigMapper, null, null, objectMapper, null, null
+                userScheduleConfigMapper, null, null, objectMapper, null, null, aiConfig, aiPrompts, scheduleUtils, scheduleValidator, taskScheduleService, freeTimeCalculator, scheduleImportService
         );
 
         // Import CSV without firstWeekMonday (so we skip UserScheduleConfig insert/update logic)
@@ -144,9 +154,17 @@ public class ScheduleServiceFridayFreeTimeTest {
                 UserScheduleConfigMapper.class.getClassLoader(), new Class[]{UserScheduleConfigMapper.class},
                 (proxy, method, args) -> nullDefault(method.getReturnType()));
 
+        ScheduleAiConfig aiConfig = new ScheduleAiConfig();
+        ScheduleAiPrompts aiPrompts = new ScheduleAiPrompts();
+        ScheduleUtils scheduleUtils = new ScheduleUtils(objectMapper);
+        ScheduleValidator scheduleValidator = new ScheduleValidator();
+        TaskScheduleService taskScheduleService = new TaskScheduleService(taskScheduleMapper, null);
+        FreeTimeCalculator freeTimeCalculator = new FreeTimeCalculator(classScheduleMapper, userScheduleConfigMapper);
+        ScheduleImportService scheduleImportService = new ScheduleImportService(classScheduleMapper, userScheduleConfigMapper);
+
         ScheduleService scheduleService = new ScheduleService(
                 classScheduleMapper, taskScheduleMapper, planCandidateMapper,
-                userScheduleConfigMapper, null, null, objectMapper, null, null
+                userScheduleConfigMapper, null, null, objectMapper, null, null, aiConfig, aiPrompts, scheduleUtils, scheduleValidator, taskScheduleService, freeTimeCalculator, scheduleImportService
         );
 
         // Full CSV data
@@ -275,9 +293,17 @@ public class ScheduleServiceFridayFreeTimeTest {
                 UserScheduleConfigMapper.class.getClassLoader(), new Class[]{UserScheduleConfigMapper.class},
                 (proxy, method, args) -> nullDefault(method.getReturnType()));
 
+        ScheduleAiConfig aiConfig = new ScheduleAiConfig();
+        ScheduleAiPrompts aiPrompts = new ScheduleAiPrompts();
+        ScheduleUtils scheduleUtils = new ScheduleUtils(objectMapper);
+        ScheduleValidator scheduleValidator = new ScheduleValidator();
+        TaskScheduleService taskScheduleService = new TaskScheduleService(taskScheduleMapper, null);
+        FreeTimeCalculator freeTimeCalculator = new FreeTimeCalculator(classScheduleMapper, userScheduleConfigMapper);
+        ScheduleImportService scheduleImportService = new ScheduleImportService(classScheduleMapper, userScheduleConfigMapper);
+
         ScheduleService scheduleService = new ScheduleService(
                 classScheduleMapper, taskScheduleMapper, planCandidateMapper,
-                userScheduleConfigMapper, null, null, objectMapper, null, null
+                userScheduleConfigMapper, null, null, objectMapper, null, null, aiConfig, aiPrompts, scheduleUtils, scheduleValidator, taskScheduleService, freeTimeCalculator, scheduleImportService
         );
 
         // Import the Friday-specific rows
