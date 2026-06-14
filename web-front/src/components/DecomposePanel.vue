@@ -22,7 +22,7 @@ const hiddenCount = computed(() => Math.max(0, dc.taskCount - MAX_DISPLAY))
         <!-- Close button -->
         <v-btn
           icon="mdi-close"
-          size="x-small"
+          size="small"
           variant="text"
           class="dc-close"
           @click="dc.dismiss()"
@@ -83,7 +83,7 @@ const hiddenCount = computed(() => Math.max(0, dc.taskCount - MAX_DISPLAY))
         >
           <div
             v-for="(t, i) in dc.tasks"
-            :key="i"
+            :key="t.title + i"
             :class="['dc-task', { revealed: t.revealed }]"
           >
             <span class="dc-task-num">{{ i + 1 }}</span>
@@ -119,7 +119,7 @@ const hiddenCount = computed(() => Math.max(0, dc.taskCount - MAX_DISPLAY))
   top: 80px;
   right: 16px;
   z-index: 9998;
-  width: 300px;
+  width: min(300px, calc(100vw - 32px));
 }
 .dc-card {
   position: relative;
@@ -273,7 +273,7 @@ const hiddenCount = computed(() => Math.max(0, dc.taskCount - MAX_DISPLAY))
   display: flex;
   flex-direction: column;
   gap: 5px;
-  max-height: 200px;
+  max-height: min(360px, 50vh);
   overflow-y: auto;
 }
 .dc-task {

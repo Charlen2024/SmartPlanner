@@ -26,7 +26,7 @@ watch(() => auth.me?.firstWeekMonday, (v) => {
     localStorage.setItem('firstWeekMonday', v)
   }
 })
-const goalText = ref('学习分布式系统')
+const goalText = ref('')
 
 const dashboard = ref(null)
 const tasks = ref([])
@@ -311,7 +311,7 @@ watch(
 </script>
 
 <template>
-  
+  <v-container style="max-width: 1200px">
     <v-row class="mb-4" align="center">
       <v-col cols="12" md="7">
         <div class="text-h5 font-weight-bold">学习计划向导</div>
@@ -477,8 +477,7 @@ watch(
               <v-textarea
                 v-model="goalText"
                 label="目标描述"
-                hint="尽量具体，例如：「两个月内掌握分布式系统核心概念，能独立设计一个分布式 KV 存储」"
-                persistent-hint
+                placeholder="尽量具体，例如：「两个月内掌握分布式系统核心概念，能独立设计一个分布式 KV 存储」"
                 variant="outlined"
                 rows="4"
                 auto-grow
@@ -591,7 +590,7 @@ watch(
         </v-card-actions>
       </v-card>
     </v-dialog>
-  
+  </v-container>
 </template>
 
 <style scoped>

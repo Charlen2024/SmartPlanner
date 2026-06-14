@@ -596,7 +596,9 @@ function fmtHm(dt) {
           <v-row>
             <!-- Import form -->
             <v-col cols="12" md="5">
-              <div class="text-subtitle-2 font-weight-semibold mb-3">{{ needsImport ? '导入课表' : '更新课表' }}</div>
+              <div class="d-flex align-center mb-3" style="min-height:28px">
+                <span class="text-subtitle-2 font-weight-semibold">{{ needsImport ? '导入课表' : '更新课表' }}</span>
+              </div>
 
               <div class="upload-zone mb-3" :class="{ 'upload-zone--has-file': file }" @click="$refs.scheduleFileInput?.click()" @dragover.prevent @drop.prevent="file = $event.dataTransfer?.files?.[0]">
                 <input ref="scheduleFileInput" type="file" accept=".csv,.xlsx,.ics" style="display:none" @change="file = $event.target.files?.[0]" />

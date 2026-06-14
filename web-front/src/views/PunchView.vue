@@ -25,6 +25,11 @@ const pausedAt = ref(null)
 const timer = ref(null)
 const completing = ref(false)
 const submitting = ref(false)
+const confirmDialog = ref(false)
+const confirmAction = ref(null)
+const confirmTarget = ref(null)
+const confirmTitle = ref('')
+const confirmMessage = ref('')
 
 const activeSchedule = computed(() => (schedules.value ?? []).find((s) => Number(s.id) === Number(activeScheduleId.value)) || null)
 const progressPercent = computed(() => {
@@ -300,8 +305,12 @@ async function load() {
 }
 
 async function remove(id) {
-  await api.delete(`/user/punch/records/${id}`)
-  await load()
+  try {
+    await api.delete(`/user/punch/records/${id}`)
+    await load()
+  } catch (e) {
+    error.value = e?.response?.data?.message || e?.message || '删除失败'
+  }
 }
 
 function startSchedule(s) {
@@ -340,6 +349,31 @@ function togglePause() {
   if (!running.value) pausedAt.value = Date.now()
   else pausedAt.value = null
   saveTimerState()
+}
+
+function confirmComplete() {
+  if (!activeSchedule.value) return
+  confirmTitle.value = '确认完成打卡'
+  confirmMessage.value = `确定完成「${activeSchedule.value.taskTitle || '当前任务'}」的打卡吗？`
+  confirmAction.value = 'complete'
+  confirmDialog.value = true
+}
+
+function confirmRemove(id) {
+  confirmTitle.value = '确认删除'
+  confirmMessage.value = '确定删除这条打卡记录吗？此操作不可撤销。'
+  confirmAction.value = 'delete'
+  confirmTarget.value = id
+  confirmDialog.value = true
+}
+
+async function executeConfirm() {
+  confirmDialog.value = false
+  if (confirmAction.value === 'complete') {
+    await completeNow()
+  } else if (confirmAction.value === 'delete') {
+    await remove(confirmTarget.value)
+  }
 }
 
 async function completeNow() {
@@ -401,6 +435,10 @@ onUnmounted(() => {
 
 <template>
   <v-alert v-if="error" type="error" variant="tonal" class="mb-4">{{ error }}</v-alert>
+
+  <v-progress-linear v-if="loading" indeterminate height="6" rounded color="primary" class="mb-4" />
+
+  <template v-if="!loading">
 
   <v-card class="mb-4">
     <v-card-title class="d-flex align-center">
@@ -537,7 +575,7 @@ onUnmounted(() => {
                 <v-icon size="18" class="mr-1">{{ running ? 'mdi-pause' : 'mdi-play' }}</v-icon>
                 {{ running ? '暂停' : '继续' }}
               </v-btn>
-              <v-btn color="success" variant="tonal" :loading="submitting" :disabled="!activeSchedule" @click="completeNow">
+              <v-btn color="success" variant="tonal" :loading="submitting" :disabled="!activeSchedule" @click="confirmComplete">
                 <v-icon size="18" class="mr-1">mdi-check</v-icon>
                 完成打卡
               </v-btn>
@@ -584,7 +622,7 @@ onUnmounted(() => {
                   <div class="font-weight-semibold text-body-2">
                     {{ r.taskTitle || taskMap.get(Number(r.taskId))?.title || '未知任务' }}
                   </div>
-                  <v-btn size="x-small" variant="text" color="error" icon="mdi-delete-outline" aria-label="删除打卡记录" @click="remove(r.id)" />
+                  <v-btn size="x-small" variant="text" color="error" icon="mdi-delete-outline" aria-label="删除打卡记录" @click="confirmRemove(r.id)" />
                 </div>
                 <div class="d-flex align-center mt-1">
                   <v-icon size="12" class="mr-1" style="opacity:0.4">mdi-clock-outline</v-icon>
@@ -599,6 +637,20 @@ onUnmounted(() => {
       </v-card>
     </v-col>
   </v-row>
+  </template>
+
+  <!-- Confirm dialog -->
+  <v-dialog v-model="confirmDialog" max-width="400">
+    <v-card>
+      <v-card-title class="text-h6">{{ confirmTitle }}</v-card-title>
+      <v-card-text>{{ confirmMessage }}</v-card-text>
+      <v-card-actions>
+        <v-spacer />
+        <v-btn variant="text" @click="confirmDialog = false">取消</v-btn>
+        <v-btn color="primary" @click="executeConfirm">确认</v-btn>
+      </v-card-actions>
+    </v-card>
+  </v-dialog>
 </template>
 
 <style scoped>

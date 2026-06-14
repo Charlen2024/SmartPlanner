@@ -218,9 +218,9 @@ onActivated(() => { if (_ready) load(); _ready = true })
   </div>
 
   <!-- ====== Top Metrics ====== -->
-  <v-row class="mb-4">
+  <v-row v-if="!loading && portrait" class="mb-4">
     <v-col v-for="m in topMetrics" :key="m.key" cols="6" md="3">
-      <v-card class="metric-card" :class="'metric-card--' + m.color">
+      <v-card class="metric-card">
         <div class="d-flex align-center ga-1 mb-2">
           <v-icon :icon="m.icon" size="18" :color="m.color" />
           <span class="text-caption font-weight-medium text-medium-emphasis">{{ m.label }}</span>
@@ -234,17 +234,26 @@ onActivated(() => { if (_ready) load(); _ready = true })
           </span>
         </div>
         <v-progress-linear
+          v-if="m.key !== 'avgDelay'"
           :model-value="m.value"
-          :max="m.key === 'streak' ? Math.max(m.value, 7) : m.key === 'avgDelay' ? Math.max(m.value, 30) : 100"
+          :max="m.key === 'streak' ? Math.max(m.value, 7) : 100"
           height="3"
           rounded
           :color="m.color"
           class="mt-2"
         />
+        <div v-else class="text-caption mt-2" style="opacity:0.5">越少越好</div>
       </v-card>
     </v-col>
   </v-row>
 
+  <!-- Loading state -->
+  <div v-if="loading" class="mb-4">
+    <v-progress-linear indeterminate height="6" rounded color="primary" class="mb-2" />
+    <div class="text-caption text-center text-medium-emphasis">正在加载画像数据…</div>
+  </div>
+
+  <template v-else-if="portrait">
   <!-- ====== AI Tips (prominent) ====== -->
   <v-card class="mb-4 tips-card">
     <v-card-title class="d-flex align-center pb-1">
@@ -526,6 +535,9 @@ onActivated(() => { if (_ready) load(); _ready = true })
       </div>
     </v-expand-transition>
   </v-card>
+  </template>
+
+  <v-alert v-else type="info" variant="tonal" class="mb-4">暂无画像数据，请先完成一些打卡</v-alert>
 </template>
 
 <style scoped>
