@@ -186,7 +186,7 @@ public class GoalAiWorker {
                 } catch (Exception e) {
                     log.warn("资源检索/写入失败: {}", e.getMessage());
                 }
-                List<String> crawlTopics = tasks.stream()
+                List<String> crawlTopics = finalTasks.stream()
                         .map(GoalTaskDto::getTitle)
                         .filter(t -> t != null && !t.isBlank() && !t.startsWith("[AI降级]"))
                         .distinct()
