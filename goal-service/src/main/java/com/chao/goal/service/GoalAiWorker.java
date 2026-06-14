@@ -146,34 +146,14 @@ public class GoalAiWorker {
                 return saved;
             });
 
-            sendDecomposeProgress(userId, "GOAL_DECOMPOSE_SAVING", goalDescription, "SAVING", 75, "正在保存任务并触发资源检索…", tasks.size(), taskTitles);
-
-            try {
-                resourceClient.searchOnlineCourses(goalDescription);
-            } catch (Exception e) {
-                log.warn("资源检索/写入失败: {}", e.getMessage());
-            }
-
-            List<String> crawlTopics = tasks.stream()
-                    .map(GoalTaskDto::getTitle)
-                    .filter(t -> t != null && !t.isBlank() && !t.startsWith("[AI降级]"))
-                    .distinct()
-                    .collect(Collectors.toList());
-            if (!crawlTopics.isEmpty()) {
-                log.info("触发 {} 个主题的爬取: {}", crawlTopics.size(), crawlTopics);
-            }
-            for (String topic : crawlTopics) {
-                try {
-                    resourceClient.crawlTopic(topic, userId);
-                } catch (Exception e) {
-                    log.warn("爬取触发失败 topic={}: {}", topic, e.getMessage());
-                }
-            }
-
             // Transaction already committed via transactionTemplate.execute above
             final int finalTaskCount = tasks.size();
             final List<String> finalTaskTitles = taskTitles;
             final String finalGoalDesc = goalDescription;
+
+            // 先发送 DONE 通知，资源检索/爬虫异步执行不阻塞用户反馈
+            sendDecomposeProgress(userId, "GOAL_DECOMPOSE_DONE", goalDescription, "DONE", 100,
+                    "拆解完成，共生成 " + finalTaskCount + " 个任务", finalTaskCount, finalTaskTitles);
             NotificationMessage notif = new NotificationMessage();
             notif.setUserId(userId);
             notif.setType("GOAL_TASK_READY");
@@ -198,10 +178,33 @@ public class GoalAiWorker {
             notif.setPayload(readyPayload);
             rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, notif);
 
-            if (!savedTasks.isEmpty()) {
-                final Long finalUserId = userId;
-                CompletableFuture.runAsync(() -> prefetchTaskResources(finalUserId, savedTasks));
-            }
+            // 资源检索和爬虫异步执行，不阻塞 DONE 通知和 MQ ACK
+            final Long finalUserId = userId;
+            CompletableFuture.runAsync(() -> {
+                try {
+                    resourceClient.searchOnlineCourses(finalGoalDesc);
+                } catch (Exception e) {
+                    log.warn("资源检索/写入失败: {}", e.getMessage());
+                }
+                List<String> crawlTopics = tasks.stream()
+                        .map(GoalTaskDto::getTitle)
+                        .filter(t -> t != null && !t.isBlank() && !t.startsWith("[AI降级]"))
+                        .distinct()
+                        .collect(Collectors.toList());
+                if (!crawlTopics.isEmpty()) {
+                    log.info("触发 {} 个主题的爬取: {}", crawlTopics.size(), crawlTopics);
+                }
+                for (String topic : crawlTopics) {
+                    try {
+                        resourceClient.crawlTopic(topic, finalUserId);
+                    } catch (Exception e) {
+                        log.warn("爬取触发失败 topic={}: {}", topic, e.getMessage());
+                    }
+                }
+                if (!savedTasks.isEmpty()) {
+                    prefetchTaskResources(finalUserId, savedTasks);
+                }
+            });
 
         } catch (Exception e) {
             log.error("目标拆解失败: userId={}, goalId={}, error={}", userId, goalId, e.getMessage());
