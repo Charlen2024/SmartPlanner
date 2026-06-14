@@ -29,9 +29,10 @@ spring:
           reminder-interval-seconds: 7200
           max-number-of-reminders: 3
           ignore-changes-until-status-is-no-longer-down: true
-    instance-auth:
-      default-user-name: ${SBA_ADMIN_USER:admin}
-      default-password: ${SBA_ADMIN_PASSWORD:admin123}
+  security:
+    user:
+      name: ${SBA_ADMIN_USER:admin}
+      password: ${SBA_ADMIN_PASSWORD:admin123}
 
 info:
   app:
