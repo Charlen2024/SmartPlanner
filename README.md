@@ -1,7 +1,10 @@
 # SmartPlanner（智慧学习助手）
 
-SmartPlanner 是一个面向个人学习场景的微服务应用：从“目标 → 任务拆解 → 排进日程 → 打卡反馈 → 画像建议”，形成闭环。项目包含两个层面：
+SmartPlanner 是一个基于 Spring Cloud 微服务架构的全栈学习规划平台，7 个微服务（gateway/user/agent/goal/schedule-engine/resource-search/punch）协同 Spring AI 智能体，实现「目标 → AI 任务拆解 → 智能排程 → 打卡反馈 → 学习画像」完整闭环。
 
+核心技术栈：Spring Cloud Gateway + Nacos + OpenFeign + RabbitMQ + RedisStack 向量检索 + Elasticsearch + DashScope LLM + Vue3 + Vuetify。
+
+项目包含两个层面：
 - **原理篇**：系统架构、模块职责、数据流与关键算法/约束（排程、RAG、去重、鉴权、异步任务）
 - **使用说明书**：如何启动、如何配置、如何调用接口、如何排障、如何二次开发
 
