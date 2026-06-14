@@ -4,6 +4,7 @@ import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.BindingBuilder;
 import org.springframework.amqp.core.DirectExchange;
 import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -21,6 +22,9 @@ public class RabbitMqConfig {
     public static final String GOAL_EXCHANGE = "goal.exchange";
     public static final String GOAL_AI_QUEUE = "goal.ai.queue";
     public static final String GOAL_AI_ROUTING_KEY = "goal.ai.route";
+    public static final String GOAL_AI_DLX = "goal.dlx.exchange";
+    public static final String GOAL_AI_DLQ = "goal.ai.dlq";
+    public static final String GOAL_AI_DLQ_ROUTING_KEY = "goal.ai.dlq.route";
 
     public static final String NOTIFICATION_EXCHANGE = "notification.exchange";
     public static final String NOTIFICATION_QUEUE = "user.notification.queue";
@@ -40,12 +44,30 @@ public class RabbitMqConfig {
 
     @Bean
     public Queue goalAiQueue() {
-        return new Queue(GOAL_AI_QUEUE, true);
+        return QueueBuilder.durable(GOAL_AI_QUEUE)
+                .deadLetterExchange(GOAL_AI_DLX)
+                .deadLetterRoutingKey(GOAL_AI_DLQ_ROUTING_KEY)
+                .build();
     }
 
     @Bean
     public Binding goalAiBinding(Queue goalAiQueue, DirectExchange goalExchange) {
         return BindingBuilder.bind(goalAiQueue).to(goalExchange).with(GOAL_AI_ROUTING_KEY);
+    }
+
+    @Bean
+    public DirectExchange goalDlxExchange() {
+        return new DirectExchange(GOAL_AI_DLX);
+    }
+
+    @Bean
+    public Queue goalAiDlq() {
+        return new Queue(GOAL_AI_DLQ, true);
+    }
+
+    @Bean
+    public Binding goalAiDlqBinding(Queue goalAiDlq, DirectExchange goalDlxExchange) {
+        return BindingBuilder.bind(goalAiDlq).to(goalDlxExchange).with(GOAL_AI_DLQ_ROUTING_KEY);
     }
 
     @Bean

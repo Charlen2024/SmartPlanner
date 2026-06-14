@@ -1,11 +1,12 @@
 package com.chao.common.client;
 
-import com.chao.common.dto.Result;
 import com.chao.common.dto.CourseResourceDto;
 import com.chao.common.dto.ResourceAdviceJobStartRequest;
 import com.chao.common.dto.ResourceAdviceJobStartResponse;
 import com.chao.common.dto.ResourceAdviceJobStatusResponse;
-import lombok.Data;
+import com.chao.common.dto.ResourceAdviceResult;
+import com.chao.common.dto.Result;
+import com.chao.common.dto.SearchResourceItem;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -36,10 +37,10 @@ public interface ResourceClient {
     Result<String> deleteResource(@PathVariable("id") Long id);
 
     @GetMapping("/api/resources/search")
-    Result<List<CourseResource>> searchOnlineCourses(@RequestParam("topic") String topic);
+    Result<List<SearchResourceItem>> searchOnlineCourses(@RequestParam("topic") String topic);
 
     @GetMapping("/api/resources/search/advice")
-    Result<ResourceAdviceResponse> searchOnlineCoursesWithAdvice(@RequestParam("topic") String topic);
+    Result<ResourceAdviceResult> searchOnlineCoursesWithAdvice(@RequestParam("topic") String topic);
 
     @PostMapping("/api/resources/search/advice/jobs")
     Result<ResourceAdviceJobStartResponse> startResourceAdviceJob(
@@ -53,19 +54,4 @@ public interface ResourceClient {
 
     @PostMapping("/api/resources/crawl")
     Result<String> crawlTopic(@RequestParam("topic") String topic, @RequestParam("userId") Long userId);
-
-    @Data
-    class CourseResource {
-        private String title;
-        private String platform;
-        private String url;
-        private String summary;
-    }
-
-    @Data
-    class ResourceAdviceResponse {
-        private String topic;
-        private String advice;
-        private List<CourseResource> resources;
-    }
 }
