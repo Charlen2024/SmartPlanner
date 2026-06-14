@@ -1,0 +1,12 @@
+**/.git
+**/.gitignore
+**/.env
+**/*.log
+**/target
+**/node_modules
+**/dist
+**/.idea
+**/*.iml
+**/.dbg
+**/venv
+**/__pycache__

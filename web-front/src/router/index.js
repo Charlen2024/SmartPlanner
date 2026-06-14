@@ -17,6 +17,9 @@ import Game2048View from '../views/Game2048View.vue'
 export function createRouter() {
   const router = _createRouter({
     history: createWebHistory(),
+    scrollBehavior() {
+      return { top: 0, behavior: 'instant' }
+    },
     routes: [
       { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
       {

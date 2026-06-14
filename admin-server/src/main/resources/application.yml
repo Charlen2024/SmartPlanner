@@ -1,0 +1,40 @@
+server:
+  port: 9090
+
+spring:
+  application:
+    name: admin-server
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR:nacos:8848}
+  boot:
+    admin:
+      discovery:
+        enabled: true
+        ignored-services:
+          - nacos
+          - consul
+      monitor:
+        default-timeout: 10000
+        default-retries: 2
+      notify:
+        dingtalk:
+          enabled: ${SBA_DINGTALK_ENABLED:false}
+          webhook-url: ${SBA_DINGTALK_WEBHOOK:}
+          secret: ${SBA_DINGTALK_SECRET:}
+        reminder:
+          enabled: true
+          check-reminder-in-seconds: 300
+          reminder-interval-seconds: 7200
+          max-number-of-reminders: 3
+          ignore-changes-until-status-is-no-longer-down: true
+  security:
+    user:
+      name: ${SBA_ADMIN_USER:admin}
+      password: ${SBA_ADMIN_PASSWORD:admin123}
+
+info:
+  app:
+    name: '@project.artifactId@'
+    version: '@project.version@'

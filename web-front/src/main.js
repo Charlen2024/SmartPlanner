@@ -3,29 +3,39 @@ import './style.css'
 import App from './App.vue'
 
 import '@mdi/font/css/materialdesignicons.css'
+import 'highlight.js/styles/github-dark.css'
 import 'vuetify/styles'
 import { createVuetify } from 'vuetify'
 import * as components from 'vuetify/components'
+import { VDateInput } from 'vuetify/labs/VDateInput'
 import * as directives from 'vuetify/directives'
 import { createPinia } from 'pinia'
 import { createRouter } from './router'
 import { setupApi } from './plugins/api'
 
-const savedTheme = localStorage.getItem('theme') || 'vibeLight'
+let savedTheme = localStorage.getItem('theme') || 'spLight'
+if (savedTheme === 'vibeLight') savedTheme = 'spLight'
+if (savedTheme === 'vibeDark') savedTheme = 'spDark'
+localStorage.setItem('theme', savedTheme)
 
 const vuetify = createVuetify({
-  components,
+  components: { ...components, VDateInput },
   directives,
   defaults: {
     VCard: { rounded: 'xl' },
     VBtn: { rounded: 'lg' },
     VTextField: { rounded: 'lg' },
     VSelect: { rounded: 'lg' },
+    VDateInput: { rounded: 'lg' },
+  },
+  locale: {
+    locale: 'zhHans',
+    fallback: 'en',
   },
   theme: {
     defaultTheme: savedTheme,
     themes: {
-      vibeLight: {
+      spLight: {
         dark: false,
         colors: {
           primary: '#2563EB',
@@ -35,7 +45,7 @@ const vuetify = createVuetify({
           'on-surface': '#0F172A',
         },
       },
-      vibeDark: {
+      spDark: {
         dark: true,
         colors: {
           primary: '#3B82F6',

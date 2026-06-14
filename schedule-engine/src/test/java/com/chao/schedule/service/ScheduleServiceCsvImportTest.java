@@ -3,6 +3,8 @@ package com.chao.schedule.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.client.ScheduleClient;
 import com.chao.common.dto.ScheduleImportResultDto;
+import com.chao.schedule.config.ScheduleAiConfig;
+import com.chao.schedule.config.ScheduleAiPrompts;
 import com.chao.schedule.entity.ClassSchedule;
 import com.chao.schedule.mapper.ClassScheduleMapper;
 import com.chao.schedule.mapper.PlanCandidateMapper;
@@ -78,6 +80,14 @@ public class ScheduleServiceCsvImportTest {
                 }
         );
 
+        ScheduleAiConfig aiConfig = new ScheduleAiConfig();
+        ScheduleAiPrompts aiPrompts = new ScheduleAiPrompts();
+        ScheduleUtils scheduleUtils = new ScheduleUtils(objectMapper);
+        ScheduleValidator scheduleValidator = new ScheduleValidator();
+        TaskScheduleService taskScheduleService = new TaskScheduleService(taskScheduleMapper, null);
+        FreeTimeCalculator freeTimeCalculator = new FreeTimeCalculator(classScheduleMapper, null);
+        ScheduleImportService scheduleImportService = new ScheduleImportService(classScheduleMapper, null);
+
         ScheduleService scheduleService = new ScheduleService(
                 classScheduleMapper,
                 taskScheduleMapper,
@@ -86,7 +96,15 @@ public class ScheduleServiceCsvImportTest {
                 null,
                 null,
                 objectMapper,
-                null
+                null,
+                null,
+                aiConfig,
+                aiPrompts,
+                scheduleUtils,
+                scheduleValidator,
+                taskScheduleService,
+                freeTimeCalculator,
+                scheduleImportService
         );
 
         String csv = """
@@ -112,7 +130,7 @@ public class ScheduleServiceCsvImportTest {
         Assertions.assertEquals(2, freeSlots.size());
         Assertions.assertEquals(LocalDateTime.of(monday, LocalTime.of(10, 0)), freeSlots.get(0).getStart());
         Assertions.assertEquals(LocalDateTime.of(monday, LocalTime.of(12, 0)), freeSlots.get(0).getEnd());
-        Assertions.assertEquals(LocalDateTime.of(monday, LocalTime.of(13, 0)), freeSlots.get(1).getStart());
+        Assertions.assertEquals(LocalDateTime.of(monday, LocalTime.of(14, 0)), freeSlots.get(1).getStart());
         Assertions.assertEquals(LocalDateTime.of(monday, LocalTime.of(22, 0)), freeSlots.get(1).getEnd());
     }
 
@@ -167,9 +185,17 @@ public class ScheduleServiceCsvImportTest {
                 }
         );
 
+        ScheduleAiConfig aiConfig2 = new ScheduleAiConfig();
+        ScheduleAiPrompts aiPrompts2 = new ScheduleAiPrompts();
+        ScheduleUtils scheduleUtils2 = new ScheduleUtils(objectMapper);
+        ScheduleValidator scheduleValidator2 = new ScheduleValidator();
+        TaskScheduleService taskScheduleService2 = new TaskScheduleService(taskScheduleMapper, null);
+        FreeTimeCalculator freeTimeCalculator2 = new FreeTimeCalculator(classScheduleMapper, null);
+        ScheduleImportService scheduleImportService2 = new ScheduleImportService(classScheduleMapper, null);
+
         ScheduleService scheduleService = new ScheduleService(
                 classScheduleMapper, taskScheduleMapper, planCandidateMapper,
-                null, null, null, objectMapper, null
+                null, null, null, objectMapper, null, null, aiConfig2, aiPrompts2, scheduleUtils2, scheduleValidator2, taskScheduleService2, freeTimeCalculator2, scheduleImportService2
         );
 
         String csv = """

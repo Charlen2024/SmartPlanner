@@ -4,6 +4,9 @@ import vue from '@vitejs/plugin-vue'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [vue()],
+  optimizeDeps: {
+    exclude: ['cherry-markdown'],
+  },
   server: {
     host: true,
     strictPort: false,

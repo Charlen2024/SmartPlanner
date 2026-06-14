@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.ai.OpenAiCompatClient;
 import com.chao.common.client.ResourceClient;
+import com.chao.common.dto.ResourceAdviceResult;
+import com.chao.common.dto.SearchResourceItem;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.chao.resource.entity.CourseResource;
 import com.chao.resource.mapper.CourseResourceMapper;
@@ -11,32 +13,30 @@ import com.chao.resource.search.CourseResourceDocument;
 import com.chao.resource.search.CourseResourceSearchRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.elasticsearch.client.elc.NativeQuery;
 import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
+import org.elasticsearch.client.RestClient;
+import org.elasticsearch.client.Request;
+import org.elasticsearch.client.Response;
 import org.springframework.data.elasticsearch.core.SearchHit;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.LinkedHashSet;
 import java.util.HashSet;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
-import org.springframework.scheduling.annotation.Scheduled;
-import com.chao.common.client.GoalClient;
-import com.chao.common.dto.Result;
-import com.chao.common.dto.GoalDto;
-import jakarta.annotation.PostConstruct;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -52,40 +52,32 @@ public class ResourceService {
     private final ElasticsearchOperations elasticsearchOperations;
     private final OpenAiCompatClient openAiCompatClient;
     private final ObjectMapper objectMapper;
-    private final GoalClient goalClient;
-    private final AtomicBoolean crawlerRunning = new AtomicBoolean(false);
-
-    @Value("${smartplanner.crawler.bilibili.enabled:true}")
-    private boolean bilibiliCrawlerEnabled;
-    @Value("${smartplanner.crawler.bilibili.topics:Java,Spring Boot,Python,Vue}")
-    private String bilibiliCrawlerTopics;
-    @Value("${smartplanner.crawler.bilibili.interval-ms:21600000}")
-    private long bilibiliCrawlerIntervalMs;
-    @Value("${smartplanner.crawler.bilibili.per-topic-limit:3}")
-    private int bilibiliCrawlerPerTopicLimit;
+    private final BilibiliCrawlerService bilibiliCrawlerService;
+    private final CrawlerOrchestratorService crawlerOrchestrator;
 
     @Value("${smartplanner.ai.rag-timeout-seconds:45}")
     private int ragTimeoutSeconds;
-    @Value("${smartplanner.ai.advice-timeout-seconds:90}")
+    @Value("${smartplanner.ai.advice-timeout-seconds:120}")
     private int adviceTimeoutSeconds;
 
-    private static final Pattern TITLE_NOISE = Pattern.compile("(第\\s*\\d+\\s*集|ep\\s*\\d+|p\\s*\\d+|\\d+\\s*分钟|\\d+\\s*秒|时长[:：]?\\s*\\d+\\s*(秒|分钟)|bv\\w+|【购课[^】]*】|chapter\\s*\\d+|unit\\s*\\d+|\\d+(?:\\.\\d+)?--[^\\s]+|\\([^)]*\\)|（[^）]*）)", Pattern.CASE_INSENSITIVE);
+    @Autowired(required = false)
+    private EmbeddingModel embeddingModel;
+
+    @Autowired(required = false)
+    private RestClient restClient;
+
+    @Value("${smartplanner.search.vector.enabled:true}")
+    private boolean vectorSearchEnabled;
+
+    static final Pattern TITLE_NOISE = Pattern.compile("(第\\s*\\d+\\s*集|ep\\s*\\d+|p\\s*\\d+|\\d+\\s*分钟|\\d+\\s*秒|时长[:：]?\\s*\\d+\\s*(秒|分钟)|bv\\w+|【购课[^】]*】|chapter\\s*\\d+|unit\\s*\\d+|\\d+(?:\\.\\d+)?--[^\\s]+|\\([^)]*\\)|（[^）]*）)", Pattern.CASE_INSENSITIVE);
     private static final Pattern NON_WORD = Pattern.compile("[^\\p{IsHan}\\p{IsAlphabetic}\\p{IsDigit}]+");
     private static final Pattern DIGITS = Pattern.compile("\\d+");
     private static final Pattern TITLE_SPLIT = Pattern.compile("\\s*[-－—]\\s*");
-    private static final Pattern BILIBILI_BV = Pattern.compile("(?i)/video/(BV[0-9A-Za-z]+)");
+    static final Pattern BILIBILI_BV = Pattern.compile("(?i)/video/(BV[0-9A-Za-z]+)");
     private static final Pattern DIGITS_ONLY = Pattern.compile("^\\d+$");
-
-    @jakarta.annotation.PostConstruct
-    public void initCrawl() {
-        new Thread(() -> {
-            try {
-                Thread.sleep(3000);
-                scheduledBilibiliCrawl();
-            } catch (Exception ignored) {
-            }
-        }, "crawler-startup").start();
-    }
+    private static final Pattern HEX_HASH = Pattern.compile("^[0-9a-fA-F]{32,}$");
+    private static final Pattern HEX_HASH_SUFFIX = Pattern.compile(".*_[0-9a-fA-F]{16,}$");
+    static final Pattern CJK_CHAR = Pattern.compile("[\\u4E00-\\u9FFF]");
 
     public CourseResource createResource(String topic, String title, String platform, String url, String summary) {
         CourseResource cr = new CourseResource();
@@ -127,7 +119,7 @@ public class ResourceService {
      * 2. 在 Elasticsearch 中执行向量相似度搜索
      * 3. 如果 ES 未配置或搜索失败，降级为数据库模糊搜索
      */
-    public List<ResourceClient.CourseResource> searchResources(String topic) {
+    public List<SearchResourceItem> searchResources(String topic) {
         log.info("开始检索资源，关键词: {}", topic);
 
         try {
@@ -138,7 +130,7 @@ public class ResourceService {
 
             List<CourseResourceDocument> es = searchFromEs(q, 20);
             if (es != null && !es.isEmpty()) {
-                List<ResourceClient.CourseResource> out = es.stream()
+                List<SearchResourceItem> out = es.stream()
                         .map(d -> toClientDto(q, d))
                         .filter(Objects::nonNull)
                         .toList();
@@ -146,9 +138,8 @@ public class ResourceService {
                 if (!out.isEmpty()) return out;
             }
 
-            List<ResourceClient.CourseResource> ai = recommendByAi(q);
+            List<SearchResourceItem> ai = recommendByAi(q);
             if (ai != null && !ai.isEmpty()) {
-                persistAiResources(q, ai);
                 return dedupeResources(q, ai, 20);
             }
 
@@ -157,9 +148,9 @@ public class ResourceService {
                     .or()
                     .like(CourseResource::getTitle, q));
 
-            List<ResourceClient.CourseResource> out = dbResources.stream()
+            List<SearchResourceItem> out = dbResources.stream()
                     .map(r -> {
-                        ResourceClient.CourseResource dto = new ResourceClient.CourseResource();
+                        SearchResourceItem dto = new SearchResourceItem();
                         dto.setTitle(r.getTitle());
                         dto.setPlatform(r.getPlatform());
                         dto.setUrl(canonicalUrl(r.getSourceUrl()));
@@ -169,25 +160,18 @@ public class ResourceService {
                     .collect(Collectors.toList());
 
             out = dedupeResources(q, out, 20);
-                        // Try Bilibili real-time before Google fallback
+            // Try all platform crawlers in real-time before default fallback
             if (out.isEmpty() && !q.isBlank()) {
-                try {
-                    List<ResourceClient.CourseResource> bilibiliResults = fetchBilibiliCandidates(q, q, 6);
-                    if (bilibiliResults != null && !bilibiliResults.isEmpty()) {
-                        for (ResourceClient.CourseResource r : bilibiliResults) {
-                            if (r != null && r.getUrl() != null) {
-                                out.add(r);
-                            }
-                        }
-                        // Persist crawled results
-                        for (ResourceClient.CourseResource r : bilibiliResults) {
-                            saveIfNew(q, r);
-                        }
-                    }
-                } catch (Exception ignored) {
+                List<SearchResourceItem> crawled = fetchFromAllCrawlers(q);
+                if (!crawled.isEmpty()) {
+                    out = new ArrayList<>(crawled);
+                    out = dedupeResources(q, out, 20);
                 }
             }
-            if (out.isEmpty()) return defaultResources(topic);
+            if (out.isEmpty()) {
+                crawlerOrchestrator.crawlTopicAsync(q);
+                return defaultResources(topic);
+            }
             return out;
         } catch (Exception e) {
             log.error("检索资源失败", e);
@@ -195,9 +179,9 @@ public class ResourceService {
         }
     }
 
-    public ResourceClient.ResourceAdviceResponse searchResourcesWithAdvice(String topic) {
+    public ResourceAdviceResult searchResourcesWithAdvice(String topic) {
         String q = topic != null ? topic.trim() : "";
-        ResourceClient.ResourceAdviceResponse resp = new ResourceClient.ResourceAdviceResponse();
+        ResourceAdviceResult resp = new ResourceAdviceResult();
         resp.setTopic(q);
 
         if (q.isBlank()) {
@@ -212,19 +196,18 @@ public class ResourceService {
         List<String> relatedTopics = findRelatedTopics(q, 8);
         List<CourseResource> db = searchFromDb(q, relatedTopics, 40);
 
-        ResourceClient.ResourceAdviceResponse cached = tryBuildAdviceFromDb(q, relatedTopics, db);
+        ResourceAdviceResult cached = tryBuildAdviceFromDb(q, relatedTopics, db);
         if (cached != null) {
             return cached;
         }
 
-        ResourceClient.ResourceAdviceResponse fast = tryBuildAdviceFromSearchCandidates(q, relatedTopics, es, db);
+        ResourceAdviceResult fast = tryBuildAdviceFromSearchCandidates(q, relatedTopics, es, db);
         if (fast != null) {
             return fast;
         }
 
-        ResourceClient.ResourceAdviceResponse rag = adviseFromCandidates(q, relatedTopics, es, db);
+        ResourceAdviceResult rag = adviseFromCandidates(q, relatedTopics, es, db);
         if (rag != null && rag.getResources() != null && !rag.getResources().isEmpty()) {
-            upsertFromModel(q, rag.getResources());
             return rag;
         }
 
@@ -233,17 +216,17 @@ public class ResourceService {
         return resp;
     }
 
-    private ResourceClient.ResourceAdviceResponse tryBuildAdviceFromSearchCandidates(
+    private ResourceAdviceResult tryBuildAdviceFromSearchCandidates(
             String topic,
             List<String> relatedTopics,
             List<CourseResourceDocument> esCandidates,
             List<CourseResource> dbCandidates) {
         if (topic == null || topic.isBlank()) return null;
 
-        List<ResourceClient.CourseResource> resources = buildFastResources(topic, esCandidates, dbCandidates, 12);
+        List<SearchResourceItem> resources = buildFastResources(topic, esCandidates, dbCandidates, 12);
         if (resources == null || resources.size() < 6) return null;
 
-        ResourceClient.ResourceAdviceResponse resp = new ResourceClient.ResourceAdviceResponse();
+        ResourceAdviceResult resp = new ResourceAdviceResult();
         resp.setTopic(topic);
         String advice = buildLlmAdvice(topic, relatedTopics, esCandidates, dbCandidates);
         resp.setAdvice(advice != null && !advice.isBlank()
@@ -253,17 +236,17 @@ public class ResourceService {
         return resp;
     }
 
-    private ResourceClient.ResourceAdviceResponse tryBuildAdviceFromDb(String topic, List<String> relatedTopics, List<CourseResource> dbCandidates) {
+    private ResourceAdviceResult tryBuildAdviceFromDb(String topic, List<String> relatedTopics, List<CourseResource> dbCandidates) {
         if (topic == null || topic.isBlank()) return null;
         if (dbCandidates == null || dbCandidates.isEmpty()) return null;
 
-        List<ResourceClient.CourseResource> resources = dbCandidates.stream()
+        List<SearchResourceItem> resources = dbCandidates.stream()
                 .filter(r -> r.getSourceUrl() != null && r.getSourceUrl().startsWith("https://"))
                 .filter(r -> r.getTitle() != null && !r.getTitle().isBlank())
                 .filter(r -> r.getContentSummary() != null && !r.getContentSummary().isBlank())
                 .limit(8)
                 .map(r -> {
-                    ResourceClient.CourseResource dto = new ResourceClient.CourseResource();
+                    SearchResourceItem dto = new SearchResourceItem();
                     dto.setTitle(r.getTitle());
                     dto.setPlatform(r.getPlatform() != null && !r.getPlatform().isBlank() ? r.getPlatform() : "推荐");
                     dto.setUrl(canonicalUrl(r.getSourceUrl()));
@@ -275,7 +258,7 @@ public class ResourceService {
         resources = dedupeResources(topic, resources, 8);
         if (resources.size() < 6) return null;
 
-        ResourceClient.ResourceAdviceResponse resp = new ResourceClient.ResourceAdviceResponse();
+        ResourceAdviceResult resp = new ResourceAdviceResult();
         resp.setTopic(topic);
         String advice = buildLlmAdvice(topic, relatedTopics, null, dbCandidates);
         resp.setAdvice(advice != null && !advice.isBlank()
@@ -448,8 +431,8 @@ public class ResourceService {
         return false;
     }
 
-    private List<ResourceClient.CourseResource> buildFastResources(String topic, List<CourseResourceDocument> es, List<CourseResource> db, int limit) {
-        List<ResourceClient.CourseResource> out = new ArrayList<>();
+    private List<SearchResourceItem> buildFastResources(String topic, List<CourseResourceDocument> es, List<CourseResource> db, int limit) {
+        List<SearchResourceItem> out = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         Set<String> seenTitleKey = new HashSet<>();
         List<String> seenBases = new ArrayList<>();
@@ -466,7 +449,7 @@ public class ResourceService {
                 if (!seenTitleKey.add(key)) continue;
                 if (isNearDuplicateBase(normalizeTitleBase(r.getTitle(), topic), seenBases)) continue;
                 seenBases.add(normalizeTitleBase(r.getTitle(), topic));
-                ResourceClient.CourseResource dto = new ResourceClient.CourseResource();
+                SearchResourceItem dto = new SearchResourceItem();
                 dto.setTitle(r.getTitle() != null && !r.getTitle().isBlank() ? r.getTitle() : topic + " 学习资源");
                 dto.setPlatform(platform);
                 dto.setUrl(url);
@@ -481,7 +464,7 @@ public class ResourceService {
                 String url = canonicalUrl(d.getSourceUrl());
                 String platform = normalizePlatform(d.getPlatform(), url);
                 if (!isRelevantCandidate(topic, d.getTopic(), d.getTitle(), d.getContentSummary(), platform, url)) continue;
-                ResourceClient.CourseResource dto = toClientDto(topic, d);
+                SearchResourceItem dto = toClientDto(topic, d);
                 if (dto == null) continue;
                 String dtoUrl = canonicalUrl(dto.getUrl());
                 if (dtoUrl == null) continue;
@@ -502,8 +485,8 @@ public class ResourceService {
 
         int target = Math.min(limit, 6);
         if (out.size() < target) {
-            List<ResourceClient.CourseResource> fill = defaultResources(topic);
-            for (ResourceClient.CourseResource r : fill) {
+            List<SearchResourceItem> fill = defaultResources(topic);
+            for (SearchResourceItem r : fill) {
                 if (out.size() >= target) break;
                 if (r == null || r.getUrl() == null) continue;
                 String url = canonicalUrl(r.getUrl());
@@ -555,6 +538,47 @@ public class ResourceService {
         try {
             String queryText = topic != null ? topic.trim() : "";
             if (queryText.isBlank()) return List.of();
+
+            // Try kNN vector search first
+            if (embeddingModel != null && restClient != null && vectorSearchEnabled) {
+                try {
+                    float[] vector = embeddingModel.embed(queryText);
+                    if (vector != null && vector.length > 0) {
+                        List<Float> queryVector = new ArrayList<>(vector.length);
+                        for (float f : vector) queryVector.add(f);
+                        String knnJson = objectMapper.writeValueAsString(
+                            Map.of(
+                                "knn", Map.of(
+                                    "field", "embedding",
+                                    "query_vector", queryVector,
+                                    "k", Math.max(1, Math.min(limit, 50)),
+                                    "num_candidates", Math.max(limit * 5, 50)
+                                ),
+                                "size", Math.max(1, Math.min(limit, 50)),
+                                "_source", Map.of("excludes", List.of("embedding"))
+                            )
+                        );
+                        Request req = new Request("POST", "/course_resources/_search");
+                        req.setJsonEntity(knnJson);
+                        Response resp = restClient.performRequest(req);
+                        JsonNode root = objectMapper.readTree(resp.getEntity().getContent());
+                        List<CourseResourceDocument> knnResults = new ArrayList<>();
+                        for (JsonNode hit : root.path("hits").path("hits")) {
+                            JsonNode src = hit.path("_source");
+                            CourseResourceDocument doc = objectMapper.treeToValue(src, CourseResourceDocument.class);
+                            if (doc != null) knnResults.add(doc);
+                        }
+                        if (!knnResults.isEmpty()) {
+                            log.debug("kNN search returned {} results for: {}", knnResults.size(), queryText);
+                            return knnResults;
+                        }
+                    }
+                } catch (Exception e) {
+                    log.info("kNN search failed for '{}', falling back to text search: {}", queryText, e.toString());
+                }
+            }
+
+            // Fallback: text multiMatch search
             NativeQuery query = NativeQuery.builder()
                     .withQuery(qb -> qb.multiMatch(m -> m
                             .query(queryText)
@@ -574,7 +598,7 @@ public class ResourceService {
         }
     }
 
-    private ResourceClient.ResourceAdviceResponse adviseFromCandidates(
+    private ResourceAdviceResult adviseFromCandidates(
             String topic,
             List<String> relatedTopics,
             List<CourseResourceDocument> esCandidates,
@@ -622,7 +646,7 @@ public class ResourceService {
                 + "2) resources：必须从候选资源中挑选 6 条（更精炼），每条需要 title/platform/url/summary。\n"
                 + "   - 严禁凭空编造候选中不存在的具体视频/课程/文章。\n"
                 + "   - summary 请写成“推荐理由 + 下一步行动”的形式，信息不全可以写“建议点击链接查看大纲/目录后决定是否学习”。\n"
-                + "   - url 必须以 https:// 开头；如果候选 url 为空或不合法，仅允许输出“平台搜索链接”（如 Bilibili/GitHub/Coursera/知乎/Medium/Google 的搜索链接）。\n"
+                + "   - url 必须以 https:// 开头；如果候选 url 为空或不合法，仅允许输出“平台搜索链接”（如 Bilibili/GitHub/知乎/慕课网 的搜索链接）。\n"
                 + "只输出严格 JSON 对象，不要 Markdown，不要额外文字。\n"
                 + "{\"advice\":\"...\",\"resources\":[{\"title\":\"...\",\"platform\":\"...\",\"url\":\"https://...\",\"summary\":\"...\"}]}\n";
 
@@ -650,7 +674,7 @@ public class ResourceService {
             return null;
         }
 
-        ResourceClient.ResourceAdviceResponse resp = new ResourceClient.ResourceAdviceResponse();
+        ResourceAdviceResult resp = new ResourceAdviceResult();
         resp.setTopic(topic);
         resp.setAdvice(root.path("advice").asText(""));
 
@@ -663,7 +687,7 @@ public class ResourceService {
         Set<String> seenUrls = new HashSet<>();
         Set<String> seenTitleKey = new HashSet<>();
         List<String> seenBases = new ArrayList<>();
-        List<ResourceClient.CourseResource> out = new ArrayList<>();
+        List<SearchResourceItem> out = new ArrayList<>();
         for (JsonNode n : arr) {
             if (n == null || !n.isObject()) continue;
             String title = n.path("title").asText(null);
@@ -691,7 +715,7 @@ public class ResourceService {
             if (isNearDuplicateBase(base, seenBases)) continue;
             seenBases.add(base);
 
-            ResourceClient.CourseResource dto = new ResourceClient.CourseResource();
+            SearchResourceItem dto = new SearchResourceItem();
             dto.setTitle(title != null && !title.isBlank() ? title : topic + " 学习资源");
             dto.setPlatform(platform);
             dto.setUrl(url);
@@ -743,7 +767,7 @@ public class ResourceService {
                     m.put("url", limitText(d.getSourceUrl(), 300));
                     m.put("summary", limitText(d.getContentSummary(), 260));
                     out.add(m);
-                    if (out.size() >= limit) break;
+                    if (out.size() >= limit * 2) break;
                 }
             }
 
@@ -767,7 +791,7 @@ public class ResourceService {
                     m.put("url", limitText(r.getSourceUrl(), 300));
                     m.put("summary", limitText(r.getContentSummary(), 260));
                     out.add(m);
-                    if (out.size() >= limit) break;
+                    if (out.size() >= limit * 2) break;
                 }
             }
 
@@ -778,57 +802,7 @@ public class ResourceService {
         }
     }
 
-    private void upsertFromModel(String topic, List<ResourceClient.CourseResource> resources) {
-        if (topic == null || topic.isBlank()) return;
-        if (resources == null || resources.isEmpty()) return;
-
-        for (ResourceClient.CourseResource r : resources) {
-            if (r == null) continue;
-            String url = canonicalUrl(r.getUrl());
-            if (url == null || url.isBlank()) continue;
-
-            CourseResource existing = courseResourceMapper.selectOne(new LambdaQueryWrapper<CourseResource>()
-                    .eq(CourseResource::getTopic, topic)
-                    .eq(CourseResource::getSourceUrl, url)
-                    .last("LIMIT 1"));
-
-            if (existing == null) {
-                CourseResource cr = new CourseResource();
-                cr.setTopic(topic);
-                cr.setTitle(r.getTitle());
-                cr.setPlatform(normalizePlatform(r.getPlatform(), url));
-                cr.setSourceUrl(url);
-                cr.setContentSummary(r.getSummary());
-                cr.setCreatedAt(LocalDateTime.now());
-                courseResourceMapper.insert(cr);
-                upsertToEs(cr);
-                continue;
-            }
-
-            boolean changed = false;
-            if ((existing.getTitle() == null || existing.getTitle().isBlank()) && r.getTitle() != null && !r.getTitle().isBlank()) {
-                existing.setTitle(r.getTitle());
-                changed = true;
-            }
-            if (existing.getPlatform() == null || existing.getPlatform().isBlank() || isInvalidPlatform(existing.getPlatform())) {
-                String p = normalizePlatform(r.getPlatform(), url);
-                if (p != null && !p.isBlank() && !isInvalidPlatform(p)) {
-                    existing.setPlatform(p);
-                    changed = true;
-                }
-            }
-            if ((existing.getContentSummary() == null || existing.getContentSummary().isBlank()) && r.getSummary() != null && !r.getSummary().isBlank()) {
-                existing.setContentSummary(r.getSummary());
-                changed = true;
-            }
-            if (changed) {
-                courseResourceMapper.updateById(existing);
-                upsertToEs(existing);
-            }
-        }
-    }
-
-    private ResourceClient.CourseResource toClientDto(String topic, CourseResourceDocument d) {
+    private SearchResourceItem toClientDto(String topic, CourseResourceDocument d) {
         if (d == null) return null;
 
         String url = canonicalUrl(d.getSourceUrl());
@@ -839,7 +813,7 @@ public class ResourceService {
             return null;
         }
 
-        ResourceClient.CourseResource dto = new ResourceClient.CourseResource();
+        SearchResourceItem dto = new SearchResourceItem();
         dto.setTitle(d.getTitle() != null && !d.getTitle().isBlank() ? d.getTitle() : topic + " 学习资源");
         dto.setPlatform(normalizePlatform(d.getPlatform(), url));
         dto.setUrl(url);
@@ -857,36 +831,39 @@ public class ResourceService {
             d.setSourceUrl(cr.getSourceUrl());
             d.setContentSummary(cr.getContentSummary());
             d.setCreatedAtEpochMillis(cr.getCreatedAt() != null ? cr.getCreatedAt().atZone(ZoneId.systemDefault()).toInstant().toEpochMilli() : null);
+            generateAndSetEmbedding(d);
             searchRepository.save(d);
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            log.warn("Failed to index resource to ES: {}", e.getMessage());
         }
     }
 
-    private void persistAiResources(String topic, List<ResourceClient.CourseResource> ai) {
-        if (ai == null || ai.isEmpty()) return;
-        for (ResourceClient.CourseResource r : ai) {
-            if (r == null) continue;
-            String url = canonicalUrl(r.getUrl());
-            if (url == null || url.isBlank()) continue;
+    private static String buildEmbeddingText(String topic, String title, String summary) {
+        StringBuilder sb = new StringBuilder();
+        if (topic != null && !topic.isBlank()) sb.append(topic).append(" ");
+        if (title != null && !title.isBlank()) sb.append(title).append(" ");
+        if (summary != null && !summary.isBlank()) sb.append(summary);
+        String result = sb.toString().trim();
+        if (result.length() > 6000) result = result.substring(0, 6000);
+        return result;
+    }
 
-            Long existing = courseResourceMapper.selectCount(new LambdaQueryWrapper<CourseResource>()
-                    .eq(CourseResource::getTopic, topic)
-                    .eq(CourseResource::getSourceUrl, url));
-            if (existing != null && existing > 0) continue;
-
-            CourseResource cr = new CourseResource();
-            cr.setTopic(topic);
-            cr.setTitle(r.getTitle());
-            cr.setPlatform(normalizePlatform(r.getPlatform(), url));
-            cr.setSourceUrl(url);
-            cr.setContentSummary(r.getSummary());
-            cr.setCreatedAt(LocalDateTime.now());
-            courseResourceMapper.insert(cr);
-            upsertToEs(cr);
+    private void generateAndSetEmbedding(CourseResourceDocument doc) {
+        if (embeddingModel == null) return;
+        try {
+            String text = buildEmbeddingText(doc.getTopic(), doc.getTitle(), doc.getContentSummary());
+            if (text.isBlank()) return;
+            float[] vector = embeddingModel.embed(text);
+            if (vector != null && vector.length > 0) {
+                doc.setEmbedding(vector);
+            }
+        } catch (Exception e) {
+            log.debug("Embedding generation failed for doc id={}: {}", doc.getId(), e.getMessage());
         }
     }
 
-    private String canonicalUrl(String url) {
+    // --- shared with BilibiliCrawlerService (package-private access) ---
+    static String canonicalUrl(String url) {
         if (url == null) return null;
         String u = url.trim();
         if (u.isEmpty()) return null;
@@ -957,13 +934,13 @@ public class ResourceService {
         }
     }
 
-    private List<ResourceClient.CourseResource> dedupeResources(String topic, List<ResourceClient.CourseResource> in, int limit) {
+    private List<SearchResourceItem> dedupeResources(String topic, List<SearchResourceItem> in, int limit) {
         if (in == null || in.isEmpty()) return List.of();
-        List<ResourceClient.CourseResource> out = new ArrayList<>();
+        List<SearchResourceItem> out = new ArrayList<>();
         Set<String> seenUrl = new HashSet<>();
         Set<String> seenTitleKey = new HashSet<>();
         List<String> seenBases = new ArrayList<>();
-        for (ResourceClient.CourseResource r : in) {
+        for (SearchResourceItem r : in) {
             if (r == null) continue;
             if (out.size() >= Math.max(1, limit)) break;
             String url = canonicalUrl(r.getUrl());
@@ -979,7 +956,7 @@ public class ResourceService {
             if (isNearDuplicateBase(base, seenBases)) continue;
             seenBases.add(base);
 
-            ResourceClient.CourseResource dto = new ResourceClient.CourseResource();
+            SearchResourceItem dto = new SearchResourceItem();
             dto.setTitle(title != null && !title.isBlank() ? title : topic + " 学习资源");
             dto.setPlatform(platform);
             dto.setUrl(url);
@@ -1011,6 +988,10 @@ public class ResourceService {
         if (lowered.contains("edx")) return "edX";
         if (lowered.contains("medium")) return "Medium";
         if (lowered.contains("google")) return "Google";
+        if (lowered.contains("imooc") || lowered.contains("慕课")) return "慕课网";
+        if (lowered.contains("juejin") || lowered.contains("掘金")) return "掘金";
+        if (lowered.contains("csdn")) return "CSDN";
+        if (lowered.contains("cnblogs") || lowered.contains("博客园")) return "博客园";
         if (p.length() > 30) return p.substring(0, 30);
         return p;
     }
@@ -1028,6 +1009,10 @@ public class ResourceService {
             if (host.contains("edx.org")) return "edX";
             if (host.contains("medium.com")) return "Medium";
             if (host.contains("google.com")) return "Google";
+            if (host.contains("imooc.com")) return "慕课网";
+            if (host.contains("juejin.cn")) return "掘金";
+            if (host.contains("csdn.net")) return "CSDN";
+            if (host.contains("cnblogs.com")) return "博客园";
             return null;
         } catch (Exception e) {
             return null;
@@ -1050,7 +1035,7 @@ public class ResourceService {
         return t.substring(0, maxLen);
     }
 
-    private List<ResourceClient.CourseResource> recommendByAi(String topic) {
+    private List<SearchResourceItem> recommendByAi(String topic) {
         String prompt = ""
                 + "你是学习资源推荐助手。请为主题推荐 8 条学习资源入口。\n"
                 + "重要：url 必须是真实平台的搜索链接（如 B站搜索、GitHub搜索、知乎搜索等），不要编造具体课程URL。\n"
@@ -1080,7 +1065,7 @@ public class ResourceService {
             return List.of();
         }
 
-        List<ResourceClient.CourseResource> out = new ArrayList<>();
+        List<SearchResourceItem> out = new ArrayList<>();
         for (JsonNode n : arr) {
             if (n == null || !n.isObject()) continue;
             String title = n.path("title").asText(null);
@@ -1093,7 +1078,7 @@ public class ResourceService {
             if (url == null || !url.startsWith("https://")) {
                 continue;
             }
-            ResourceClient.CourseResource dto = new ResourceClient.CourseResource();
+            SearchResourceItem dto = new SearchResourceItem();
             dto.setTitle(title != null && !title.isBlank() ? title : topic + " 学习资源");
             dto.setPlatform(platform != null && !platform.isBlank() ? platform : "推荐");
             dto.setUrl(url);
@@ -1278,7 +1263,7 @@ public class ResourceService {
         return false;
     }
 
-    private int bigramMatchCount(String q, String t, String s) {
+    static int bigramMatchCount(String q, String t, String s) {
         if (q == null || q.isBlank()) return 0;
         String a = t != null ? t : "";
         String b = s != null ? s : "";
@@ -1298,7 +1283,7 @@ public class ResourceService {
         return hit;
     }
 
-    private String normalizeText(String s) {
+    static String normalizeText(String s) {
         if (s == null) return "";
         String t = s.trim().toLowerCase();
         StringBuilder sb = new StringBuilder(t.length());
@@ -1315,7 +1300,7 @@ public class ResourceService {
         return sb.toString();
     }
 
-    private double bigramSimilarity(String a, String b) {
+    static double bigramSimilarity(String a, String b) {
         if (a == null || b == null) return 0.0;
         String x = a.trim();
         String y = b.trim();
@@ -1345,229 +1330,93 @@ public class ResourceService {
         return (2.0 * inter) / (nx + ny);
     }
 
-    private List<ResourceClient.CourseResource> defaultResources(String topic) {
+    /**
+     * Try all platform crawlers for real-time results as search fallback.
+     */
+    private List<SearchResourceItem> fetchFromAllCrawlers(String topic) {
+        List<SearchResourceItem> out = new ArrayList<>();
+        // Bilibili (existing)
+        try {
+            List<SearchResourceItem> r = bilibiliCrawlerService.fetchBilibiliCandidates(topic, topic, 6);
+            if (r != null) {
+                for (SearchResourceItem c : r) {
+                    if (c != null && c.getUrl() != null) {
+                        out.add(c);
+                        bilibiliCrawlerService.saveIfNew(topic, c);
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        // GitHub
+        try {
+            List<SearchResourceItem> r = crawlerOrchestrator.github().fetchCandidates(topic, topic, 3);
+            if (r != null) {
+                for (SearchResourceItem c : r) {
+                    if (c != null && c.getUrl() != null) out.add(c);
+                }
+            }
+        } catch (Exception ignored) {}
+        // Juejin
+        try {
+            List<SearchResourceItem> r = crawlerOrchestrator.juejin().fetchCandidates(topic, topic, 3);
+            if (r != null) {
+                for (SearchResourceItem c : r) {
+                    if (c != null && c.getUrl() != null) out.add(c);
+                }
+            }
+        } catch (Exception ignored) {}
+        // Imooc
+        try {
+            List<SearchResourceItem> r = crawlerOrchestrator.imooc().fetchCandidates(topic, topic, 3);
+            if (r != null) {
+                for (SearchResourceItem c : r) {
+                    if (c != null && c.getUrl() != null) out.add(c);
+                }
+            }
+        } catch (Exception ignored) {}
+        // CSDN
+        try {
+            List<SearchResourceItem> r = crawlerOrchestrator.csdn().fetchCandidates(topic, topic, 3);
+            if (r != null) {
+                for (SearchResourceItem c : r) {
+                    if (c != null && c.getUrl() != null) out.add(c);
+                }
+            }
+        } catch (Exception ignored) {}
+        // Cnblogs
+        try {
+            List<SearchResourceItem> r = crawlerOrchestrator.cnblogs().fetchCandidates(topic, topic, 3);
+            if (r != null) {
+                for (SearchResourceItem c : r) {
+                    if (c != null && c.getUrl() != null) out.add(c);
+                }
+            }
+        } catch (Exception ignored) {}
+        return out;
+    }
+
+    private List<SearchResourceItem> defaultResources(String topic) {
         String t = topic != null ? topic.trim() : "";
         if (t.isBlank()) {
             t = "学习";
         }
-        List<ResourceClient.CourseResource> out = new ArrayList<>();
-
-        out.add(make("官方文档/规范 搜索：" + t, "Google", "https://www.google.com/search?q=" + URLEncoder.encode(t + " 官方文档", StandardCharsets.UTF_8), "优先找官方文档与权威资料"));
-        out.add(make("GitHub 搜索：" + t, "GitHub", "https://github.com/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "找开源项目/示例/最佳实践"));
+        List<SearchResourceItem> out = new ArrayList<>();
         out.add(make("B站 搜索：" + t, "Bilibili", "https://search.bilibili.com/all?keyword=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "适合入门视频与实战课"));
-        out.add(make("知乎 搜索：" + t, "知乎", "https://www.zhihu.com/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "适合概念梳理与经验贴"));
-        out.add(make("Coursera 搜索：" + t, "Coursera", "https://www.coursera.org/search?query=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "系统化课程"));
-        out.add(make("edX 搜索：" + t, "edX", "https://www.edx.org/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "系统化课程"));
-        out.add(make("Medium 搜索：" + t, "Medium", "https://medium.com/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "英文技术文章"));
-        out.add(make("Google 搜索：" + t, "Google", "https://www.google.com/search?q=" + URLEncoder.encode(t + " 教程", StandardCharsets.UTF_8), "泛检索：教程/博客/资料合集"));
-
+        out.add(make("慕课网 搜索：" + t, "慕课网", "https://www.imooc.com/search/?words=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "国内主流IT技能学习平台"));
+        out.add(make("CSDN 搜索：" + t, "CSDN", "https://so.csdn.net/so/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8) + "&t=blog", "技术博客与实战教程"));
+        out.add(make("掘金 搜索：" + t, "掘金", "https://juejin.cn/search?query=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "前端/后端/面试经验社区"));
+        out.add(make("知乎 搜索：" + t, "知乎", "https://www.zhihu.com/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "概念梳理与经验贴"));
+        out.add(make("GitHub 搜索：" + t, "GitHub", "https://github.com/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8), "开源项目/示例/最佳实践"));
+        out.add(make("博客园 搜索：" + t, "博客园", "https://www.cnblogs.com/search?q=" + URLEncoder.encode(t, StandardCharsets.UTF_8), ".NET/Java/全栈技术博客"));
         return out;
     }
 
-    private ResourceClient.CourseResource make(String title, String platform, String url, String summary) {
-        ResourceClient.CourseResource dto = new ResourceClient.CourseResource();
+    private SearchResourceItem make(String title, String platform, String url, String summary) {
+        SearchResourceItem dto = new SearchResourceItem();
         dto.setTitle(title);
         dto.setPlatform(platform);
         dto.setUrl(url);
         dto.setSummary(summary);
         return dto;
     }
-    @Scheduled(initialDelayString = "${smartplanner.crawler.bilibili.initial-delay-ms:120000}", fixedDelayString = "${smartplanner.crawler.bilibili.interval-ms:21600000}")
-    public void scheduledBilibiliCrawl() {
-        if (!bilibiliCrawlerEnabled) return;
-        if (!crawlerRunning.compareAndSet(false, true)) return;
-        try {
-            Set<String> topics = new LinkedHashSet<>();
-            // 1. Get topics from existing resource DB
-            try {
-                List<CourseResource> existing = courseResourceMapper.selectList(null);
-                if (existing != null) {
-                    for (CourseResource r : existing) {
-                        if (r.getTopic() != null && !r.getTopic().isBlank()) {
-                            topics.add(r.getTopic().trim());
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("Failed to load existing topics from DB: {}", e.getMessage());
-            }
-            // 2. Add topics from user goals (learning interests)
-            try {
-                Result<java.util.List<String>> topicsResult = goalClient.getDistinctTopics();
-                java.util.List<String> goalTopics = topicsResult != null ? topicsResult.getData() : java.util.List.of();
-                if (goalTopics != null) {
-                    for (String t : goalTopics) {
-                        if (t != null && !t.isBlank()) {
-                            topics.add(t.trim());
-                        }
-                    }
-                }
-                log.debug("Added {} goal-based topics to crawler", goalTopics != null ? goalTopics.size() : 0);
-            } catch (Exception e) {
-                log.warn("Failed to get goal topics: {}", e.getMessage());
-            }
-            // 3. Add configured seed topics
-            if (bilibiliCrawlerTopics != null && !bilibiliCrawlerTopics.isBlank()) {
-                for (String t : bilibiliCrawlerTopics.split(",")) {
-                    String trimmed = t.trim();
-                    if (!trimmed.isEmpty()) topics.add(trimmed);
-                }
-            }
-            if (topics.isEmpty()) return;
-
-            log.info("Bilibili crawler started: {} topics, limit {} per topic", topics.size(), bilibiliCrawlerPerTopicLimit);
-            int totalNew = 0;
-            for (String topic : topics) {
-                try {
-                    List<ResourceClient.CourseResource> candidates = fetchBilibiliCandidates(topic, topic, bilibiliCrawlerPerTopicLimit);
-                    for (ResourceClient.CourseResource c : candidates) {
-                        if (saveIfNew(topic, c)) totalNew++;
-                    }
-                } catch (Exception e) {
-                    log.warn("Crawl failed for topic {}: {}", topic, e.getMessage());
-                }
-            }
-            log.info("Bilibili crawler finished: {} new resources saved", totalNew);
-        } finally {
-            crawlerRunning.set(false);
-        }
-    }
-
-    private boolean saveIfNew(String topic, ResourceClient.CourseResource c) {
-        if (topic == null || c == null || c.getUrl() == null) return false;
-        // Check duplicate by URL
-        Long count = courseResourceMapper.selectCount(
-                new LambdaQueryWrapper<CourseResource>().eq(CourseResource::getSourceUrl, c.getUrl()));
-        if (count != null && count > 0) return false;
-
-        CourseResource entity = new CourseResource();
-        entity.setTopic(topic);
-        entity.setTitle(c.getTitle());
-        entity.setSourceUrl(c.getUrl());
-        entity.setPlatform(c.getPlatform());
-        entity.setContentSummary(c.getSummary());
-        entity.setCreatedAt(LocalDateTime.now());
-        courseResourceMapper.insert(entity);
-
-        // Index to ES
-        try {
-            CourseResourceDocument doc = new CourseResourceDocument();
-            doc.setId(entity.getId());
-            doc.setTopic(topic);
-            doc.setTitle(entity.getTitle());
-            doc.setPlatform(entity.getPlatform());
-            doc.setSourceUrl(entity.getSourceUrl());
-            doc.setContentSummary(entity.getContentSummary());
-            doc.setCreatedAtEpochMillis(entity.getCreatedAt() != null ? entity.getCreatedAt().atZone(java.time.ZoneId.of("Asia/Shanghai")).toInstant().toEpochMilli() : System.currentTimeMillis());
-            searchRepository.save(doc);
-        } catch (Exception e) {
-            log.warn("Failed to index resource to ES: {}", e.getMessage());
-        }
-        return true;
-    }
-
-    private String httpGetTextWithUA(String url, String userAgent, String referer, String origin) {
-        int maxRetries = 2;
-        for (int attempt = 0; attempt <= maxRetries; attempt++) {
-            try {
-                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(10000);
-                conn.setRequestProperty("User-Agent", userAgent);
-                conn.setRequestProperty("Referer", referer);
-                if (origin != null) conn.setRequestProperty("Origin", origin);
-                conn.setRequestProperty("Accept", "application/json, text/plain, */*");
-                conn.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9");
-                conn.setInstanceFollowRedirects(true);
-                int code = conn.getResponseCode();
-                if (code >= 200 && code < 300) {
-                    byte[] bytes = conn.getInputStream().readAllBytes();
-                    return new String(bytes, StandardCharsets.UTF_8);
-                }
-                if (code == 429 || code >= 500) {
-                    if (attempt < maxRetries) {
-                        try { Thread.sleep((attempt + 1) * 1000L); } catch (InterruptedException ignored) {}
-                        continue;
-                    }
-                }
-                return null;
-            } catch (Exception e) {
-                if (attempt < maxRetries) {
-                    try { Thread.sleep((attempt + 1) * 500L); } catch (InterruptedException ignored) {}
-                } else {
-                    log.debug("httpGetTextWithUA failed after {} retries: {}", maxRetries, e.getMessage());
-                    return null;
-                }
-            }
-        }
-        return null;
-    }
-
-    List<ResourceClient.CourseResource> fetchBilibiliCandidates(String query, String topic, int limit) {
-        String q = query != null ? query.trim() : "";
-        if (q.isEmpty()) return List.of();
-        String apiUrl = "https://api.bilibili.com/x/web-interface/search/all/v2?keyword=" + java.net.URLEncoder.encode(q, java.nio.charset.StandardCharsets.UTF_8);
-        String json = httpGetTextWithUA(apiUrl,
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "https://www.bilibili.com/",
-                "https://www.bilibili.com");
-        if (json == null || json.isBlank()) return List.of();
-        List<ResourceClient.CourseResource> out = new ArrayList<>();
-        try {
-            JsonNode root = objectMapper.readTree(json);
-            if (root.path("code").asInt() != 0) return out;
-            JsonNode result = root.path("data").path("result");
-            if (!result.isArray()) return out;
-            outer:
-            for (JsonNode category : result) {
-                if (out.size() >= limit) break;
-                if (!"video".equals(category.path("result_type").asText())) continue;
-                JsonNode items = category.path("data");
-                if (!items.isArray()) continue;
-                for (JsonNode item : items) {
-                    if (out.size() >= limit) continue outer;
-                    String arcurl = item.path("arcurl").asText();
-                    String bvid = item.path("bvid").asText();
-                    String title = item.path("title").asText().replaceAll("<[^>]+>", "").trim();
-                    int play = item.path("play").asInt();
-                    String author = item.path("author").asText();
-                    String description = item.path("description").asText().replaceAll("<[^>]+>", "").trim();
-                    int duration = parseBilibiliDuration(item.path("duration").asText());
-                    if (title.isBlank()) continue;
-                    String url = !arcurl.isBlank() ? arcurl : (!bvid.isBlank() ? "https://www.bilibili.com/video/" + bvid : "");
-                    if (url.isBlank()) continue;
-                    // Build richer summary
-                    StringBuilder summary = new StringBuilder();
-                    if (!author.isBlank()) summary.append("UP主: ").append(author).append(" | ");
-                    summary.append("播放: ").append(play);
-                    if (duration > 0) summary.append(" | ").append(duration).append("分钟");
-                    if (!description.isBlank()) summary.append(" | ").append(description);
-                    ResourceClient.CourseResource r = new ResourceClient.CourseResource();
-                    r.setTitle(title);
-                    r.setPlatform("B站");
-                    r.setUrl(url);
-                    r.setSummary(summary.toString());
-                    out.add(r);
-                }
-            }
-        } catch (Exception e) {
-            log.warn("Bilibili crawl failed: query={}, err={}", q, e.getMessage());
-        }
-        return out;
-    }
-
-    private int parseBilibiliDuration(String duration) {
-        if (duration == null || duration.isBlank()) return 0;
-        try {
-            String[] parts = duration.split(":");
-            if (parts.length == 2) {
-                return Integer.parseInt(parts[0]) + (Integer.parseInt(parts[1]) >= 30 ? 1 : 0);
-            } else if (parts.length == 3) {
-                return Integer.parseInt(parts[0]) * 60 + Integer.parseInt(parts[1]);
-            }
-        } catch (NumberFormatException ignored) {
-        }
-        return 0;
-    }
-
 }

@@ -1,11 +1,14 @@
 package com.chao.common.util;
 
+import lombok.extern.slf4j.Slf4j;
+
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Locale;
 
+@Slf4j
 public class DateUtils {
     public static LocalDateTime parseLocalDateTime(String s) {
         if (s == null) {
@@ -51,6 +54,7 @@ public class DateUtils {
             return d.atStartOfDay();
         } catch (DateTimeParseException ignored) {
         }
+        log.warn("无法解析日期字符串: {}", s);
         return null;
     }
 }

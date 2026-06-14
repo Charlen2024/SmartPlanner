@@ -4,8 +4,12 @@ server:
 spring:
   application:
     name: user-service
+  boot:
+    admin:
+      client:
+        url: http://admin-server:9090
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/vibe_user?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true}
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/sp_user?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true}
     username: ${SPRING_DATASOURCE_USERNAME:root}
     password: ${SPRING_DATASOURCE_PASSWORD:root}
   sql:
@@ -39,7 +43,7 @@ spring:
 
 security:
   jwt:
-    issuer: ${JWT_ISSUER:http://vibe}
+    issuer: ${JWT_ISSUER:http://sp}
     access-ttl-seconds: ${JWT_ACCESS_TTL_SECONDS:3600}
     refresh-ttl-seconds: ${JWT_REFRESH_TTL_SECONDS:604800}
 
@@ -48,6 +52,18 @@ auth:
     username: ${AUTH_DEMO_USERNAME:demo}
     password: ${AUTH_DEMO_PASSWORD:demo123}
     roles: ${AUTH_DEMO_ROLES:USER}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+  endpoint:
+    health:
+      show-details: always
+  health:
+    redis:
+      enabled: false
 
 mybatis-plus:
   configuration:

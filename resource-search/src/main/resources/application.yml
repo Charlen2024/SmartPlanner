@@ -10,8 +10,12 @@ server:
 spring:
   application:
     name: resource-search
+  boot:
+    admin:
+      client:
+        url: http://admin-server:9090
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/vibe_resource?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true}
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/sp_resource?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true}
     username: root
     password: root
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -30,18 +34,60 @@ spring:
       chat:
         options:
           model: ${MODEL:qwen-max}
+      embedding:
+        options:
+          model: text-embedding-v2
 
 smartplanner:
+  http:
+    proxy-host: ${SMARTPLANNER_HTTP_PROXY_HOST:}
+    proxy-port: ${SMARTPLANNER_HTTP_PROXY_PORT:0}
   ai:
     rag-timeout-seconds: 45
+  search:
+    vector:
+      enabled: true
+      reindex-on-startup: true
   crawler:
+    quality-filter:
+      enabled: true
     bilibili:
       enabled: true
       topics: "Java,Spring Boot,Python,Vue,数据结构,算法,计算机网络,操作系统,数据库,机器学习,前端,Linux,Go,Rust,分布式,微服务,设计模式,计算机组成原理"
       interval-ms: 21600000
       per-topic-limit: 8
       initial-delay-ms: 120000
+      query-suffixes: "教程,入门,基础,实战,考试,备考,面试,项目"
+    github:
+      enabled: true
+      per-topic-limit: 5
+      query-suffixes: "tutorial,guide,project,examples,course"
+    juejin:
+      enabled: true
+      per-topic-limit: 5
+      query-suffixes: "教程,入门,实战,面试,项目"
+    imooc:
+      enabled: true
+      per-topic-limit: 5
+      query-suffixes: "入门,实战,项目"
+    csdn:
+      enabled: true
+      per-topic-limit: 5
+      query-suffixes: "教程,入门,实战,面试"
+    cnblogs:
+      enabled: true
+      per-topic-limit: 5
+      query-suffixes: "教程,入门,实战,面试"
 
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+  endpoint:
+    health:
+      show-details: always

@@ -2,11 +2,11 @@ package com.chao.resource.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.client.ResourceClient;
+import com.chao.common.dto.SearchResourceItem;
 import com.chao.resource.mapper.CourseResourceMapper;
 import com.chao.resource.search.CourseResourceSearchRepository;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
 
 import java.util.*;
 
@@ -16,10 +16,9 @@ public class ResourceServiceCrawlerTest {
 
     @Test
     public void testBilibiliCrawl() throws Exception {
-        ResourceService svc = createMinimalService();
+        BilibiliCrawlerService svc = createMinimalService();
 
-        // Test direct API call first
-        java.lang.reflect.Method httpMethod = ResourceService.class.getDeclaredMethod(
+        java.lang.reflect.Method httpMethod = BilibiliCrawlerService.class.getDeclaredMethod(
                 "httpGetTextWithUA", String.class, String.class, String.class, String.class);
         httpMethod.setAccessible(true);
         String json = (String) httpMethod.invoke(svc,
@@ -30,33 +29,21 @@ public class ResourceServiceCrawlerTest {
         System.out.println("Raw JSON length: " + (json != null ? json.length() : 0));
         System.out.println("Raw JSON preview: " + (json != null ? json.substring(0, Math.min(200, json.length())) : "null"));
 
-        // Then test parsing
-        java.lang.reflect.Method method = ResourceService.class.getDeclaredMethod(
-                "fetchBilibiliCandidates", String.class, String.class, int.class);
-        method.setAccessible(true);
-
         @SuppressWarnings("unchecked")
-        List<ResourceClient.CourseResource> resources =
-                (List<ResourceClient.CourseResource>) method.invoke(svc, "Java", "Java", 3);
+        List<SearchResourceItem> resources = svc.fetchBilibiliCandidates("Java", "Java", 3);
 
         Assertions.assertNotNull(resources);
         System.out.println("Bilibili result count: " + resources.size());
-        for (ResourceClient.CourseResource r : resources) {
+        for (SearchResourceItem r : resources) {
             System.out.println("  - " + r.getTitle() + " [" + r.getPlatform() + "] " + r.getUrl());
         }
     }
 
     @Test
     public void testCrawlWithEmptyQuery() throws Exception {
-        ResourceService svc = createMinimalService();
-        java.lang.reflect.Method method = ResourceService.class.getDeclaredMethod(
-                "fetchBilibiliCandidates", String.class, String.class, int.class);
-        method.setAccessible(true);
+        BilibiliCrawlerService svc = createMinimalService();
 
-        @SuppressWarnings("unchecked")
-        List<ResourceClient.CourseResource> resources =
-                (List<ResourceClient.CourseResource>) method.invoke(svc, "", "test", 3);
-
+        List<SearchResourceItem> resources = svc.fetchBilibiliCandidates("", "test", 3);
         Assertions.assertTrue(resources.isEmpty());
     }
 
@@ -83,16 +70,16 @@ public class ResourceServiceCrawlerTest {
         System.out.println("Dedup topics: " + topics);
     }
 
-    private ResourceService createMinimalService() throws Exception {
-        java.lang.reflect.Constructor<ResourceService> ctor =
-                ResourceService.class.getDeclaredConstructor(
+    private BilibiliCrawlerService createMinimalService() throws Exception {
+        java.lang.reflect.Constructor<BilibiliCrawlerService> ctor =
+                BilibiliCrawlerService.class.getDeclaredConstructor(
                         CourseResourceMapper.class,
                         CourseResourceSearchRepository.class,
-                        ElasticsearchOperations.class,
-                        com.chao.common.ai.OpenAiCompatClient.class,
-                        ObjectMapper.class,
-                        com.chao.common.client.GoalClient.class);
+                        com.chao.common.client.GoalClient.class,
+                        org.springframework.web.client.RestTemplate.class,
+                        java.util.concurrent.Executor.class,
+                        ObjectMapper.class);
         ctor.setAccessible(true);
-        return ctor.newInstance(null, null, null, null, objectMapper, null);
+        return ctor.newInstance(null, null, null, null, null, objectMapper);
     }
 }

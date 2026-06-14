@@ -3,6 +3,7 @@ package com.chao.resource.service;
 import com.chao.common.client.ResourceClient;
 import com.chao.common.config.RabbitMqConfig;
 import com.chao.common.dto.NotificationMessage;
+import com.chao.common.dto.ResourceAdviceResult;
 import com.chao.common.dto.ResourceAdviceJobMessage;
 import com.chao.common.dto.ResourceAdviceJobStartRequest;
 import com.chao.common.dto.ResourceAdviceJobStartResponse;
@@ -83,7 +84,7 @@ public class ResourceAdviceJobService {
         if (!"RUNNING".equals(state.status)) return;
         update(state, "RUNNING", "RUNNING", 10, "正在生成建议与资源列表");
         try {
-            ResourceClient.ResourceAdviceResponse resp = resourceService.searchResourcesWithAdvice(state.topic);
+            ResourceAdviceResult resp = resourceService.searchResourcesWithAdvice(state.topic);
             state.result = resp;
             update(state, "DONE", "DONE", 100, "已生成");
             sendNotification(state.userId, "RESOURCE_ADVICE_DONE", "资源推荐已生成，快去查看吧！");
@@ -147,7 +148,7 @@ public class ResourceAdviceJobService {
         private Integer progress;
         private String message;
         private String error;
-        private ResourceClient.ResourceAdviceResponse result;
+        private ResourceAdviceResult result;
         private long createdAt;
         private long updatedAt;
 

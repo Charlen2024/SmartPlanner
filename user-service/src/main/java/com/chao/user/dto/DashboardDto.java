@@ -5,6 +5,7 @@ import com.chao.common.client.ScheduleClient;
 import com.chao.common.dto.ClassScheduleDto;
 import com.chao.common.dto.GoalDto;
 import com.chao.common.dto.GoalTaskDto;
+import com.chao.common.dto.SearchResourceItem;
 import com.chao.common.dto.TaskScheduleDto;
 import lombok.Data;
 
@@ -18,7 +19,7 @@ public class DashboardDto {
     private List<ScheduleClient.TimeSlot> freeTimeSlots;
     private List<TaskScheduleDto> taskSchedules;
     private Long streak;
-    private List<ResourceClient.CourseResource> resources;
+    private List<SearchResourceItem> resources;
     private List<ClassScheduleDto> classes;
 }
 

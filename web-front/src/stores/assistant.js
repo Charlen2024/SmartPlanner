@@ -1,8 +1,6 @@
 import { defineStore } from 'pinia'
-import { marked } from 'marked'
 import api from '../plugins/api'
-
-marked.setOptions({ breaks: true, gfm: true })
+import { renderMarkdown, renderMarkdownStreaming } from '../plugins/markdown'
 
 function sanitizeHtml(html) {
   if (!html) return ''
@@ -17,17 +15,41 @@ function sanitizeHtml(html) {
     .replace(/javascript\s*:/gi, '')
 }
 
-function renderAiHtml(text) {
-  if (!text) return ''
-  try {
-    // 修复 LLM 输出的 markdown 格式问题：##Heading → ## Heading，-item → - item
-    let fixed = text
-      .replace(/^(#{1,6})([^\s#])/gm, '$1 $2')
-      .replace(/^(\s*)([-*])([^\s])/gm, '$1$2 $3')
-    return sanitizeHtml(marked.parse(fixed))
-  } catch {
-    return text
+function normalizeWhitespace(text) {
+  return text
+    .replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+// Auto-link known app paths like /journals /punch that appear as plain text
+function autoLinkNavPaths(text) {
+  const paths = ['/journals', '/punch', '/goals', '/schedule', '/resources', '/profile', '/games/2048']
+  // Protect existing markdown links [text](/path) from being double-processed
+  const protected_ = new Map()
+  let idx = 0
+  let work = text.replace(/\]\((\/[a-z0-9\-\/]+)\)/g, (match) => {
+    const key = `__PROTECTED_LINK_${idx}__`
+    protected_.set(key, match)
+    idx++
+    return key
+  })
+  for (const path of paths) {
+    const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const re = new RegExp(`(?<![\\w([/])${escaped}(?![\\w)\\]])`, 'g')
+    work = work.replace(re, `[${path}](${path})`)
   }
+  for (const [key, original] of protected_) {
+    work = work.replace(key, original)
+  }
+  return work
+}
+
+function renderAiHtml(text, streaming = false) {
+  if (!text) return ''
+  const fixed = autoLinkNavPaths(normalizeWhitespace(text))
+  const html = streaming ? renderMarkdownStreaming(fixed) : renderMarkdown(fixed)
+  return html ? sanitizeHtml(html) : text
 }
 
 const NAV_ITEMS = [
@@ -72,17 +94,59 @@ function extractNavTarget(raw) {
   return null
 }
 
+// Normalize markdown links to plain paths, e.g. [/punch](/punch) → /punch
+function normalizeNavLinks(text) {
+  return String(text || '').replace(/\[([^\]]*)\]\((\/[a-z0-9\-\/]+)\)/g, '$2')
+}
+
 function extractNavigateDirective(text) {
   const out = []
-  for (const line of String(text || '').split('\n')) {
-    const m = String(line || '').match(/(?:跳转|打开|进入)\s*[:：]?\s*(\/[a-z0-9\-\/]+)/i)
-    if (m?.[1] && NAV_ITEMS.some((x) => x.to === m[1]) && !out.includes(m[1])) out.push(m[1])
+  // Match both single-path "跳转: /punch" and multi-path "跳转: /punch | /journals"
+  const re = /(?:跳转|打开|进入)\s*[:：]?\s*(\/[a-z0-9\-\/]+(?:\s*[|,，、]\s*\/[a-z0-9\-\/]+)*)/gi
+  for (let line of String(text || '').split('\n')) {
+    line = normalizeNavLinks(line)
+    let m
+    while ((m = re.exec(line)) !== null) {
+      const paths = m[1].split(/[|,，、]/).map(p => p.trim()).filter(Boolean)
+      for (const p of paths) {
+        if (NAV_ITEMS.some((x) => x.to === p) && !out.includes(p)) out.push(p)
+      }
+    }
   }
   return out
 }
 
 function stripNavigateDirective(text) {
-  return String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/(?:跳转|打开|进入)\s*[:：]?\s*\/[a-z0-9\-\/]+/gi, '').replace(/\n{3,}/g, '\n\n').trim()
+  return String(text || '')
+    .replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    .split('\n')
+    .filter(line => {
+      const normalized = normalizeNavLinks(line)
+      return !/^(?:跳转|打开|进入)\s*[:：]?\s*(?:\/[a-z0-9\-\/]+[\s|,，、]*)+$/gi.test(normalized)
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n').trim()
+}
+
+const TOOL_FRIENDLY_NAME = {
+  listGoals: '正在查看你的目标',
+  listPendingTasks: '正在获取待办任务',
+  listGoalTasks: '正在获取目标任务',
+  listTodaySchedules: '正在查询今日排程',
+  listTaskSchedules: '正在查询排程',
+  listClasses: '正在查询课表',
+  listPunchRecords: '正在查询打卡记录',
+  listRecentJournals: '正在查询随笔',
+  searchPersonalData: '正在检索个人资料',
+  getWeather: '正在查询天气',
+}
+
+function mapToolName(raw) {
+  if (!raw) return null
+  // Strip arguments, keep only the tool name
+  const toolName = raw.split(/[(\s]/)[0]?.trim()
+  if (!toolName) return raw
+  return TOOL_FRIENDLY_NAME[toolName] || ('正在执行: ' + toolName)
 }
 
 function dedupParagraphs(text) {
@@ -145,13 +209,14 @@ function nextMsgId() { return 'm_' + (++_msgIdCounter) + '_' + Date.now() }
 export const useAssistantStore = defineStore('assistant', {
   state: () => ({
     initialized: false, minimized: false, x: null, y: null, width: 380, height: 520,
-    adviceText: '', chatOpen: false, chatInput: '', chatLoading: false, chatMessages: [], navRequest: null,
+    chatInput: '', chatLoading: false, chatMessages: [], navRequest: null,
   }),
   actions: {
     async init() {
       if (this.initialized) return
       this.initialized = true
-      this.adviceText = '欢迎回来，先照顾好自己。'
+      // Pre-build agent on page load so first chat is fast
+      api.post('/agent/warmup').catch(() => {})
     },
     setRect({ x, y, width, height }) {
       if (Number.isFinite(x)) this.x = x
@@ -169,16 +234,13 @@ export const useAssistantStore = defineStore('assistant', {
         this.y = ny
       }
     },
-    openChat() { this.chatOpen = true; this.minimized = false },
-    closeChat() { this.chatOpen = false },
     requestNavigate(to, title) {
       if (!to) return
       this.navRequest = { to: String(to), title: String(title || to), at: Date.now() }
     },
     clearNavRequest() { this.navRequest = null },
     setCareText(text) {
-      const t = String(text || '').trim()
-      if (t) this.adviceText = t
+      // hook for DefaultLayout SSE AGENT_REMINDER
     },
     async sendChat() {
       const text = String(this.chatInput ?? '').trim()
@@ -197,54 +259,138 @@ export const useAssistantStore = defineStore('assistant', {
         aiMsg = { _key: nextMsgId(), role: 'assistant', text: '' }
         this.chatMessages.push(aiMsg)
         aiMsg = this.chatMessages[this.chatMessages.length - 1]
-        const token = localStorage.getItem('accessToken')
-        const ctrl = new AbortController()
-        const t = setTimeout(() => ctrl.abort(), 120000)
-        try {
-          const res = await fetch('/api/user/agent/chat/stream', {
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
-            body: text, signal: ctrl.signal,
-          })
-          if (!res.ok) throw new Error('HTTP ' + res.status)
-          const reader = res.body?.getReader?.()
-          if (!reader) { aiMsg.text = String(await res.text() || '服务返回为空'); return }
-          const decoder = new TextDecoder('utf-8')
-          let buf = '', sseBuf = '', lastFlush = 0, lastFlushed = ''
-          const flush = () => { if (buf !== lastFlushed) { lastFlushed = buf; aiMsg.text = buf; lastFlush = Date.now() } }
-          const processSSE = () => {
-            const lines = sseBuf.split('\n'); sseBuf = lines.pop() || ''
-            let data = [], inData = false, inEvent = false
-            for (const l of lines) {
-              if (l.startsWith('event:')) { inData = false; inEvent = true }
-              else if (l.startsWith('data:')) { if (!inEvent) data.push(l.slice(5).trimStart()); inData = true; inEvent = false }
-              else if (inData && !inEvent) data.push(l)
+
+        let token = localStorage.getItem('accessToken')
+        let streamRes = null
+
+        const doStream = async (accessToken) => {
+          const ctrl = new AbortController()
+          const t = setTimeout(() => ctrl.abort(), 120000)
+          try {
+            const res = await fetch('/api/agent/chat/stream', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...(accessToken ? { Authorization: 'Bearer ' + accessToken } : {}) },
+              body: JSON.stringify({ message: text }), signal: ctrl.signal,
+            })
+            if (res.status === 401) return { needRefresh: true }
+            if (!res.ok) throw new Error('HTTP ' + res.status)
+            return { res }
+          } finally { clearTimeout(t) }
+        }
+
+        const first = await doStream(token)
+        if (first.needRefresh) {
+          const refreshToken = localStorage.getItem('refreshToken')
+          if (refreshToken) {
+            try {
+              const refreshRes = await api.post('/auth/refresh', { refreshToken })
+              const newAccess = refreshRes?.data?.data?.accessToken
+              const newRefresh = refreshRes?.data?.data?.refreshToken
+              if (newAccess) {
+                localStorage.setItem('accessToken', newAccess)
+                if (newRefresh) localStorage.setItem('refreshToken', newRefresh)
+                token = newAccess
+                const retry = await doStream(token)
+                if (retry.res) streamRes = retry.res
+                else if (retry.needRefresh) throw new Error('会话已过期，请重新登录')
+              } else {
+                throw new Error('会话已过期，请重新登录')
+              }
+            } catch (e) {
+              if (e.message === '会话已过期，请重新登录') throw e
+              const retry2 = await doStream(token)
+              if (retry2.res) streamRes = retry2.res
+              else throw new Error('服务异常，请稍后再试')
             }
-            if (data.length) {
-              while (data.length && data[data.length - 1] === '') data.pop()
-              const chunk = data.join('\n')
-              if (chunk && !buf.endsWith(chunk)) buf += chunk
+          }
+        } else if (first.res) {
+          streamRes = first.res
+        }
+
+        if (!streamRes) {
+          aiMsg.text = '服务连接失败，请稍后再试'
+          return
+        }
+
+        const reader = streamRes.body?.getReader?.()
+        if (!reader) { aiMsg.text = String(await streamRes.text() || '服务返回为空'); return }
+        const decoder = new TextDecoder('utf-8')
+        let buf = '', sseBuf = '', lastFlush = 0, lastFlushed = '', pendingToolLine = ''
+        const MIN_FIRST_FLUSH = 20 // wait until we have enough text to avoid fragmenting the first word
+        let hasFlushed = false
+        const MIN_PARAGRAPH_CHARS = 60 // collapse \n\n → space until we have enough content
+        const flush = () => {
+          if (buf !== lastFlushed) {
+            if (!hasFlushed && buf.length < MIN_FIRST_FLUSH) return
+            hasFlushed = true
+            lastFlushed = buf
+            // Strip leading newlines from SSE framing
+            let display = buf.replace(/^\n+/, '')
+            // During early streaming, collapse double-newlines to avoid premature paragraph breaks
+            // ("我\n\n来查查" would otherwise show "我" as a separated paragraph)
+            if (display.length < MIN_PARAGRAPH_CHARS) {
+              display = display.replace(/\n\n+/g, '')
             }
-            if (Date.now() - lastFlush > 50) flush()
+            aiMsg.text = display
+            aiMsg.html = renderAiHtml(display, true)
+            lastFlush = Date.now()
           }
-          while (true) {
-            const { value, done } = await reader.read()
-            if (done) { processSSE(); flush(); break }
-            sseBuf += decoder.decode(value, { stream: true })
-            processSSE()
+        }
+        const processSSE = () => {
+          const lines = sseBuf.split('\n'); sseBuf = lines.pop() || ''
+          let data = [], inData = false, inEvent = false
+          for (const l of lines) {
+            if (l.startsWith('event:')) { inData = false; inEvent = true }
+            else if (l.startsWith('data:')) { if (!inEvent) data.push(l.slice(5).trimStart()); inData = true; inEvent = false }
+            else if (inData && !inEvent) data.push(l)
           }
-          if (aiMsg.text && aiMsg.text.trim()) {
-            aiMsg.text = dedupParagraphs(aiMsg.text.trim())
-          } else {
-            aiMsg.text = '我暂时没想好，可以换个问法吗？'
+          if (data.length) {
+            while (data.length && data[data.length - 1] === '') data.pop()
+            const chunk = data.join('\n')
+            // Intercept tool call markers — inject styled inline lines
+            if (chunk.startsWith('__SP_TOOL:CALL:')) {
+              const raw = chunk.slice(15)
+              const name = raw.endsWith('__') ? raw.slice(0, -2) : raw
+              const friendly = mapToolName(name?.trim()) || '处理中...'
+              const line = '\n\n<div class="sp-tool-call"><span class="sp-tool-icon">&#9900;</span><span>' + friendly + '</span></div>\n\n'
+              pendingToolLine = line
+              buf += line
+              flush()
+              return
+            }
+            if (chunk === '__SP_TOOL:DONE__') {
+              if (pendingToolLine && buf.includes(pendingToolLine)) {
+                buf = buf.replace(pendingToolLine, '')
+              }
+              pendingToolLine = ''
+              flush()
+              return
+            }
+            if (chunk && !buf.endsWith(chunk)) {
+              // Filter raw JSON tool call attempts leaked by LLM (e.g. {"name": "listTodaySchedules", "arguments": {}})
+              if (/^\{"name"\s*:\s*"\w+"\s*,\s*"arguments"\s*:/.test(chunk)) return
+              buf += chunk
+            }
           }
-          const navPaths = extractNavigateDirective(aiMsg.text)
-          if (navPaths?.length) {
-            aiMsg.navs = navPaths.map(p => { const it = NAV_ITEMS.find(x => x.to === p); return { to: p, title: it?.title || p } })
-            aiMsg.text = stripNavigateDirective(aiMsg.text)
-          }
-          aiMsg.html = renderAiHtml(aiMsg.text)
-        } finally { clearTimeout(t) }
+          if (Date.now() - lastFlush > 50) flush()
+        }
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) { processSSE(); flush(); break }
+          sseBuf += decoder.decode(value, { stream: true })
+          processSSE()
+        }
+        if (aiMsg.text && aiMsg.text.trim()) {
+          aiMsg.text = dedupParagraphs(aiMsg.text.trim())
+        } else {
+          aiMsg.text = '我暂时没想好，可以换个问法吗？'
+        }
+        const navPaths = extractNavigateDirective(aiMsg.text)
+        if (navPaths?.length) {
+          aiMsg.navs = navPaths.map(p => { const it = NAV_ITEMS.find(x => x.to === p); return { to: p, title: it?.title || p } })
+          aiMsg.text = stripNavigateDirective(aiMsg.text)
+        }
+        aiMsg.html = renderAiHtml(aiMsg.text)
       } catch (e) {
         const msg = String(e?.message || '服务异常，请稍后再试')
         if (aiMsg) aiMsg.text = msg

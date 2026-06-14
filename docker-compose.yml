@@ -1,5 +1,22 @@
-﻿services:
-  # --- 鍩虹璁炬柦 (Infrastructure) ---
+x-env-tz: &env-tz
+  TZ: Asia/Shanghai
+
+x-env-ai: &env-ai
+  AI_DASHSCOPE_API_KEY: ${AI_DASHSCOPE_API_KEY}
+  MODEL: ${MODEL}
+  SPRING_AI_DASHSCOPE_READ_TIMEOUT: "180"
+  SPRING_AI_RETRY_MAX_ATTEMPTS: "1"
+
+x-env-nacos: &env-nacos
+  SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR: nacos:8848
+
+x-env-rabbitmq: &env-rabbitmq
+  SPRING_RABBITMQ_HOST: rabbitmq
+  SPRING_RABBITMQ_USERNAME: sp
+  SPRING_RABBITMQ_PASSWORD: sp123
+
+services:
+  # --- Infrastructure ---
   nacos:
     image: docker.m.daocloud.io/nacos/nacos-server:v2.2.3
     container_name: nacos
@@ -21,9 +38,16 @@
       - "8848:8848"
       - "9848:9848"
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy
     networks:
-      - vibe-net
+      - sp-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:8848/nacos/v1/console/health/readiness | grep -qi 'ok'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
 
   mysql:
     image: docker.m.daocloud.io/library/mysql:8.0
@@ -35,8 +59,29 @@
       - "3306:3306"
     volumes:
       - ./sql:/docker-entrypoint-initdb.d
+      - mysql_data:/var/lib/mysql
     networks:
-      - vibe-net
+      - sp-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 20s
+
+  adminer:
+    image: docker.m.daocloud.io/library/adminer:4.8.1
+    container_name: adminer
+    restart: unless-stopped
+    ports:
+      - "8085:8080"
+    environment:
+      - ADMINER_DEFAULT_SERVER=mysql
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - sp-net
 
   redis:
     image: docker.m.daocloud.io/redis/redis-stack-server:7.2.0-v19
@@ -44,23 +89,37 @@
     restart: unless-stopped
     environment:
       - REDIS_ARGS=--maxmemory 512mb --maxmemory-policy allkeys-lru --protected-mode no
+    volumes:
+      - redis_data:/data
     ports:
       - "6379:6379"
     networks:
-      - vibe-net
+      - sp-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 
   rabbitmq:
     image: docker.m.daocloud.io/library/rabbitmq:3.12-management
     container_name: rabbitmq
     restart: unless-stopped
     environment:
-      - RABBITMQ_DEFAULT_USER=vibe
-      - RABBITMQ_DEFAULT_PASS=vibe123
+      - RABBITMQ_DEFAULT_USER=sp
+      - RABBITMQ_DEFAULT_PASS=sp123
     ports:
       - "5672:5672"
       - "15672:15672"
     networks:
-      - vibe-net
+      - sp-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   elasticsearch:
     image: docker.m.daocloud.io/library/elasticsearch:8.10.2
@@ -70,201 +129,270 @@
       - discovery.type=single-node
       - xpack.security.enabled=false
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
     ports:
       - "9201:9200"
     networks:
-      - vibe-net
+      - sp-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -qE 'green|yellow'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
 
-  seata-server:
-    image: docker.m.daocloud.io/seataio/seata-server:1.7.1
-    container_name: seata-server
-    restart: unless-stopped
-    ports:
-      - "8091:8091"
-    depends_on:
-      - mysql
-    networks:
-      - vibe-net
+  # bilibili-proxy (optional — only needed on Linux bare Docker where B站 blocks bridge IPs.
+  # Uncomment and set SMARTPLANNER_HTTP_PROXY_HOST=host.docker.internal SMARTPLANNER_HTTP_PROXY_PORT=18888 in .env)
+  # bilibili-proxy:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.proxy
+  #   container_name: bilibili-proxy
+  #   restart: unless-stopped
+  #   network_mode: host
 
-  # --- 寰湇鍔?(Microservices) ---
+  # --- Microservices ---
   goal-service:
     build:
       context: .
-      dockerfile: goal-service/Dockerfile
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: goal-service
+        SERVICE_PORT: "8081"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5"
     container_name: goal-service
     restart: unless-stopped
     ports:
       - "8081:8081"
-    environment:
-      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
-      - SPRING_CLOUD_NACOS_CONFIG_SERVER_ADDR=nacos:8848
-      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_goal?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
-      - SPRING_REDIS_HOST=redis
-      - SPRING_RABBITMQ_HOST=rabbitmq
-      - SPRING_RABBITMQ_USERNAME=vibe
-      - SPRING_RABBITMQ_PASSWORD=vibe123
-      - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
-      - MODEL=${MODEL}
-      - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
-      - SPRING_AI_RETRY_MAX_ATTEMPTS=1
     depends_on:
-      - nacos
-      - mysql
-      - redis
-      - rabbitmq
+      nacos:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/sp_goal?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_REDIS_HOST: redis
     networks:
-      - vibe-net
+      - sp-net
 
   schedule-engine:
     build:
       context: .
-      dockerfile: schedule-engine/Dockerfile
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: schedule-engine
+        SERVICE_PORT: "8082"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5"
     container_name: schedule-engine
     restart: unless-stopped
     ports:
       - "8082:8082"
-    environment:
-      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
-      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_schedule?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
-      - SPRING_RABBITMQ_HOST=rabbitmq
-      - SPRING_RABBITMQ_USERNAME=vibe
-      - SPRING_RABBITMQ_PASSWORD=vibe123
-      - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
-      - MODEL=${MODEL}
-      - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
-      - SPRING_AI_RETRY_MAX_ATTEMPTS=1
-      - SMARTPLANNER_AI_SCHEDULE_TIMEOUT_SECONDS=170
     depends_on:
-      - nacos
-      - mysql
-      - redis
-      - rabbitmq
+      nacos:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/sp_schedule?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      SMARTPLANNER_AI_SCHEDULE_TIMEOUT_SECONDS: "170"
     networks:
-      - vibe-net
+      - sp-net
 
   resource-search:
     build:
       context: .
-      dockerfile: resource-search/Dockerfile
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: resource-search
+        SERVICE_PORT: "8083"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5"
     container_name: resource-search
     restart: unless-stopped
     ports:
       - "8083:8083"
-    environment:
-      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
-      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_resource?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
-      - SPRING_ELASTICSEARCH_URIS=http://elasticsearch:9200
-      - SPRING_RABBITMQ_HOST=rabbitmq
-      - SPRING_RABBITMQ_USERNAME=vibe
-      - SPRING_RABBITMQ_PASSWORD=vibe123
-      - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
-      - MODEL=${MODEL}
-      - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
-      - SPRING_AI_RETRY_MAX_ATTEMPTS=1
     depends_on:
-      - nacos
-      - mysql
-      - elasticsearch
-      - rabbitmq
+      nacos:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/sp_resource?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
+      SMARTPLANNER_HTTP_PROXY_HOST: ${SMARTPLANNER_HTTP_PROXY_HOST:-}
+      SMARTPLANNER_HTTP_PROXY_PORT: ${SMARTPLANNER_HTTP_PROXY_PORT:-0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
-      - vibe-net
+      - sp-net
 
   punch-service:
     build:
       context: .
-      dockerfile: punch-service/Dockerfile
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: punch-service
+        SERVICE_PORT: "8084"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5"
     container_name: punch-service
     restart: unless-stopped
     ports:
       - "8084:8084"
-    environment:
-      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
-      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_punch?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
-      - SPRING_REDIS_HOST=redis
-      - SPRING_RABBITMQ_HOST=rabbitmq
-      - SPRING_RABBITMQ_USERNAME=vibe
-      - SPRING_RABBITMQ_PASSWORD=vibe123
-      - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
-      - MODEL=${MODEL}
-      - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
-      - SPRING_AI_RETRY_MAX_ATTEMPTS=1
     depends_on:
-      - nacos
-      - mysql
-      - redis
-      - rabbitmq
+      nacos:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/sp_punch?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_REDIS_HOST: redis
     networks:
-      - vibe-net
+      - sp-net
+
+  agent-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: agent-service
+        SERVICE_PORT: "8086"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5"
+        JVM_OPTS: "-Djava.net.preferIPv4Stack=true"
+    container_name: agent-service
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    depends_on:
+      nacos:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: "6379"
+      SPRING_DATA_REDIS_HOST: redis
+      JWT_SECRET: dev-jwt-secret-change-me-please-32bytes
+      JWT_ISSUER: http://sp
+    networks:
+      - sp-net
 
   user-service:
     build:
       context: .
-      dockerfile: user-service/Dockerfile
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: user-service
+        SERVICE_PORT: "8080"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5 -Dmaven.wagon.http.retryHandler.requestSentEnabled=true"
+        JVM_OPTS: "-Djava.net.preferIPv4Stack=true"
     container_name: user-service
     restart: unless-stopped
     ports:
       - "8080:8080"
-    environment:
-      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
-      - SPRING_RABBITMQ_HOST=rabbitmq
-      - SPRING_RABBITMQ_USERNAME=vibe
-      - SPRING_RABBITMQ_PASSWORD=vibe123
-      - SPRING_REDIS_HOST=redis
-      - SPRING_REDIS_PORT=6379
-      - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
-      - MODEL=${MODEL}
-      - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
-      - SPRING_AI_RETRY_MAX_ATTEMPTS=1
-      - JWT_SECRET=dev-jwt-secret-change-me-please-32bytes
-      - JWT_ISSUER=http://vibe
-      - AUTH_DEMO_USERNAME=demo
-      - AUTH_DEMO_PASSWORD=demo123
-      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/vibe_user?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
-      - SPRING_DATASOURCE_USERNAME=root
-      - SPRING_DATASOURCE_PASSWORD=root
     depends_on:
-      - nacos
-      - mysql
-      - rabbitmq
+      nacos:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/sp_user?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: "6379"
+      JWT_SECRET: dev-jwt-secret-change-me-please-32bytes
+      JWT_ISSUER: http://sp
+      AUTH_DEMO_USERNAME: demo
+      AUTH_DEMO_PASSWORD: demo123
     networks:
-      - vibe-net
+      - sp-net
+
+  admin-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: admin-server
+        SERVICE_PORT: "9090"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5"
+        JVM_OPTS: "-Djava.net.preferIPv4Stack=true"
+    container_name: admin-server
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    depends_on:
+      nacos:
+        condition: service_healthy
+    environment:
+      <<: *env-nacos
+    networks:
+      - sp-net
 
   gateway-service:
     build:
       context: .
-      dockerfile: gateway-service/Dockerfile
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: gateway-service
+        SERVICE_PORT: "8088"
+        MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.wagon.http.retryHandler.count=5"
     container_name: gateway-service
     restart: unless-stopped
     ports:
       - "8088:8088"
-    environment:
-      # 鍏抽敭锛氬厑璁窸PTIONS鏂规硶
-      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDORIGINPATTERNS[0]=*
-      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[0]=GET
-      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[1]=POST
-      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[2]=PUT
-      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[3]=DELETE
-      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[4]=OPTIONS  # 閲嶈锛?      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDHEADERS[0]=*
-      - SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWCREDENTIALS=true
-      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR=nacos:8848
-      - SPRING_REDIS_HOST=redis
-      - SPRING_RABBITMQ_HOST=rabbitmq
-      - SPRING_RABBITMQ_USERNAME=vibe
-      - SPRING_RABBITMQ_PASSWORD=vibe123
-      - AI_DASHSCOPE_API_KEY=${AI_DASHSCOPE_API_KEY}
-      - MODEL=${MODEL}
-      - SPRING_AI_DASHSCOPE_READ_TIMEOUT=180
-      - SPRING_AI_RETRY_MAX_ATTEMPTS=1
-      - JWT_SECRET=dev-jwt-secret-change-me-please-32bytes
-      - GATEWAY_RL_REPLENISH=5
-      - GATEWAY_RL_BURST=60
     depends_on:
-      - nacos
-      - redis
-      - user-service
-      - rabbitmq
+      nacos:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+      agent-service:
+        condition: service_started
+    environment:
+      <<: [*env-tz, *env-nacos, *env-rabbitmq, *env-ai]
+      SPRING_REDIS_HOST: redis
+      JWT_SECRET: dev-jwt-secret-change-me-please-32bytes
+      GATEWAY_RL_REPLENISH: "5"
+      GATEWAY_RL_BURST: "60"
+      SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDORIGINPATTERNS[0]: "*"
+      SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[0]: GET
+      SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[1]: POST
+      SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[2]: PUT
+      SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[3]: DELETE
+      SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDMETHODS[4]: OPTIONS
+      SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWEDHEADERS[0]: "*"
+      SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS[/**].ALLOWCREDENTIALS: "true"
     networks:
-      - vibe-net
+      - sp-net
 
   web-front:
     build:
@@ -277,8 +405,13 @@
     depends_on:
       - gateway-service
     networks:
-      - vibe-net
+      - sp-net
+
+volumes:
+  mysql_data:
+  redis_data:
+  es_data:
 
 networks:
-  vibe-net:
+  sp-net:
     driver: bridge

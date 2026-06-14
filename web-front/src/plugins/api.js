@@ -6,6 +6,14 @@ const api = axios.create({
   timeout: 60000,
 })
 
+let isRefreshing = false
+let refreshSubscribers = []
+
+function onTokenRefreshed(token) {
+  refreshSubscribers.forEach(cb => cb(token))
+  refreshSubscribers = []
+}
+
 export function setupApi() {
   api.interceptors.request.use((config) => {
     const token = localStorage.getItem('accessToken')
@@ -43,6 +51,17 @@ export function setupApi() {
         return Promise.reject(err)
       }
 
+      if (isRefreshing) {
+        return new Promise((resolve) => {
+          refreshSubscribers.push((newToken) => {
+            original.headers = original.headers ?? {}
+            original.headers.Authorization = `Bearer ${newToken}`
+            resolve(api(original))
+          })
+        })
+      }
+
+      isRefreshing = true
       original._retry = true
       try {
         const refreshRes = await axios.post('/api/auth/refresh', { refreshToken }, { timeout: 15000 })
@@ -58,11 +77,15 @@ export function setupApi() {
 
         original.headers = original.headers ?? {}
         original.headers.Authorization = `Bearer ${newAccess}`
+        onTokenRefreshed(newAccess)
         return api(original)
       } catch (e) {
         localStorage.removeItem('accessToken')
         localStorage.removeItem('refreshToken')
+        refreshSubscribers = []
         return Promise.reject(err)
+      } finally {
+        isRefreshing = false
       }
     },
   )

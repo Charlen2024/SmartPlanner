@@ -9,6 +9,8 @@ import com.chao.common.dto.FreeSlotDto;
 import com.chao.common.dto.GoalTaskDto;
 import com.chao.common.dto.Result;
 import com.chao.common.dto.TaskScheduleDto;
+import com.chao.schedule.config.ScheduleAiConfig;
+import com.chao.schedule.config.ScheduleAiPrompts;
 import com.chao.schedule.entity.ClassSchedule;
 import com.chao.schedule.entity.TaskSchedule;
 import com.chao.schedule.mapper.ClassScheduleMapper;
@@ -146,14 +148,22 @@ public class ScheduleServiceAiCommitTest {
                           "candidateSchedules": [
                             {"taskId": 101, "startTime": "2026-04-13T10:00:00", "endTime": "2026-04-13T10:45:00"},
                             {"taskId": 102, "startTime": "2026-04-13T10:55:00", "endTime": "2026-04-13T11:40:00"},
-                            {"taskId": 103, "startTime": "2026-04-13T13:00:00", "endTime": "2026-04-13T13:30:00"}
+                            {"taskId": 103, "startTime": "2026-04-13T14:00:00", "endTime": "2026-04-13T14:30:00"}
                           ]
                         }
                         """;
             }
         };
 
-        PlanCandidateWorker planCandidateWorker = new PlanCandidateWorker(null, objectMapper, null, null);
+        ScheduleAiConfig aiConfig = new ScheduleAiConfig();
+        ScheduleAiPrompts aiPrompts = new ScheduleAiPrompts();
+        ScheduleUtils scheduleUtils = new ScheduleUtils(objectMapper);
+        ScheduleValidator scheduleValidator = new ScheduleValidator();
+        TaskScheduleService taskScheduleService = new TaskScheduleService(taskScheduleMapper, goalClient);
+        FreeTimeCalculator freeTimeCalculator = new FreeTimeCalculator(classScheduleMapper, null);
+        ScheduleImportService scheduleImportService = new ScheduleImportService(classScheduleMapper, null);
+
+        PlanCandidateWorker planCandidateWorker = new PlanCandidateWorker(null, null, null, aiConfig, aiPrompts, scheduleUtils);
 
         ScheduleService scheduleService = new ScheduleService(
                 classScheduleMapper,
@@ -163,7 +173,15 @@ public class ScheduleServiceAiCommitTest {
                 goalClient,
                 openAiCompatClient,
                 objectMapper,
-                planCandidateWorker
+                null,
+                planCandidateWorker,
+                aiConfig,
+                aiPrompts,
+                scheduleUtils,
+                scheduleValidator,
+                taskScheduleService,
+                freeTimeCalculator,
+                scheduleImportService
         );
 
         DailyPlanCommitRequest req = new DailyPlanCommitRequest();

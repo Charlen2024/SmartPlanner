@@ -2,11 +2,15 @@ package com.chao.common.ai;
 
 import org.springframework.ai.chat.client.ChatClient;
 
-public class OpenAiCompatClient {
+public class    OpenAiCompatClient {
     private final ChatClient chatClient;
 
     public OpenAiCompatClient(ChatClient chatClient) {
         this.chatClient = chatClient;
+    }
+
+    public ChatClient chatClient() {
+        return chatClient;
     }
 
     public String complete(String prompt) {
@@ -28,5 +32,12 @@ public class OpenAiCompatClient {
                 .user(usr)
                 .call()
                 .content();
+    }
+
+    public <T> T entity(String prompt, Class<T> type) {
+        if (chatClient == null) {
+            throw new IllegalStateException("ChatClient not configured");
+        }
+        return chatClient.prompt(prompt).call().entity(type);
     }
 }

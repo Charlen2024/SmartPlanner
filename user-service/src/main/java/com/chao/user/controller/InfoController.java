@@ -1,46 +1,29 @@
 package com.chao.user.controller;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chao.common.dto.Result;
+import com.chao.common.dto.WeatherData;
+import com.chao.common.util.WeatherClient;
 import lombok.extern.slf4j.Slf4j;
-import com.chao.common.client.PunchClient;
-import com.chao.common.client.ScheduleClient;
-import com.chao.common.dto.PunchRecordDto;
-import com.chao.common.dto.TaskScheduleDto;
-import com.chao.common.dto.UserHabitDto;
 import com.chao.user.dto.UserInsightDto;
 import com.chao.user.dto.UserPortraitDto;
-import com.chao.common.dto.SchedulePreferenceDto;
 import com.chao.user.dto.WeatherDto;
-import com.chao.user.service.UserPortraitAiService;
+import com.chao.user.service.PortraitComputeService;
+import com.chao.user.util.JwtUtils;
 import org.redisson.api.RedissonClient;
-import org.springframework.ai.document.Document;
-import org.springframework.ai.vectorstore.SearchRequest;
-import org.springframework.ai.vectorstore.VectorStore;
-import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import org.springframework.beans.factory.ObjectProvider;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.temporal.ChronoUnit;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 @Slf4j
 @RestController
@@ -48,435 +31,194 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class InfoController {
     private final ObjectMapper objectMapper;
-    private final PunchClient punchClient;
-    private final ScheduleClient scheduleClient;
-    private final UserPortraitAiService userPortraitAiService;
-    private final ObjectProvider<VectorStore> vectorStoreProvider;
+    private final WeatherClient weatherClient;
+    private final PortraitComputeService portraitComputeService;
     private final ObjectProvider<RedissonClient> redissonProvider;
+
+    private record WeatherLoc(Double lat, Double lon, String name) {
+        boolean hasCoords() { return lat != null && lon != null; }
+    }
 
     @GetMapping("/weather")
     public Result<WeatherDto> weather(
+            @RequestParam(required = false) Double lat,
+            @RequestParam(required = false) Double lon,
             @RequestParam(required = false) String location,
             @AuthenticationPrincipal Jwt jwt) {
-        String loc = (location != null && !location.isBlank()) ? location.trim() : getUserWeatherLocation(jwt);
-        if (loc.isBlank()) loc = "Shenzhen";
+        Long userId = jwt != null ? JwtUtils.getUserId(jwt) : null;
+        boolean useCoords = lat != null && lon != null;
+
+        // If browser provided coordinates, cache them to Redis (first time / update)
+        if (useCoords && userId != null) {
+            trySaveCoords(userId, lat, lon, null);
+        }
+
+        // Try to use Redis-cached coordinates even when only location name is provided
+        WeatherLoc savedLoc = getUserWeatherLocation(userId);
+        if (!useCoords && savedLoc.hasCoords()) {
+            lat = savedLoc.lat();
+            lon = savedLoc.lon();
+            useCoords = true;
+        }
+        if (!useCoords && !savedLoc.name().isBlank()) {
+            location = savedLoc.name();
+        }
+
+        String cacheKey = useCoords
+                ? String.format("sp:weather:coord:%.4f,%.4f", lat, lon)
+                : "sp:weather:data:" + resolveLoc(location, jwt);
+
+        RedissonClient r = redissonProvider.getIfAvailable();
+        if (r != null) {
+            try {
+                String cached = String.valueOf(r.getBucket(cacheKey).get());
+                if (cached != null && !"null".equals(cached)) {
+                    WeatherDto dto = objectMapper.readValue(cached, WeatherDto.class);
+                    if (dto.getDate() != null && dto.getDate().equals(LocalDate.now().toString())) {
+                        return Result.success(dto);
+                    }
+                }
+            } catch (Exception e) {
+                log.debug("Weather cache read failed: {}", e.toString());
+            }
+        }
+
+        WeatherData wd = useCoords
+                ? weatherClient.fetch(lat, lon)
+                : weatherClient.fetch(resolveLoc(location, jwt));
+
         WeatherDto dto = new WeatherDto();
         dto.setDate(LocalDate.now().toString());
-        dto.setLocation(loc);
-        try {
-            String encoded = java.net.URLEncoder.encode(loc, java.nio.charset.StandardCharsets.UTF_8);
-            String url = "https://wttr.in/" + encoded + "?format=j1";
-            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-            conn.setConnectTimeout(8000);
-            conn.setReadTimeout(10000);
-            conn.setRequestProperty("User-Agent", "SmartPlanner/1.0");
-            conn.setInstanceFollowRedirects(true);
-            byte[] bytes = conn.getInputStream().readAllBytes();
-            JsonNode root = objectMapper.readTree(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
-            JsonNode cc = root.path("current_condition");
-            if (cc.isArray() && !cc.isEmpty()) {
-                JsonNode c = cc.get(0);
-                dto.setTemperature(parseDoubleNode(c, "temp_C"));
-                dto.setFeelsLike(parseDoubleNode(c, "FeelsLikeC"));
-                dto.setWindspeed(parseDoubleNode(c, "windspeedKmph"));
-                dto.setHumidity(parseStringNode(c, "humidity"));
-                String desc = c.path("weatherDesc").isArray() && !c.path("weatherDesc").isEmpty()
-                        ? c.path("weatherDesc").get(0).path("value").asText() : null;
-                dto.setSummary(translateWeather(desc));
+        if (useCoords) {
+            String savedName = savedLoc.name();
+            dto.setLocation(!savedName.isBlank() ? savedName : wd.getLocation());
+        } else {
+            dto.setLocation(wd.getLocation());
+        }
+        dto.setTemperature(wd.getTemperature());
+        dto.setFeelsLike(wd.getFeelsLike());
+        dto.setWindspeed(wd.getWindspeed());
+        dto.setHumidity(wd.getHumidity());
+        dto.setSummary(wd.getWeatherDescCn() != null ? wd.getWeatherDescCn() : "天气服务不可用");
+
+        if (r != null) {
+            try {
+                String json = objectMapper.writeValueAsString(dto);
+                r.getBucket(cacheKey).set(json, 30, java.util.concurrent.TimeUnit.MINUTES);
+            } catch (Exception e) {
+                log.debug("Weather cache write failed: {}", e.toString());
             }
-        } catch (Exception e) {
-            log.warn("Weather fetch failed for location={}: {}", loc, e.toString());
-            dto.setSummary("天气服务不可用");
         }
         return Result.success(dto);
     }
 
-    @org.springframework.web.bind.annotation.PutMapping("/weather-location")
-    public Result<String> saveWeatherLocation(@AuthenticationPrincipal Jwt jwt, @RequestParam String location) {
-        Long userId = jwt.getClaim("userId");
+    private String resolveLoc(String location, Jwt jwt) {
+        if (location != null && !location.isBlank()) return location.trim();
+        String saved = getUserWeatherLocation(jwt);
+        return !saved.isBlank() ? saved : "Shenzhen";
+    }
+
+    @PutMapping("/weather-location")
+    public Result<String> saveWeatherLocation(@AuthenticationPrincipal Jwt jwt,
+                                              @RequestParam(required = false) String location,
+                                              @RequestParam(required = false) Double lat,
+                                              @RequestParam(required = false) Double lon) {
+        Long userId = JwtUtils.getUserId(jwt);
         String loc = (location != null && !location.isBlank()) ? location.trim() : "Shenzhen";
-        try {
-            RedissonClient r = redissonProvider.getIfAvailable();
-            if (r != null) {
-                r.getBucket("sp:weather:loc:" + userId).set(loc, 365, java.util.concurrent.TimeUnit.DAYS);
-            }
-        } catch (Exception ignored) {}
+        trySaveCoords(userId, lat, lon, loc);
         return Result.success(loc);
     }
 
-    private String getUserWeatherLocation(Jwt jwt) {
+    private void trySaveCoords(Long userId, Double lat, Double lon, String name) {
+        if (userId == null) return;
         try {
-            Long userId = jwt != null ? jwt.<Long>getClaim("userId") : null;
-            if (userId == null) return "";
             RedissonClient r = redissonProvider.getIfAvailable();
-            if (r != null) {
-                String loc = String.valueOf(r.getBucket("sp:weather:loc:" + userId).get());
-                return loc != null && !"null".equals(loc) ? loc.trim() : "";
-            }
-        } catch (Exception ignored) {}
-        return "";
-    }
+            if (r == null) return;
+            String key = "sp:weather:loc:" + userId;
 
-    @GetMapping("/insights")
-    public Result<UserInsightDto> insights(@AuthenticationPrincipal Jwt jwt) {
-        Long userId = jwt.getClaim("userId");
-        LocalDateTime to = LocalDateTime.now();
-        LocalDateTime from = to.minusDays(7);
-
-        return Result.success(computeInsights(userId, from, to));
-    }
-
-    @GetMapping("/portrait")
-    public Result<UserPortraitDto> portrait(@AuthenticationPrincipal Jwt jwt) {
-        Long userId = jwt.getClaim("userId");
-        LocalDateTime to = LocalDateTime.now();
-        LocalDateTime from = to.minusDays(7);
-
-        UserPortraitDto dto = new UserPortraitDto();
-        dto.setHabits(punchClient.getHabits(userId).getData());
-        UserInsightDto insights = computeInsights(userId, from, to);
-        dto.setInsights(insights);
-        dto.setRecommendation(recommend(insights, dto.getHabits()));
-        dto.setTips(insights.getTips());
-        return Result.success(dto);
-    }
-
-    @PostMapping("/portrait/recompute")
-    public Result<UserPortraitDto> recomputePortrait(@AuthenticationPrincipal Jwt jwt) {
-        Long userId = jwt.getClaim("userId");
-        LocalDateTime to = LocalDateTime.now();
-        LocalDateTime from = to.minusDays(7);
-
-        String fStr = from != null ? from.toString() : null;
-        String tStr = to != null ? to.toString() : null;
-        List<PunchRecordDto> records = punchClient.listRecords(userId, null, fStr, tStr).getData();
-        List<TaskScheduleDto> schedules = scheduleClient.listTaskSchedules(userId, fStr, tStr).getData();
-        UserInsightDto insights = computeInsights(userId, from, to);
-        int streak = insights.getStreak() != null ? insights.getStreak() : 0;
-
-        UserPortraitAiService.AiPortraitResult ai = null;
-        try {
-        List<String> journalSnippets = searchJournalSnippets(userId);
-
-            ai = userPortraitAiService.analyze(records, schedules, streak, journalSnippets);
-        } catch (Exception ignored) {
-        }
-
-        int morningScore = computeMorningScore(records, schedules);
-        int focusAvg = computeFocusAvgMinutes(records, schedules);
-        float proIndex = computeProcrastinationIndex(insights, records, schedules);
-
-        UserHabitDto habits = punchClient.updateHabits(userId, morningScore, focusAvg, proIndex).getData();
-
-        UserPortraitDto dto = new UserPortraitDto();
-        dto.setHabits(habits);
-        dto.setInsights(insights);
-        dto.setRecommendation(ai != null ? ai.getRecommendation() : recommend(insights, habits));
-        dto.setTips(insights.getTips());
-        return Result.success(dto);
-    }
-
-    private List<String> searchJournalSnippets(Long userId) {
-        try {
-            VectorStore vs = vectorStoreProvider != null ? vectorStoreProvider.getIfAvailable() : null;
-            if (vs == null) {
-                return List.of();
-            }
-            FilterExpressionBuilder fb = new FilterExpressionBuilder();
-            List<Document> docs = vs.similaritySearch(
-                SearchRequest.builder()
-                    .query("心情 情绪 学习状态 焦虑 效率 拖延 专注 压力 动力")
-                    .topK(8)
-                    .filterExpression(fb.eq("userId", userId).build())
-                    .build()
-            );
-            if (docs == null || docs.isEmpty()) {
-                return List.of();
-            }
-            return docs.stream()
-                .map(d -> d.getText() != null ? d.getText() : "")
-                .filter(s -> !s.isBlank())
-                .limit(6)
-                .collect(Collectors.toList());
-        } catch (Exception ignored) {
-            return List.of();
-        }
-    }
-
-    private UserInsightDto computeInsights(Long userId, LocalDateTime from, LocalDateTime to) {
-        String fStr = from != null ? from.toString() : null;
-        String tStr = to != null ? to.toString() : null;
-        List<PunchRecordDto> records = punchClient.listRecords(userId, null, fStr, tStr).getData();
-        List<TaskScheduleDto> schedules = scheduleClient.listTaskSchedules(userId, fStr, tStr).getData();
-
-        UserInsightDto dto = new UserInsightDto();
-        Long streak = punchClient.getStreak(userId).getData();
-        dto.setStreak(streak != null ? streak.intValue() : 0);
-        dto.setTips(new ArrayList<>());
-
-        if (records == null || records.isEmpty() || schedules == null || schedules.isEmpty()) {
-            dto.setOnTimeRate(0.0);
-            dto.setAvgDelayMinutes(0.0);
-            dto.setMatchedPunchCount(0);
-            dto.setCompletionRate(0.0);
-            dto.getTips().add("先完成一次目标拆解与智能排程，系统才能根据行为生成更准确建议");
-            dto.getTips().add("建议每天固定一个时间段学习并打卡，连续 7 天后画像会更稳定");
-            return dto;
-        }
-
-        Map<Long, List<TaskScheduleDto>> scheduleByTask = schedules.stream()
-                .filter(s -> s.getTaskId() != null && s.getStartTime() != null)
-                .collect(Collectors.groupingBy(TaskScheduleDto::getTaskId));
-
-        int matched = 0;
-        int onTime = 0;
-        int lateCount = 0;
-        long delaySum = 0;
-
-        for (PunchRecordDto r : records) {
-            if (r.getTaskId() == null) {
-                continue;
-            }
-            LocalDateTime punchTime = punchStartTime(r);
-            if (punchTime == null) {
-                continue;
-            }
-            List<TaskScheduleDto> ss = scheduleByTask.get(r.getTaskId());
-            if (ss == null || ss.isEmpty()) {
-                continue;
-            }
-            TaskScheduleDto nearest = ss.stream()
-                    .min(Comparator.comparing(s -> Math.abs(ChronoUnit.MINUTES.between(s.getStartTime(), punchTime))))
-                    .orElse(null);
-            if (nearest == null || nearest.getStartTime() == null) {
-                continue;
-            }
-            long delay = ChronoUnit.MINUTES.between(nearest.getStartTime(), punchTime);
-            if (Math.abs(delay) > 180) {
-                continue;
-            }
-            matched++;
-            if (delay > 0) {
-                delaySum += delay;
-                lateCount++;
-            }
-            if (Math.abs(delay) <= 10) {
-                onTime++;
-            }
-        }
-
-        dto.setOnTimeRate(matched == 0 ? 0.0 : onTime * 1.0 / matched);
-        dto.setAvgDelayMinutes(lateCount == 0 ? 0.0 : delaySum * 1.0 / lateCount);
-        dto.setMatchedPunchCount(matched);
-        long doneSchedules = schedules.stream().filter(s -> s != null && s.getStatus() != null && s.getStatus() == 1).count();
-        dto.setCompletionRate(schedules.isEmpty() ? 0.0 : doneSchedules * 1.0 / schedules.size());
-
-        if (matched < 3) {
-            dto.getTips().add(String.format("匹配打卡次数 %d（近 7 天），完成率 %.0f%%，准时率 %.0f%%，平均迟到 %.0f 分钟", matched, dto.getCompletionRate() * 100, dto.getOnTimeRate() * 100, dto.getAvgDelayMinutes()));
-            dto.getTips().add("匹配数据较少：建议用计时打卡完成 3 次以上后再看画像与建议");
-            return dto;
-        }
-
-        dto.getTips().add(String.format("完成率 %.0f%%，准时率 %.0f%%，平均迟到 %.0f 分钟（仅统计迟到）", dto.getCompletionRate() * 100, dto.getOnTimeRate() * 100, dto.getAvgDelayMinutes()));
-        if (dto.getOnTimeRate() < 0.5) {
-            dto.getTips().add("你的打卡更偏“临时起意”，建议把学习安排在固定时间段，提升准时率");
-        } else {
-            dto.getTips().add("准时率不错，保持固定节奏更容易形成稳定习惯");
-        }
-        if (dto.getAvgDelayMinutes() > 30 && lateCount >= 2) {
-            dto.getTips().add("平均延迟较大，建议把任务拆得更小（30-60 分钟）并减少一次性任务量");
-        }
-        if (dto.getStreak() < 3) {
-            dto.getTips().add("先把连续打卡目标定为 3 天，完成后再提升到 7 天");
-        }
-        return dto;
-    }
-
-    private int computeMorningScore(List<PunchRecordDto> records, List<TaskScheduleDto> schedules) {
-        double punchRatio = 0.0;
-        if (records != null && !records.isEmpty()) {
-            long morning = records.stream().filter(r -> {
-                if (r == null) return false;
-                LocalDateTime t = punchStartTime(r);
-                return t != null && t.getHour() <= 10;
-            }).count();
-            punchRatio = morning * 1.0 / records.size();
-        }
-        double scheduleRatio = 0.0;
-        if (schedules != null && !schedules.isEmpty()) {
-            long morning = schedules.stream().filter(s -> s != null && s.getStartTime() != null && s.getStartTime().getHour() <= 10).count();
-            scheduleRatio = morning * 1.0 / schedules.size();
-        }
-        int score = (int) Math.round((punchRatio * 0.6 + scheduleRatio * 0.4) * 100);
-        return Math.max(0, Math.min(100, score));
-    }
-
-    private LocalDateTime punchStartTime(PunchRecordDto r) {
-        if (r == null) {
-            return null;
-        }
-        if (r.getStartedAt() != null) {
-            return r.getStartedAt();
-        }
-        if (r.getEndedAt() != null && r.getDurationSeconds() != null && r.getDurationSeconds() > 0) {
-            return r.getEndedAt().minusSeconds(r.getDurationSeconds());
-        }
-        if (r.getCreatedAt() != null && r.getDurationSeconds() != null && r.getDurationSeconds() > 0) {
-            return r.getCreatedAt().minusSeconds(r.getDurationSeconds());
-        }
-        return r.getCreatedAt();
-    }
-
-    private int computeFocusAvgMinutes(List<PunchRecordDto> records, List<TaskScheduleDto> schedules) {
-        if (records != null && !records.isEmpty()) {
-            long sum = 0;
-            int cnt = 0;
-            for (PunchRecordDto r : records) {
-                if (r == null || r.getDurationSeconds() == null || r.getDurationSeconds() <= 0) continue;
-                sum += Math.max(1, Math.round(r.getDurationSeconds() / 60.0));
-                cnt++;
-            }
-            if (cnt > 0) {
-                int avg = (int) Math.round(sum * 1.0 / cnt);
-                return Math.max(0, Math.min(180, avg));
-            }
-        }
-
-        if (schedules == null || schedules.isEmpty()) {
-            return 0;
-        }
-        List<TaskScheduleDto> list = schedules.stream()
-                .filter(s -> s != null && s.getStartTime() != null && s.getEndTime() != null)
-                .collect(Collectors.toList());
-        if (list.isEmpty()) {
-            return 0;
-        }
-        long sum = 0;
-        int cnt = 0;
-        for (TaskScheduleDto s : list) {
-            long mins = ChronoUnit.MINUTES.between(s.getStartTime(), s.getEndTime());
-            if (mins <= 0) {
-                continue;
-            }
-            if (s.getStatus() != null && s.getStatus() == 1) {
-                sum += mins;
-                cnt++;
-            }
-        }
-        if (cnt == 0) {
-            for (TaskScheduleDto s : list) {
-                long mins = ChronoUnit.MINUTES.between(s.getStartTime(), s.getEndTime());
-                if (mins > 0) {
-                    sum += mins;
-                    cnt++;
+            // Read existing data
+            String existing = String.valueOf(r.getBucket(key).get());
+            Double existingLat = null, existingLon = null;
+            String existingName = "";
+            if (existing != null && !"null".equals(existing)) {
+                if (existing.startsWith("{")) {
+                    Map m = objectMapper.readValue(existing, Map.class);
+                    existingLat = toDouble(m.get("lat"));
+                    existingLon = toDouble(m.get("lon"));
+                    existingName = String.valueOf(m.getOrDefault("name", ""));
+                } else {
+                    existingName = existing.trim();
                 }
             }
+
+            // Only update coordinates when explicitly provided (not null)
+            Double newLat = lat != null ? lat : existingLat;
+            Double newLon = lon != null ? lon : existingLon;
+            String newName = name != null && !name.isBlank() ? name.trim()
+                    : (!existingName.isBlank() ? existingName : "Shenzhen");
+
+            Map<String, Object> data = new java.util.LinkedHashMap<>();
+            if (newLat != null) data.put("lat", newLat);
+            if (newLon != null) data.put("lon", newLon);
+            data.put("name", newName);
+
+            String json = objectMapper.writeValueAsString(data);
+            r.getBucket(key).set(json, 365, java.util.concurrent.TimeUnit.DAYS);
+        } catch (Exception ignored) {
+            log.debug("Failed to save weather coords for user {}", userId);
         }
-        int avg = cnt == 0 ? 0 : (int) Math.round(sum * 1.0 / cnt);
-        return Math.max(0, Math.min(180, avg));
     }
 
-    private float computeProcrastinationIndex(UserInsightDto insights, List<PunchRecordDto> records, List<TaskScheduleDto> schedules) {
-        if (insights == null) {
-            return 0f;
-        }
-        double delay = insights.getAvgDelayMinutes() != null ? insights.getAvgDelayMinutes() : 0.0;
-        double onTime = insights.getOnTimeRate() != null ? insights.getOnTimeRate() : 0.0;
-        double delayScore = Math.max(0.0, Math.min(1.0, delay / 180.0));
-        double completionRate = 0.0;
-        if (schedules != null && !schedules.isEmpty()) {
-            long done = schedules.stream().filter(s -> s != null && s.getStatus() != null && s.getStatus() == 1).count();
-            completionRate = done * 1.0 / schedules.size();
-        }
-        Integer matched = insights.getMatchedPunchCount();
-        if (matched == null || matched < 3) {
-            double pro = 0.3 + (1.0 - completionRate) * 0.7;
-            pro = Math.min(0.85, pro);
-            return (float) Math.max(0.0, Math.min(1.0, pro));
-        }
-        double pro = delayScore * 0.45 + (1.0 - onTime) * 0.35 + (1.0 - completionRate) * 0.20;
-        return (float) Math.max(0.0, Math.min(1.0, pro));
-    }
-
-    private SchedulePreferenceDto recommend(UserInsightDto insights, UserHabitDto habits) {
-        int focusAvg = habits != null && habits.getFocusDurationAvg() != null ? habits.getFocusDurationAvg() : 45;
-        int focus;
-        if (focusAvg < 40) {
-            focus = 30;
-        } else if (focusAvg < 70) {
-            focus = 45;
-        } else {
-            focus = 60;
-        }
-        int maxDaily = 240;
-        if (insights != null) {
-            int streak = insights.getStreak() != null ? insights.getStreak() : 0;
-            double onTime = insights.getOnTimeRate() != null ? insights.getOnTimeRate() : 0.0;
-            if (streak < 3 || onTime < 0.5) {
-                maxDaily = 180;
-            }
-        }
-        SchedulePreferenceDto dto = new SchedulePreferenceDto();
-        dto.setFocusMinutes(focus);
-        dto.setBreakMinutes(10);
-        dto.setMaxDailyMinutes(maxDaily);
-        return dto;
-    }
-
-    private Double parseDoubleNode(JsonNode parent, String field) {
-        JsonNode n = parent.path(field);
-        if (n.isNull() || n.isMissingNode()) return null;
-        if (n.isNumber()) return n.asDouble();
-        if (n.isTextual()) {
-            try { return Double.parseDouble(n.asText().trim()); } catch (NumberFormatException ignored) {}
+    private Double toDouble(Object v) {
+        if (v instanceof Number n) return n.doubleValue();
+        if (v instanceof String s) {
+            try { return Double.parseDouble(s); } catch (NumberFormatException ignored) {}
         }
         return null;
     }
 
-    private String parseStringNode(JsonNode parent, String field) {
-        JsonNode n = parent.path(field);
-        if (n.isNull() || n.isMissingNode()) return null;
-        if (n.isTextual()) return n.asText().trim();
-        return n.asText();
+    private WeatherLoc getUserWeatherLocation(Long userId) {
+        try {
+            if (userId == null) return new WeatherLoc(null, null, "");
+            RedissonClient r = redissonProvider.getIfAvailable();
+            if (r == null) return new WeatherLoc(null, null, "");
+            String raw = String.valueOf(r.getBucket("sp:weather:loc:" + userId).get());
+            if (raw == null || "null".equals(raw)) return new WeatherLoc(null, null, "");
+            if (raw.startsWith("{")) {
+                Map m = objectMapper.readValue(raw, Map.class);
+                Double lat = toDouble(m.get("lat"));
+                Double lon = toDouble(m.get("lon"));
+                String name = String.valueOf(m.getOrDefault("name", ""));
+                return new WeatherLoc(lat, lon, "null".equals(name) ? "" : name.trim());
+            }
+            // Legacy: plain city name string
+            return new WeatherLoc(null, null, raw.trim());
+        } catch (Exception ignored) {
+            return new WeatherLoc(null, null, "");
+        }
     }
 
-    private String translateWeather(String desc) {
-        if (desc == null) return "天气";
-        String d = desc.trim();
-        // Exact matches
-        return switch (d) {
-            case "Sunny" -> "晴";
-            case "Clear" -> "晴";
-            case "Partly Cloudy", "Partly cloudy" -> "多云";
-            case "Cloudy" -> "阴";
-            case "Overcast" -> "阴";
-            case "Mist", "Fog", "Freezing fog" -> "雾";
-            case "Light drizzle", "Patchy light drizzle" -> "毛毛雨";
-            case "Light rain", "Light Rain" -> "小雨";
-            case "Moderate rain", "Moderate or heavy rain shower" -> "中雨";
-            case "Heavy rain", "Torrential rain shower" -> "大雨";
-            case "Patchy rain possible", "Patchy rain nearby" -> "可能有雨";
-            case "Thunderstorm", "Thundery outbreaks possible" -> "雷暴";
-            case "Light snow", "Patchy light snow" -> "小雪";
-            case "Moderate snow" -> "中雪";
-            case "Heavy snow" -> "大雪";
-            case "Blizzard" -> "暴风雪";
-            case "Light sleet" -> "雨夹雪";
-            default -> {
-                String lower = d.toLowerCase();
-                if (lower.contains("sunny") || lower.contains("clear")) yield "晴";
-                if (lower.contains("cloudy")) yield "多云";
-                if (lower.contains("overcast")) yield "阴";
-                if (lower.contains("fog") || lower.contains("mist")) yield "雾";
-                if (lower.contains("drizzle")) yield "毛毛雨";
-                if (lower.contains("heavy rain") || lower.contains("torrential")) yield "大雨";
-                if (lower.contains("rain") || lower.contains("shower")) yield "有雨";
-                if (lower.contains("thunder") || lower.contains("lightning")) yield "雷暴";
-                if (lower.contains("snow") || lower.contains("blizzard")) yield "雪";
-                if (lower.contains("sleet") || lower.contains("ice")) yield "雨夹雪";
-                if (lower.contains("wind")) yield "大风";
-                yield "天气";
-            }
-        };
+    private String getUserWeatherLocation(Jwt jwt) {
+        Long userId = jwt != null ? JwtUtils.getUserId(jwt) : null;
+        return getUserWeatherLocation(userId).name();
     }
+
+    @GetMapping("/insights")
+    public Result<UserInsightDto> insights(@AuthenticationPrincipal Jwt jwt) {
+        Long userId = JwtUtils.getUserId(jwt);
+        return Result.success(portraitComputeService.load(userId).getInsights());
+    }
+
+    @GetMapping("/portrait")
+    public Result<UserPortraitDto> portrait(@AuthenticationPrincipal Jwt jwt) {
+        Long userId = JwtUtils.getUserId(jwt);
+        return Result.success(portraitComputeService.load(userId));
+    }
+
+    @PostMapping("/portrait/recompute")
+    public Result<UserPortraitDto> recomputePortrait(@AuthenticationPrincipal Jwt jwt) {
+        Long userId = JwtUtils.getUserId(jwt);
+        return Result.success(portraitComputeService.recompute(userId));
+    }
+
 }

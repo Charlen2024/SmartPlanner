@@ -10,16 +10,30 @@ import org.springframework.security.oauth2.jwt.JwtEncoder;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
 
+import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 
+@Slf4j
 @Configuration
 public class JwtConfig {
 
+    @Value("${JWT_SECRET:}")
+    private String jwtSecret;
+
+    @PostConstruct
+    void validateJwtSecret() {
+        if (jwtSecret == null || jwtSecret.isBlank() || jwtSecret.length() < 32) {
+            log.error("JWT_SECRET is empty or too short (min 32 chars). Set JWT_SECRET env var.");
+            throw new IllegalStateException("JWT_SECRET must be at least 32 characters");
+        }
+    }
+
     @Bean
-    public byte[] jwtSecretBytes(@Value("${JWT_SECRET:}") String secret) {
-        return secret.getBytes(StandardCharsets.UTF_8);
+    public byte[] jwtSecretBytes() {
+        return jwtSecret.getBytes(StandardCharsets.UTF_8);
     }
 
     @Bean

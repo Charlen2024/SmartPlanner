@@ -4,8 +4,12 @@ server:
 spring:
   application:
     name: schedule-engine
+  boot:
+    admin:
+      client:
+        url: http://admin-server:9090
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/vibe_schedule?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true}
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/sp_schedule?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true}
     username: root
     password: root
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -26,7 +30,92 @@ spring:
 smartplanner:
   ai:
     schedule-timeout-seconds: 170
+  schedule:
+    session-minutes: 45
+    break-minutes: 10
+    max-daily-minutes: 240
+    session-minutes-short: 25
+    max-daily-minutes-conservative: 180
+    min-slot-minutes: 10
+    candidate-ai-timeout-seconds: 600
+    schedule-ai-timeout-seconds: 170
+    default-procrastination-index: 0.3
+    procrastination-threshold: 0.6
+    study-start: "08:00"
+    study-end: "22:00"
+    prompts:
+      candidate-plan-system: |
+        你是一个学习计划排程助手。你将收到：
+        1) 用户某天的空闲时间段列表（freeSlots）
+        2) 用户待办学习任务列表（tasks）
+        3) 用户画像（userProfile）：包含 procrastinationIndex（拖延指数 0-1）、
+           focusMinutes（建议单次专注时长）、breakMinutes（休息间隔）、maxDailyMinutes（当日学习上限）
+        你的目标是给出"候选排程建议"（candidateSchedules），把任务分散安排到空闲时间中。
+
+        输出必须是严格 JSON（不要 Markdown、不要额外文字），格式：
+        {
+          "note": "简短说明",
+          "candidateSchedules": [{"taskId":123,"startTime":"YYYY-MM-DDTHH:mm:ss","endTime":"YYYY-MM-DDTHH:mm:ss"}]
+        }
+
+        排程策略（根据用户画像动态调整）：
+        - 单次学习 = focusMinutes 分钟 + breakMinutes 分钟休息，当日总时长 ≤ maxDailyMinutes
+        - procrastinationIndex > 0.6：用户容易拖延，安排应保守——减少任务数、多留缓冲、优先安排短任务
+        - procrastinationIndex < 0.3：用户自律性强，可适度紧凑安排
+        - 严禁与课表冲突：所有安排必须落在 freeSlots 内
+        - 每个任务之间必须保留至少 breakMinutes 分钟的间隔（前一个 endTime + breakMinutes ≤ 后一个 startTime）
+        - 尽可能把任务分散到不同的 freeSlots 中，优先填满较早的空闲时段
+        - 必须为 tasks 列表中的每一个任务都安排时间，不得遗漏
+      plan-system: |
+        你是一个学习计划排程助手。你将收到：
+        1) 用户某天的空闲时间段列表（freeSlots）
+        2) 用户待办学习任务列表（tasks）
+        3) 用户画像（userProfile）：包含 procrastinationIndex（拖延指数 0-1，越高越拖延）、
+           focusMinutes（建议单次专注时长）、breakMinutes（休息间隔）、maxDailyMinutes（当日学习上限）
+        你的目标是给出"候选排程建议"（candidateSchedules），并且在你认为用户给出的 freeSlots 不合理/可优化时，给出 suggestedFreeSlots 以及基于 suggestedFreeSlots 的 suggestedSchedules。
+
+        输出必须是严格 JSON（不要 Markdown、不要额外文字），格式：
+        {
+          "note": "简短说明",
+          "suggestedFreeSlots": [{"start":"YYYY-MM-DDTHH:mm:ss","end":"YYYY-MM-DDTHH:mm:ss"}],
+          "candidateSchedules": [{"taskId":123,"startTime":"YYYY-MM-DDTHH:mm:ss","endTime":"YYYY-MM-DDTHH:mm:ss"}],
+          "suggestedSchedules": [{"taskId":123,"startTime":"YYYY-MM-DDTHH:mm:ss","endTime":"YYYY-MM-DDTHH:mm:ss"}]
+        }
+
+        排程策略（根据用户画像动态调整）：
+        - 单次学习 = focusMinutes 分钟 + breakMinutes 分钟休息，当日总时长 ≤ maxDailyMinutes
+        - procrastinationIndex > 0.6：用户容易拖延，安排应保守——减少任务数、多留缓冲、优先安排短任务建立成就感
+        - procrastinationIndex < 0.3：用户自律性强，可适度紧凑安排
+        - 优先安排 priority 更高的任务；estimatedMinutes 越大越适合放到更长的空闲段
+        - 每天最多 3 个深度任务（estimatedMinutes>=60 的视为深度任务）
+      daily-plan-system: |
+        你是一个学习计划排程助手。请把任务分散安排到 freeSlots 中，严禁与课表冲突（必须完全落在 freeSlots 内）。
+        请根据用户画像（userProfile）调整排程策略：
+        - 采用 focusMinutes 分钟学习 + breakMinutes 分钟休息的节奏
+        - 当天学习总时长不超过 maxDailyMinutes 分钟
+        - procrastinationIndex（拖延指数）> 0.6：该用户容易拖延，任务安排应偏保守，减少任务数量、
+          多留缓冲时间，优先安排短任务帮助建立成就感
+        - procrastinationIndex < 0.3：用户自律性强，可适度紧凑安排
+
+        输出必须是严格 JSON（不要 Markdown、不要额外文字），格式：
+        {"note":"说明","candidateSchedules":[{"taskId":123,"taskTitle":"任务标题","startTime":"YYYY-MM-DDTHH:mm:ss","endTime":"YYYY-MM-DDTHH:mm:ss"}]}
+
+        约束：
+        - taskId 必须从 tasks 列表中的 id 里选择（严禁编造/使用序号）
+        - taskTitle 必须与该 taskId 对应的 title 完全一致
+        - 每个任务之间必须保留至少 breakMinutes 分钟的间隔（前一个 endTime + breakMinutes ≤ 后一个 startTime）
+        - 尽可能把任务分散到不同的 freeSlots 中，优先填满较早的空闲时段
+        - 必须为 tasks 列表中的每一个任务都安排时间，不得遗漏
 
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+  endpoint:
+    health:
+      show-details: always

@@ -24,6 +24,8 @@ import com.chao.schedule.entity.UserScheduleConfig;
 import com.chao.schedule.mapper.ClassScheduleMapper;
 import com.chao.schedule.mapper.PlanCandidateMapper;
 import com.chao.schedule.mapper.TaskScheduleMapper;
+import com.chao.schedule.config.ScheduleAiConfig;
+import com.chao.schedule.config.ScheduleAiPrompts;
 import com.chao.schedule.mapper.UserScheduleConfigMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -34,7 +36,6 @@ import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.ss.usermodel.WorkbookFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -57,6 +58,7 @@ import java.util.Set;
 import java.nio.charset.StandardCharsets;
 import java.util.stream.Collectors;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
@@ -71,908 +73,73 @@ public class ScheduleService {
     private final GoalClient goalClient;
     private final OpenAiCompatClient openAiCompatClient;
     private final ObjectMapper objectMapper;
+    private final Executor aiTaskExecutor;
     private final PlanCandidateWorker planCandidateWorker;
+    private final ScheduleAiConfig aiConfig;
+    private final ScheduleAiPrompts aiPrompts;
+    private final ScheduleUtils scheduleUtils;
+    private final ScheduleValidator scheduleValidator;
+    private final TaskScheduleService taskScheduleService;
+    private final FreeTimeCalculator freeTimeCalculator;
+    private final ScheduleImportService scheduleImportService;
 
-    @Value("${smartplanner.ai.schedule-timeout-seconds:170}")
-    private long scheduleAiTimeoutSeconds;
-
+    // Periods are structural (Chinese university schedule), not configurable
     private static final ZoneId APP_ZONE = ZoneId.of("Asia/Shanghai");
-    private static final int SESSION_MINUTES = 45;
-    private static final int BREAK_MINUTES = 10;
-    private static final int MAX_STUDY_MINUTES_PER_DAY = 240;
-    private static final int SESSION_MINUTES_SHORT = 25;
-    private static final int MAX_STUDY_MINUTES_CONSERVATIVE = 180;
 
-    private static SchedulePreferenceDto resolvePreference(SchedulePreferenceDto pref) {
+    public SchedulePreferenceDto resolvePreference(SchedulePreferenceDto pref) {
         if (pref == null) {
             pref = new SchedulePreferenceDto();
         }
         if (pref.getFocusMinutes() == null || pref.getFocusMinutes() <= 0) {
-            pref.setFocusMinutes(SESSION_MINUTES);
+            pref.setFocusMinutes(aiConfig.getSessionMinutes());
         }
         if (pref.getBreakMinutes() == null || pref.getBreakMinutes() <= 0) {
-            pref.setBreakMinutes(BREAK_MINUTES);
+            pref.setBreakMinutes(aiConfig.getBreakMinutes());
         }
         if (pref.getMaxDailyMinutes() == null || pref.getMaxDailyMinutes() <= 0) {
-            pref.setMaxDailyMinutes(MAX_STUDY_MINUTES_PER_DAY);
+            pref.setMaxDailyMinutes(aiConfig.getMaxDailyMinutes());
         }
         if (pref.getProcrastinationIndex() == null) {
-            pref.setProcrastinationIndex(0.3f);
+            pref.setProcrastinationIndex(aiConfig.getDefaultProcrastinationIndex());
         }
         return pref;
     }
-
-    // 节数 → 时间映射（默认中国大学作息）
-    private static final LocalTime[] PERIOD_START = {
-        null, // index 0 unused
-        LocalTime.of(8, 0),   // 第1节
-        LocalTime.of(8, 55),  // 第2节
-        LocalTime.of(10, 0),  // 第3节
-        LocalTime.of(10, 55), // 第4节
-        LocalTime.of(14, 0),  // 第5节
-        LocalTime.of(14, 55), // 第6节
-        LocalTime.of(16, 0),  // 第7节
-        LocalTime.of(16, 55), // 第8节
-        LocalTime.of(19, 0),  // 第9节
-        LocalTime.of(19, 55), // 第10节
-    };
-    private static final LocalTime[] PERIOD_END = {
-        null, // index 0 unused
-        LocalTime.of(8, 45),  // 第1节
-        LocalTime.of(9, 40),  // 第2节
-        LocalTime.of(10, 45), // 第3节
-        LocalTime.of(11, 40), // 第4节
-        LocalTime.of(14, 45), // 第5节
-        LocalTime.of(15, 40), // 第6节
-        LocalTime.of(16, 45), // 第7节
-        LocalTime.of(17, 40), // 第8节
-        LocalTime.of(19, 45), // 第9节
-        LocalTime.of(20, 40), // 第10节
-    };
 
     private static final int CANDIDATE_STATUS_READY = 0;
     private static final int CANDIDATE_STATUS_ACCEPTED = 1;
     private static final int CANDIDATE_STATUS_REJECTED = 2;
     private static final int CANDIDATE_STATUS_GENERATING = 3;
 
-    private static final String PLAN_SYSTEM_PROMPT = """
-        你是一个学习计划排程助手。你将收到：
-        1) 用户某天的空闲时间段列表（freeSlots）
-        2) 用户待办学习任务列表（tasks）
-        3) 用户画像（userProfile）：包含 procrastinationIndex（拖延指数 0-1，越高越拖延）、
-           focusMinutes（建议单次专注时长）、breakMinutes（休息间隔）、maxDailyMinutes（当日学习上限）
-        你的目标是给出"候选排程建议"（candidateSchedules），并且在你认为用户给出的 freeSlots 不合理/可优化时，给出 suggestedFreeSlots 以及基于 suggestedFreeSlots 的 suggestedSchedules。
-
-        输出必须是严格 JSON（不要 Markdown、不要额外文字），格式：
-        {
-          "note": "简短说明",
-          "suggestedFreeSlots": [{"start":"YYYY-MM-DDTHH:mm:ss","end":"YYYY-MM-DDTHH:mm:ss"}],
-          "candidateSchedules": [{"taskId":123,"startTime":"YYYY-MM-DDTHH:mm:ss","endTime":"YYYY-MM-DDTHH:mm:ss"}],
-          "suggestedSchedules": [{"taskId":123,"startTime":"YYYY-MM-DDTHH:mm:ss","endTime":"YYYY-MM-DDTHH:mm:ss"}]
-        }
-
-        排程策略（根据用户画像动态调整）：
-        - 单次学习 = focusMinutes 分钟 + breakMinutes 分钟休息，当日总时长 ≤ maxDailyMinutes
-        - procrastinationIndex > 0.6：用户容易拖延，安排应保守——减少任务数、多留缓冲、优先安排短任务建立成就感
-        - procrastinationIndex < 0.3：用户自律性强，可适度紧凑安排
-        - 优先安排 priority 更高的任务；estimatedMinutes 越大越适合放到更长的空闲段
-        - 每天最多 3 个深度任务（estimatedMinutes>=60 的视为深度任务）
-        """;
-
-    private static final String DAILY_PLAN_SYSTEM_PROMPT = """
-        你是一个学习计划排程助手。请把任务分散安排到 freeSlots 中，严禁与课表冲突（必须完全落在 freeSlots 内）。
-        请根据用户画像（userProfile）调整排程策略：
-        - 采用 focusMinutes 分钟学习 + breakMinutes 分钟休息的节奏
-        - 当天学习总时长不超过 maxDailyMinutes 分钟
-        - procrastinationIndex（拖延指数）> 0.6：该用户容易拖延，任务安排应偏保守，减少任务数量、
-          多留缓冲时间，优先安排短任务帮助建立成就感
-        - procrastinationIndex < 0.3：用户自律性强，可适度紧凑安排
-
-        输出必须是严格 JSON（不要 Markdown、不要额外文字），格式：
-        {"note":"说明","candidateSchedules":[{"taskId":123,"taskTitle":"任务标题","startTime":"YYYY-MM-DDTHH:mm:ss","endTime":"YYYY-MM-DDTHH:mm:ss"}]}
-
-        约束：
-        - taskId 必须从 tasks 列表中的 id 里选择（严禁编造/使用序号）
-        - taskTitle 必须与该 taskId 对应的 title 完全一致
-        """;
-
     public ScheduleImportResultDto parseAndSaveSchedule(Long userId, MultipartFile file, String firstWeekMonday) {
-        String fileName = file != null ? file.getOriginalFilename() : null;
-        log.info("用户 {} 上传课表: {} firstWeekMonday={}", userId, fileName, firstWeekMonday);
-
-        if (file == null || file.isEmpty()) {
-            throw new IllegalArgumentException("课表文件为空");
-        }
-
-        String ext = fileName != null && fileName.contains(".") ? fileName.substring(fileName.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT) : "";
-
-        if (!"ics".equals(ext) && !"xlsx".equals(ext) && !"xls".equals(ext) && !"csv".equals(ext)) {
-            throw new IllegalArgumentException("仅支持 .ics / .xlsx / .xls / .csv");
-        }
-
-        classScheduleMapper.delete(new LambdaQueryWrapper<ClassSchedule>().eq(ClassSchedule::getUserId, userId));
-
-        // 持久化 firstWeekMonday
-        if (firstWeekMonday != null && !firstWeekMonday.isBlank()) {
-            UserScheduleConfig cfg = new UserScheduleConfig();
-            cfg.setUserId(userId);
-            cfg.setFirstWeekMonday(java.time.LocalDate.parse(firstWeekMonday));
-            userScheduleConfigMapper.insertOrUpdate(cfg);
-        }
-
-        ScheduleImportResultDto result = new ScheduleImportResultDto();
-        result.setFileName(fileName);
-        result.setFormat(ext);
-        result.setWarnings(new ArrayList<>());
-
-        if ("ics".equals(ext)) {
-            importFromIcs(userId, file, result);
-            return result;
-        }
-        if ("csv".equals(ext)) {
-            importFromCsv(userId, file, result);
-            return result;
-        }
-
-        importFromExcel(userId, file, result);
-        return result;
-    }
-
-    private void importFromIcs(Long userId, MultipartFile file, ScheduleImportResultDto result) {
-        int inserted = 0;
-        int skipped = 0;
-        int total = 0;
-        try {
-            CalendarBuilder builder = new CalendarBuilder();
-            Calendar calendar = builder.build(file.getInputStream());
-            java.util.Set<String> dedup = new java.util.HashSet<>();
-            for (Object component : calendar.getComponents(Component.VEVENT)) {
-                total++;
-                try {
-                    VEvent event = (VEvent) component;
-                    if (event.getSummary() == null || event.getStartDate() == null || event.getEndDate() == null) {
-                        skipped++;
-                        continue;
-                    }
-                    String courseName = event.getSummary().getValue();
-                    LocalDateTime start = event.getStartDate().getDate().toInstant().atZone(APP_ZONE).toLocalDateTime();
-                    LocalDateTime end = event.getEndDate().getDate().toInstant().atZone(APP_ZONE).toLocalDateTime();
-
-                    if (!end.isAfter(start)) {
-                        skipped++;
-                        continue;
-                    }
-
-                    java.util.List<Integer> dows = new java.util.ArrayList<>();
-                    net.fortuna.ical4j.model.Property rrule = event.getProperty(net.fortuna.ical4j.model.Property.RRULE);
-                    if (rrule != null && rrule.getValue() != null) {
-                        String v = rrule.getValue().toUpperCase(java.util.Locale.ROOT);
-                        int idx = v.indexOf("BYDAY=");
-                        if (idx >= 0) {
-                            String rest = v.substring(idx + 6);
-                            int semi = rest.indexOf(';');
-                            if (semi >= 0) {
-                                rest = rest.substring(0, semi);
-                            }
-                            for (String code : rest.split(",")) {
-                                String c = code.trim();
-                                if (c.endsWith("MO")) dows.add(1);
-                                else if (c.endsWith("TU")) dows.add(2);
-                                else if (c.endsWith("WE")) dows.add(3);
-                                else if (c.endsWith("TH")) dows.add(4);
-                                else if (c.endsWith("FR")) dows.add(5);
-                                else if (c.endsWith("SA")) dows.add(6);
-                                else if (c.endsWith("SU")) dows.add(7);
-                            }
-                        }
-                    }
-                    if (dows.isEmpty()) {
-                        dows.add(start.getDayOfWeek().getValue());
-                    }
-
-                    String location = event.getLocation() != null ? event.getLocation().getValue() : null;
-                    for (Integer dow : dows) {
-                        if (dow == null) continue;
-                        ClassSchedule schedule = new ClassSchedule();
-                        schedule.setUserId(userId);
-                        schedule.setCourseName(courseName);
-                        schedule.setDayOfWeek(dow);
-                        schedule.setStartTime(start.toLocalTime());
-                        schedule.setEndTime(end.toLocalTime());
-                        schedule.setLocation(location);
-                        String key = (courseName == null ? "" : courseName) + "|" + dow + "|" + schedule.getStartTime() + "|" + schedule.getEndTime() + "|" + (location == null ? "" : location);
-                        if (!dedup.add(key)) {
-                            continue;
-                        }
-                        classScheduleMapper.insert(schedule);
-                        inserted++;
-                    }
-                } catch (Exception rowEx) {
-                    skipped++;
-                }
-            }
-        } catch (Exception e) {
-            throw new IllegalArgumentException("解析 .ics 失败：" + e.getMessage());
-        }
-
-        result.setTotal(total);
-        result.setInserted(inserted);
-        result.setSkipped(skipped);
-        if (skipped > 0) {
-            result.getWarnings().add("存在无法解析的事件，已跳过：" + skipped);
-        }
-    }
-
-    private void importFromExcel(Long userId, MultipartFile file, ScheduleImportResultDto result) {
-        int inserted = 0;
-        int skipped = 0;
-        int total = 0;
-        try (Workbook wb = WorkbookFactory.create(file.getInputStream())) {
-            Sheet sheet = wb.getNumberOfSheets() > 0 ? wb.getSheetAt(0) : null;
-            if (sheet == null) {
-                throw new IllegalArgumentException("Excel 为空");
-            }
-
-            Row header = sheet.getRow(sheet.getFirstRowNum());
-            if (header == null) {
-                throw new IllegalArgumentException("缺少表头行");
-            }
-
-            Map<String, Integer> idx = resolveHeaderIndex(header);
-            boolean hasPeriod = idx.containsKey("startPeriod") && idx.containsKey("endPeriod");
-            boolean hasTime = idx.containsKey("start") && idx.containsKey("end");
-            boolean hasWeeks = idx.containsKey("weeks");
-
-            if (!idx.containsKey("course") || !idx.containsKey("dow")) {
-                throw new IllegalArgumentException("表头至少需要：课程名,星期");
-            }
-            if (!hasPeriod && !hasTime) {
-                throw new IllegalArgumentException("表头需要：开始节数+结束节数 或 开始时间+结束时间");
-            }
-
-            for (int r = header.getRowNum() + 1; r <= sheet.getLastRowNum(); r++) {
-                Row row = sheet.getRow(r);
-                if (row == null) {
-                    continue;
-                }
-                String course = getCellString(row.getCell(idx.get("course")));
-                String dowStr = getCellString(row.getCell(idx.get("dow")));
-                String location = idx.containsKey("loc") ? getCellString(row.getCell(idx.get("loc"))) : null;
-                String weekStr = hasWeeks ? getCellString(row.getCell(idx.get("weeks"))) : null;
-
-                boolean empty = (course == null || course.isBlank()) && (dowStr == null || dowStr.isBlank());
-                if (empty) {
-                    continue;
-                }
-                total++;
-                try {
-                    Integer dow = parseDayOfWeek(dowStr);
-                    if (course == null || course.isBlank() || dow == null) {
-                        skipped++;
-                        continue;
-                    }
-
-                    LocalTime start;
-                    LocalTime end;
-                    if (hasPeriod) {
-                        String startPeriodStr = getCellString(row.getCell(idx.get("startPeriod")));
-                        String endPeriodStr = getCellString(row.getCell(idx.get("endPeriod")));
-                        Integer sp = parseIntSafe(startPeriodStr);
-                        Integer ep = parseIntSafe(endPeriodStr);
-                        if (sp == null || ep == null) {
-                            skipped++;
-                            continue;
-                        }
-                        start = periodToStartTime(sp);
-                        end = periodToEndTime(ep);
-                    } else {
-                        String startStr = getCellString(row.getCell(idx.get("start")));
-                        String endStr = getCellString(row.getCell(idx.get("end")));
-                        start = parseTime(row.getCell(idx.get("start")), startStr);
-                        end = parseTime(row.getCell(idx.get("end")), endStr);
-                    }
-
-                    if (start == null || end == null || !end.isAfter(start)) {
-                        skipped++;
-                        continue;
-                    }
-
-                    ClassSchedule schedule = new ClassSchedule();
-                    schedule.setUserId(userId);
-                    schedule.setCourseName(course.trim());
-                    schedule.setDayOfWeek(dow);
-                    schedule.setStartTime(start);
-                    schedule.setEndTime(end);
-                    schedule.setLocation(location != null && !location.isBlank() ? location.trim() : null);
-
-                    if (weekStr != null && !weekStr.isBlank()) {
-                        WeekRange wr = parseWeekRange(weekStr);
-                        if (wr != null) {
-                            schedule.setWeekStart(wr.start);
-                            schedule.setWeekEnd(wr.end);
-                            schedule.setWeekType(wr.weekType);
-                        }
-                    }
-
-                    classScheduleMapper.insert(schedule);
-                    inserted++;
-                } catch (Exception rowEx) {
-                    skipped++;
-                    result.getWarnings().add("第 " + (r + 1) + " 行解析失败，已跳过");
-                }
-            }
-        } catch (IllegalArgumentException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new IllegalArgumentException("解析 Excel 失败：" + e.getMessage());
-        }
-
-        result.setTotal(total);
-        result.setInserted(inserted);
-        result.setSkipped(skipped);
-        if (inserted == 0) {
-            result.getWarnings().add("未导入任何课程，请检查表头与时间格式");
-        }
-    }
-
-    private void importFromCsv(Long userId, MultipartFile file, ScheduleImportResultDto result) {
-        int inserted = 0;
-        int skipped = 0;
-        int total = 0;
-        try {
-            String text = new String(file.getBytes(), StandardCharsets.UTF_8);
-            // 处理BOM头
-            if (text.startsWith("\uFEFF")) {
-                text = text.substring(1);
-            }
-            // \u89C4\u8303\u5316\u5168\u89D2\u9017\u53F7\uFF08\u4E2D\u6587\u8F93\u5165\u6CD5\u5E38\u89C1\u95EE\u9898\uFF09
-            text = text.replace('\uFF0C', ',');
-            String[] lines = text.split("\\r?\\n");
-            if (lines.length <= 1) {
-                throw new IllegalArgumentException("CSV 内容为空");
-            }
-            String[] header = lines[0].split(",");
-            // 清理表头中的BOM和空格
-            for (int i = 0; i < header.length; i++) {
-                header[i] = header[i].replace("\uFEFF", "").trim();
-            }
-
-            Map<String, Integer> idx = resolveHeaderIndex(header);
-            boolean hasPeriod = idx.containsKey("startPeriod") && idx.containsKey("endPeriod");
-            boolean hasTime = idx.containsKey("start") && idx.containsKey("end");
-            boolean hasWeeks = idx.containsKey("weeks");
-
-            if (!idx.containsKey("course") || !idx.containsKey("dow")) {
-                throw new IllegalArgumentException("CSV 表头至少需要：课程名称,星期");
-            }
-            if (!hasPeriod && !hasTime) {
-                throw new IllegalArgumentException("CSV 表头需要：开始节数+结束节数 或 开始时间+结束时间");
-            }
-
-            for (int i = 1; i < lines.length; i++) {
-                String line = lines[i].trim();
-                if (line.isEmpty()) continue;
-                String[] cols = line.split(",");
-                total++;
-                try {
-                    String course = getArray(cols, idx.get("course"));
-                    String dowStr = getArray(cols, idx.get("dow"));
-                    String location = idx.containsKey("loc") ? getArray(cols, idx.get("loc")) : null;
-                    String weekStr = hasWeeks ? getArray(cols, idx.get("weeks")) : null;
-
-                    Integer dow = parseDayOfWeek(dowStr);
-                    if (course == null || course.isBlank() || dow == null) {
-                        skipped++;
-                        continue;
-                    }
-
-                    LocalTime start;
-                    LocalTime end;
-                    if (hasPeriod) {
-                        String startPeriodStr = getArray(cols, idx.get("startPeriod"));
-                        String endPeriodStr = getArray(cols, idx.get("endPeriod"));
-                        Integer sp = parseIntSafe(startPeriodStr);
-                        Integer ep = parseIntSafe(endPeriodStr);
-                        if (sp == null || ep == null) {
-                            skipped++;
-                            continue;
-                        }
-                        start = periodToStartTime(sp);
-                        end = periodToEndTime(ep);
-                    } else {
-                        String startStr = getArray(cols, idx.get("start"));
-                        String endStr = getArray(cols, idx.get("end"));
-                        start = parseTime(null, startStr);
-                        end = parseTime(null, endStr);
-                    }
-
-                    if (start == null || end == null || !end.isAfter(start)) {
-                        skipped++;
-                        continue;
-                    }
-
-                    ClassSchedule schedule = new ClassSchedule();
-                    schedule.setUserId(userId);
-                    schedule.setCourseName(course.trim());
-                    schedule.setDayOfWeek(dow);
-                    schedule.setStartTime(start);
-                    schedule.setEndTime(end);
-                    schedule.setLocation(location != null && !location.isBlank() ? location.trim() : null);
-
-                    if (weekStr != null && !weekStr.isBlank()) {
-                        WeekRange wr = parseWeekRange(weekStr);
-                        if (wr != null) {
-                            schedule.setWeekStart(wr.start);
-                            schedule.setWeekEnd(wr.end);
-                            schedule.setWeekType(wr.weekType);
-                        }
-                    }
-
-                    classScheduleMapper.insert(schedule);
-                    inserted++;
-                } catch (Exception ex) {
-                    log.error("解析第 {} 行失败: {}", i, ex.getMessage(), ex);
-                    skipped++;
-                }
-            }
-        } catch (IllegalArgumentException e) {
-            throw e;
-        } catch (Exception e) {
-            log.error("解析 CSV 失败", e);
-            throw new IllegalArgumentException("解析 CSV 失败：" + e.getMessage());
-        }
-        result.setTotal(total);
-        result.setInserted(inserted);
-        result.setSkipped(skipped);
-        if (skipped > 0) {
-            result.getWarnings().add("存在无法解析的行，已跳过：" + skipped);
-        }
-    }
-
-    private Integer parseIntSafe(String s) {
-        if (s == null || s.isBlank()) return null;
-        try {
-            return Integer.parseInt(s.trim());
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
-    private Map<String, Integer> resolveHeaderIndex(String[] header) {
-        Map<String, Integer> m = new HashMap<>();
-        for (int c = 0; c < header.length; c++) {
-            String v = header[c];
-            if (v == null) continue;
-            String s = v.trim().toLowerCase(Locale.ROOT);
-            if (s.isEmpty()) continue;
-            if (s.contains("课程") || s.contains("course")) {
-                m.put("course", c);
-            } else if (s.contains("星期") || s.contains("周几") || s.contains("dayofweek") || s.contains("dow")) {
-                m.put("dow", c);
-            } else if (s.contains("开始节数") || s.contains("startperiod")) {
-                m.put("startPeriod", c);
-            } else if (s.contains("结束节数") || s.contains("endperiod")) {
-                m.put("endPeriod", c);
-            } else if (s.contains("周数") || s.contains("weeks")) {
-                m.put("weeks", c);
-            } else if (s.contains("开始") || s.contains("start")) {
-                m.put("start", c);
-            } else if (s.contains("结束") || s.contains("end")) {
-                m.put("end", c);
-            } else if (s.contains("地点") || s.contains("教室") || s.contains("location")) {
-                m.put("loc", c);
-            }
-        }
-        return m;
-    }
-
-    private String getArray(String[] cols, Integer idx) {
-        if (idx == null || idx < 0 || idx >= cols.length) return null;
-        return cols[idx];
-    }
-
-    private Map<String, Integer> resolveHeaderIndex(Row header) {
-        Map<String, Integer> m = new HashMap<>();
-        for (int c = header.getFirstCellNum(); c < header.getLastCellNum(); c++) {
-            Cell cell = header.getCell(c);
-            String v = getCellString(cell);
-            if (v == null) {
-                continue;
-            }
-            String s = v.trim().toLowerCase(Locale.ROOT);
-            if (s.isEmpty()) {
-                continue;
-            }
-            if (s.contains("课程") || s.contains("course")) {
-                m.put("course", c);
-            } else if (s.contains("星期") || s.contains("周几") || s.contains("dayofweek") || s.contains("dow")) {
-                m.put("dow", c);
-            } else if (s.contains("开始节数") || s.contains("startperiod")) {
-                m.put("startPeriod", c);
-            } else if (s.contains("结束节数") || s.contains("endperiod")) {
-                m.put("endPeriod", c);
-            } else if (s.contains("周数") || s.contains("weeks")) {
-                m.put("weeks", c);
-            } else if (s.contains("开始") || s.contains("start")) {
-                m.put("start", c);
-            } else if (s.contains("结束") || s.contains("end")) {
-                m.put("end", c);
-            } else if (s.contains("地点") || s.contains("教室") || s.contains("location")) {
-                m.put("loc", c);
-            }
-        }
-        return m;
-    }
-
-    private String getCellString(Cell cell) {
-        if (cell == null) {
-            return null;
-        }
-        if (cell.getCellType() == CellType.STRING) {
-            return cell.getStringCellValue();
-        }
-        if (cell.getCellType() == CellType.NUMERIC) {
-            double v = cell.getNumericCellValue();
-            if (v == Math.floor(v)) {
-                return String.valueOf((long) v);
-            }
-            return String.valueOf(v);
-        }
-        if (cell.getCellType() == CellType.BOOLEAN) {
-            return String.valueOf(cell.getBooleanCellValue());
-        }
-        return null;
-    }
-
-    /**
-     * 解析周数格式：
-     *   "X月Y日" → start=X, end=Y
-     *   "X-Y双" → start=X, end=Y, weekType=even
-     *   "X-Y单" → start=X, end=Y, weekType=odd
-     *   "X"     → start=X, end=X
-     *   "X月Y日双" → start=X, end=Y, weekType=even
-     */
-    private WeekRange parseWeekRange(String raw) {
-        if (raw == null || raw.isBlank()) return null;
-        String s = normalizeFullWidth(raw).trim();
-        boolean even = false;
-        boolean odd = false;
-        if (s.contains("双")) { even = true; s = s.replace("双", ""); }
-        else if (s.contains("单")) { odd = true; s = s.replace("单", ""); }
-        else if (s.contains("偶")) { even = true; s = s.replace("偶", ""); }
-        else if (s.contains("奇")) { odd = true; s = s.replace("奇", ""); }
-
-        // 尝试 "X月Y日" 格式
-        java.util.regex.Matcher m1 = java.util.regex.Pattern.compile("(\\d+)\\s*月\\s*(\\d+)\\s*日?").matcher(s);
-        if (m1.find()) {
-            WeekRange r = new WeekRange();
-            r.start = Integer.parseInt(m1.group(1));
-            r.end = Integer.parseInt(m1.group(2));
-            r.weekType = even ? "even" : (odd ? "odd" : null);
-            return r;
-        }
-        // 尝试 "X-Y" 格式
-        java.util.regex.Matcher m2 = java.util.regex.Pattern.compile("(\\d+)\\s*-\\s*(\\d+)").matcher(s);
-        if (m2.find()) {
-            WeekRange r = new WeekRange();
-            r.start = Integer.parseInt(m2.group(1));
-            r.end = Integer.parseInt(m2.group(2));
-            r.weekType = even ? "even" : (odd ? "odd" : null);
-            return r;
-        }
-        // 单个数字
-        try {
-            int n = Integer.parseInt(s.replaceAll("[^0-9]", ""));
-            WeekRange r = new WeekRange();
-            r.start = n;
-            r.end = n;
-            return r;
-        } catch (NumberFormatException ignored) {
-        }
-        log.warn("无法解析周数: {}", raw);
-        return null;
-    }
-
-    @lombok.Data
-    private static class WeekRange {
-        int start;
-        int end;
-        String weekType; // null=every, "odd", "even"
+        return scheduleImportService.parseAndSaveSchedule(userId, file, firstWeekMonday);
     }
 
     private boolean matchesWeek(ClassSchedule cs, int weekNumber) {
-        Integer ws = cs.getWeekStart();
-        Integer we = cs.getWeekEnd();
-        // 无周范围 = 每周都上
-        if (ws == null || we == null) return true;
-        if (weekNumber < ws || weekNumber > we) return false;
-        String wt = cs.getWeekType();
-        if (wt == null) return true;
-        if ("even".equalsIgnoreCase(wt)) return weekNumber % 2 == 0;
-        if ("odd".equalsIgnoreCase(wt)) return weekNumber % 2 == 1;
-        return true;
-    }
-
-    private LocalTime periodToStartTime(int period) {
-        if (period >= 1 && period < PERIOD_START.length && PERIOD_START[period] != null) {
-            return PERIOD_START[period];
-        }
-        return null;
-    }
-
-    private LocalTime periodToEndTime(int period) {
-        if (period >= 1 && period < PERIOD_END.length && PERIOD_END[period] != null) {
-            return PERIOD_END[period];
-        }
-        return null;
-    }
-
-    /** Normalize full-width ASCII variants commonly found in Chinese documents. */
-    private String normalizeFullWidth(String s) {
-        if (s == null) return null;
-        StringBuilder sb = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c >= '０' && c <= '９') {
-                sb.append((char) ('0' + (c - '０')));
-            } else if (c == '－') {
-                sb.append('-');
-            } else if (c == '，') {
-                sb.append(',');
-            } else if (c == '：') {
-                sb.append(':');
-            } else {
-                sb.append(c);
-            }
-        }
-        return sb.toString();
-    }
-
-    private Integer parseDayOfWeek(String s) {
-        if (s == null) {
-            return null;
-        }
-        String v = normalizeFullWidth(s).trim();
-        if (v.isEmpty()) {
-            return null;
-        }
-
-        // 尝试解析数字
-        try {
-            int n = Integer.parseInt(v);
-            if (n == 0) {
-                return 7; // 周日
-            }
-            if (n >= 1 && n <= 7) {
-                return n;
-            }
-        } catch (NumberFormatException ignored) {
-            // 不是数字，继续尝试中文
-        }
-
-        // 中文星期
-        if (v.contains("一") || v.equals("周一") || v.equals("星期一")) return 1;
-        if (v.contains("二") || v.equals("周二") || v.equals("星期二")) return 2;
-        if (v.contains("三") || v.equals("周三") || v.equals("星期三")) return 3;
-        if (v.contains("四") || v.equals("周四") || v.equals("星期四")) return 4;
-        if (v.contains("五") || v.equals("周五") || v.equals("星期五")) return 5;
-        if (v.contains("六") || v.equals("周六") || v.equals("星期六")) return 6;
-        if (v.contains("日") || v.contains("天") || v.equals("周日") || v.equals("星期天") || v.equals("星期日")) return 7;
-
-        // 英文星期
-        String lower = v.toLowerCase();
-        if (lower.startsWith("mon")) return 1;
-        if (lower.startsWith("tue")) return 2;
-        if (lower.startsWith("wed")) return 3;
-        if (lower.startsWith("thu")) return 4;
-        if (lower.startsWith("fri")) return 5;
-        if (lower.startsWith("sat")) return 6;
-        if (lower.startsWith("sun")) return 7;
-
-        log.warn("无法解析星期: {}", v);
-        return null;
-    }
-
-    private LocalTime parseTime(Cell cell, String fallback) {
-        try {
-            if (cell != null && cell.getCellType() == CellType.NUMERIC && org.apache.poi.ss.usermodel.DateUtil.isCellDateFormatted(cell)) {
-                java.util.Date d = cell.getDateCellValue();
-                return d.toInstant().atZone(ZoneId.systemDefault()).toLocalTime().withSecond(0).withNano(0);
-            }
-        } catch (Exception ignored) {
-        }
-
-        if (fallback == null) {
-            return null;
-        }
-        String s = normalizeFullWidth(fallback).trim();
-        if (s.isEmpty()) {
-            return null;
-        }
-        if (s.contains("-")) {
-            s = s.split("-")[0].trim();
-        }
-        if (s.length() == 4 && s.charAt(1) == ':') {
-            s = "0" + s;
-        }
-        if (s.length() == 5) {
-            return LocalTime.parse(s);
-        }
-        if (s.length() == 8) {
-            return LocalTime.parse(s).withSecond(0).withNano(0);
-        }
-        return null;
+        return freeTimeCalculator.matchesWeek(cs, weekNumber);
     }
 
     public List<ClassSchedule> listClassSchedules(Long userId, Integer dayOfWeek, String date, String firstWeekMonday) {
-        LambdaQueryWrapper<ClassSchedule> qw = new LambdaQueryWrapper<ClassSchedule>()
-                .eq(ClassSchedule::getUserId, userId)
-                .orderByAsc(ClassSchedule::getDayOfWeek)
-                .orderByAsc(ClassSchedule::getStartTime);
-        if (dayOfWeek != null) {
-            qw.eq(ClassSchedule::getDayOfWeek, dayOfWeek);
-        }
-        List<ClassSchedule> classes = classScheduleMapper.selectList(qw);
-
-        // 按周过滤，与 calculateFreeTime 保持一致
-        if (date != null && !date.isBlank() && firstWeekMonday != null && !firstWeekMonday.isBlank() && !classes.isEmpty()) {
-            LocalDate targetDate = LocalDate.parse(date);
-            LocalDate fwm = LocalDate.parse(firstWeekMonday);
-            long daysBetween = java.time.temporal.ChronoUnit.DAYS.between(fwm, targetDate);
-            int weekNumber = (int) Math.floor(daysBetween / 7.0) + 1;
-            classes = classes.stream().filter(c -> matchesWeek(c, weekNumber)).collect(Collectors.toList());
-        }
-        return classes;
+        return freeTimeCalculator.listClassSchedules(userId, dayOfWeek, date, firstWeekMonday);
     }
 
     public void deleteClassSchedules(Long userId) {
-        classScheduleMapper.delete(new LambdaQueryWrapper<ClassSchedule>().eq(ClassSchedule::getUserId, userId));
+        scheduleImportService.deleteClassSchedules(userId);
     }
 
     public void saveFirstWeekMonday(Long userId, LocalDate firstWeekMonday) {
-        UserScheduleConfig cfg = new UserScheduleConfig();
-        cfg.setUserId(userId);
-        cfg.setFirstWeekMonday(firstWeekMonday);
-        userScheduleConfigMapper.insertOrUpdate(cfg);
+        scheduleImportService.saveFirstWeekMonday(userId, firstWeekMonday);
     }
 
     public void clearFirstWeekMonday(Long userId) {
-        UserScheduleConfig cfg = userScheduleConfigMapper.selectById(userId);
-        if (cfg != null) {
-            cfg.setFirstWeekMonday(null);
-            userScheduleConfigMapper.updateById(cfg);
-        }
+        scheduleImportService.clearFirstWeekMonday(userId);
     }
 
     public List<ScheduleClient.TimeSlot> calculateFreeTime(Long userId, String dateStr) {
-        String fwm = null;
-        try {
-            UserScheduleConfig cfg = userScheduleConfigMapper.selectById(userId);
-            if (cfg != null && cfg.getFirstWeekMonday() != null) {
-                fwm = cfg.getFirstWeekMonday().toString();
-            }
-        } catch (Exception ignored) {
-        }
-        return calculateFreeTime(userId, dateStr, fwm);
+        return freeTimeCalculator.calculateFreeTime(userId, dateStr);
     }
 
     public List<ScheduleClient.TimeSlot> calculateFreeTime(Long userId, String dateStr, String firstWeekMonday) {
-        LocalDate date = LocalDate.parse(dateStr);
-        int dayOfWeek = date.getDayOfWeek().getValue();
-
-        log.info("计算用户 {} 在 {} (星期{}) 的空闲时间, firstWeekMonday={}", userId, date, dayOfWeek, firstWeekMonday);
-
-        // 计算该日期所属周数
-        Integer weekNumber = null;
-        if (firstWeekMonday != null && !firstWeekMonday.isBlank()) {
-            LocalDate fwm = LocalDate.parse(firstWeekMonday);
-            long daysBetween = java.time.temporal.ChronoUnit.DAYS.between(fwm, date);
-            weekNumber = (int) Math.floor(daysBetween / 7.0) + 1;
-        }
-
-        // 1. 获取当天的课程（先按 dayOfWeek 查，再按周过滤）
-        List<ClassSchedule> classes = classScheduleMapper.selectList(new LambdaQueryWrapper<ClassSchedule>()
-                .eq(ClassSchedule::getUserId, userId)
-                .eq(ClassSchedule::getDayOfWeek, dayOfWeek)
-                .orderByAsc(ClassSchedule::getStartTime));
-
-        // 按周过滤；仅当周号明显异常（<1 或 >20）且过滤后为空时，回退为不过滤，防止 firstWeekMonday 配置错误导致全天误判为空闲
-        if (weekNumber != null) {
-            final Integer wn = weekNumber;
-            List<ClassSchedule> filtered = classes.stream().filter(c -> matchesWeek(c, wn)).collect(Collectors.toList());
-            if (filtered.isEmpty() && !classes.isEmpty() && (wn < 1 || wn > 20)) {
-                log.warn("周过滤后无课程（weekNumber={}），且周号异常，回退为不过滤。请检查 firstWeekMonday 配置是否正确。", wn);
-            } else {
-                classes = filtered;
-            }
-        }
-
-        log.info("找到 {} 门课程（周过滤后）", classes.size());
-
-        // 2. 计算空闲时间 (假设学习时间为 08:00 - 22:00)
-        LocalTime studyStart = LocalTime.of(8, 0);
-        LocalTime studyEnd = LocalTime.of(22, 0);
-
-        List<ScheduleClient.TimeSlot> freeSlots = new ArrayList<>();
-
-        if (classes.isEmpty()) {
-            // 全天没课，整个学习时间段都是空闲
-            freeSlots.add(createSlot(date, studyStart, studyEnd));
-            Long total = classScheduleMapper.selectCount(new LambdaQueryWrapper<ClassSchedule>().eq(ClassSchedule::getUserId, userId));
-            if (total != null && total > 0) {
-                log.info("当天无课（课表共 {} 门课程），空闲时间: {} - {}", total, studyStart, studyEnd);
-            } else {
-                log.info("课表为空，空闲时间: {} - {}", studyStart, studyEnd);
-            }
-            return freeSlots;
-        }
-
-        // 午休 12:00-13:00 作为固定占用块
-        ClassSchedule lunch = new ClassSchedule();
-        lunch.setStartTime(LocalTime.of(12, 0));
-        lunch.setEndTime(LocalTime.of(13, 0));
-        classes.add(lunch);
-
-        // 按开始时间排序
-        classes.sort((a, b) -> a.getStartTime().compareTo(b.getStartTime()));
-
-        // 处理第一节课前的空闲时间
-        ClassSchedule firstClass = classes.get(0);
-        if (firstClass.getStartTime().isAfter(studyStart)) {
-            freeSlots.add(createSlot(date, studyStart, firstClass.getStartTime()));
-        }
-
-        // 处理课间空闲时间
-        LocalTime lastEnd = firstClass.getEndTime();
-        for (int i = 1; i < classes.size(); i++) {
-            ClassSchedule current = classes.get(i);
-
-            // 如果有重叠，扩展结束时间
-            if (current.getStartTime().isBefore(lastEnd)) {
-                if (current.getEndTime().isAfter(lastEnd)) {
-                    lastEnd = current.getEndTime();
-                }
-                continue;
-            }
-
-            // 课间空闲时间
-            if (current.getStartTime().isAfter(lastEnd)) {
-                LocalTime freeStart = lastEnd.isBefore(studyStart) ? studyStart : lastEnd;
-                LocalTime freeEnd = current.getStartTime().isAfter(studyEnd) ? studyEnd : current.getStartTime();
-                if (freeEnd.isAfter(freeStart)) {
-                    freeSlots.add(createSlot(date, freeStart, freeEnd));
-                }
-            }
-
-            lastEnd = current.getEndTime().isAfter(lastEnd) ? current.getEndTime() : lastEnd;
-        }
-
-        // 处理最后一节课后的空闲时间
-        if (lastEnd.isBefore(studyEnd)) {
-            LocalTime freeStart = lastEnd.isBefore(studyStart) ? studyStart : lastEnd;
-            if (studyEnd.isAfter(freeStart)) {
-                freeSlots.add(createSlot(date, freeStart, studyEnd));
-            }
-        }
-
-        // 过滤短于 30 分钟的空闲时段
-        freeSlots.removeIf(slot -> {
-            long minutes = java.time.Duration.between(slot.getStart(), slot.getEnd()).toMinutes();
-            return minutes < 30;
-        });
-
-        log.info("计算出 {} 个空闲时段（已过滤 <30分钟）", freeSlots.size());
-        for (ScheduleClient.TimeSlot slot : freeSlots) {
-            log.debug("空闲时段: {} - {}", slot.getStart(), slot.getEnd());
-        }
-
-        return freeSlots;
-    }
-    private ScheduleClient.TimeSlot createSlot(LocalDate date, LocalTime start, LocalTime end) {
-        ScheduleClient.TimeSlot slot = new ScheduleClient.TimeSlot();
-        slot.setStart(LocalDateTime.of(date, start));
-        slot.setEnd(LocalDateTime.of(date, end));
-        return slot;
+        return freeTimeCalculator.calculateFreeTime(userId, dateStr, firstWeekMonday);
     }
 
     @lombok.AllArgsConstructor
@@ -1025,7 +192,7 @@ public class ScheduleService {
             try {
                 response = CompletableFuture
                         .supplyAsync(() -> openAiCompatClient.complete(prompt))
-                        .orTimeout(Math.max(5, scheduleAiTimeoutSeconds), TimeUnit.SECONDS)
+                        .orTimeout(Math.max(5, aiConfig.getScheduleAiTimeoutSeconds()), TimeUnit.SECONDS)
                         .join();
                 log.info("AI 智能排程决策: {}", response);
             } catch (Exception aiEx) {
@@ -1056,9 +223,8 @@ public class ScheduleService {
         }
     }
 
-    @Async
     public void smartScheduleAsync(Long userId) {
-        smartSchedule(userId);
+        CompletableFuture.runAsync(() -> smartSchedule(userId), aiTaskExecutor);
     }
 
     public PlanCandidateDto generatePlanCandidate(Long userId, GeneratePlanCandidateRequest request) {
@@ -1327,7 +493,7 @@ public class ScheduleService {
             log.info("调用模型: userId={}, date={}, freeSlots={}, tasks={}", userId, date, remainingFree != null ? remainingFree.size() : 0, remainingTasks != null ? remainingTasks.size() : 0);
             String aiJson = CompletableFuture
                     .supplyAsync(() -> openAiCompatClient.complete(prompt))
-                    .orTimeout(Math.max(5, scheduleAiTimeoutSeconds), TimeUnit.SECONDS)
+                    .orTimeout(Math.max(5, aiConfig.getScheduleAiTimeoutSeconds()), TimeUnit.SECONDS)
                     .join();
             log.info("智能排程模型返回长度: {}", aiJson != null ? aiJson.length() : 0);
             if (aiJson != null) {
@@ -1724,127 +890,20 @@ public class ScheduleService {
         return out;
     }
 
-    private List<TaskScheduleDto> filterOverlaps(List<TaskScheduleDto> schedules) {
-        if (schedules == null || schedules.isEmpty()) {
-            return List.of();
-        }
-        List<TaskScheduleDto> list = schedules.stream()
-                .filter(s -> s.getStartTime() != null && s.getEndTime() != null && s.getTaskId() != null)
-                .sorted((a, b) -> a.getStartTime().compareTo(b.getStartTime()))
-                .collect(Collectors.toList());
-        List<TaskScheduleDto> out = new ArrayList<>();
-        LocalDateTime lastEnd = null;
-        for (TaskScheduleDto s : list) {
-            if (lastEnd != null && !s.getStartTime().isAfter(lastEnd)) {
-                continue;
-            }
-            out.add(s);
-            lastEnd = s.getEndTime();
-        }
-        return out;
+    List<TaskScheduleDto> filterOverlaps(List<TaskScheduleDto> schedules) {
+        return scheduleValidator.filterOverlaps(schedules);
     }
 
-    private List<TaskScheduleDto> enforceMinGap(List<TaskScheduleDto> schedules, int gapMinutes) {
-        if (schedules == null || schedules.isEmpty()) {
-            return List.of();
-        }
-        List<TaskScheduleDto> list = schedules.stream()
-                .filter(s -> s != null && s.getTaskId() != null && s.getStartTime() != null && s.getEndTime() != null)
-                .sorted((a, b) -> a.getStartTime().compareTo(b.getStartTime()))
-                .collect(Collectors.toList());
-        List<TaskScheduleDto> out = new ArrayList<>();
-        LocalDateTime lastEnd = null;
-        for (TaskScheduleDto s : list) {
-            if (lastEnd != null) {
-                LocalDateTime minStart = lastEnd.plusMinutes(gapMinutes);
-                if (s.getStartTime().isBefore(minStart)) {
-                    continue;
-                }
-            }
-            out.add(s);
-            lastEnd = s.getEndTime();
-        }
-        return out;
+    List<TaskScheduleDto> enforceMinGap(List<TaskScheduleDto> schedules, int gapMinutes) {
+        return scheduleValidator.enforceMinGap(schedules, gapMinutes);
     }
 
-    private List<TaskScheduleDto> clampDailyMinutes(List<TaskScheduleDto> schedules, int maxMinutes) {
-        if (schedules == null || schedules.isEmpty()) {
-            return List.of();
-        }
-        int used = 0;
-        List<TaskScheduleDto> out = new ArrayList<>();
-        for (TaskScheduleDto s : schedules) {
-            long m = java.time.Duration.between(s.getStartTime(), s.getEndTime()).toMinutes();
-            if (m <= 0) {
-                continue;
-            }
-            if (used >= maxMinutes) {
-                break;
-            }
-            int allow = maxMinutes - used;
-            if (m > allow) {
-                TaskScheduleDto cut = new TaskScheduleDto();
-                cut.setTaskId(s.getTaskId());
-                cut.setTaskTitle(s.getTaskTitle());
-                cut.setStartTime(s.getStartTime());
-                cut.setEndTime(s.getStartTime().plusMinutes(allow));
-                cut.setStatus(0);
-                out.add(cut);
-                used = maxMinutes;
-                break;
-            }
-            out.add(s);
-            used += (int) m;
-        }
-        return out;
+    List<TaskScheduleDto> clampDailyMinutes(List<TaskScheduleDto> schedules, int maxMinutes) {
+        return scheduleValidator.clampDailyMinutes(schedules, maxMinutes);
     }
 
-    private List<FreeSlotDto> subtractOccupied(List<FreeSlotDto> freeSlots, List<TaskSchedule> occupiedSchedules) {
-        if (freeSlots == null || freeSlots.isEmpty()) {
-            return List.of();
-        }
-        List<FreeSlotDto> slots = freeSlots.stream()
-                .filter(s -> s != null && s.getStart() != null && s.getEnd() != null && s.getEnd().isAfter(s.getStart()))
-                .sorted((a, b) -> a.getStart().compareTo(b.getStart()))
-                .collect(Collectors.toList());
-        if (occupiedSchedules == null || occupiedSchedules.isEmpty()) {
-            return slots;
-        }
-        List<FreeSlotDto> out = new ArrayList<>();
-        for (FreeSlotDto slot : slots) {
-            LocalDateTime cur = slot.getStart();
-            for (TaskSchedule occ : occupiedSchedules) {
-                if (occ == null || occ.getStartTime() == null || occ.getEndTime() == null || !occ.getEndTime().isAfter(occ.getStartTime())) {
-                    continue;
-                }
-                if (!occ.getStartTime().isBefore(slot.getEnd()) || !occ.getEndTime().isAfter(slot.getStart())) {
-                    continue;
-                }
-                LocalDateTime a = occ.getStartTime().isBefore(slot.getStart()) ? slot.getStart() : occ.getStartTime();
-                LocalDateTime b = occ.getEndTime().isAfter(slot.getEnd()) ? slot.getEnd() : occ.getEndTime();
-                if (a.isAfter(cur)) {
-                    FreeSlotDto f = new FreeSlotDto();
-                    f.setStart(cur);
-                    f.setEnd(a);
-                    out.add(f);
-                }
-                if (b.isAfter(cur)) {
-                    cur = b.plusMinutes(BREAK_MINUTES);
-                }
-                if (!cur.isBefore(slot.getEnd())) {
-                    break;
-                }
-            }
-            if (cur.isBefore(slot.getEnd())) {
-                FreeSlotDto f = new FreeSlotDto();
-                f.setStart(cur);
-                f.setEnd(slot.getEnd());
-                out.add(f);
-            }
-        }
-        return out.stream()
-                .filter(s -> java.time.Duration.between(s.getStart(), s.getEnd()).toMinutes() >= 10)
-                .collect(Collectors.toList());
+    List<FreeSlotDto> subtractOccupied(List<FreeSlotDto> freeSlots, List<TaskSchedule> occupiedSchedules) {
+        return scheduleValidator.subtractOccupied(freeSlots, occupiedSchedules, aiConfig.getBreakMinutes());
     }
 
     private String buildDailyPlanPrompt(LocalDate date, List<FreeSlotDto> freeSlots, List<GoalTaskDto> tasks, SchedulePreferenceDto pref) {
@@ -1865,7 +924,7 @@ public class ScheduleService {
             "maxDailyMinutes", p.getMaxDailyMinutes(),
             "procrastinationIndex", p.getProcrastinationIndex()
         ));
-        return DAILY_PLAN_SYSTEM_PROMPT + "\nplanDate: " + date + "\nuserProfile: " + profileJson + "\nfreeSlots: " + freeJson + "\ntasks: " + taskJson;
+        return aiPrompts.getDailyPlanSystem() + "\nplanDate: " + date + "\nuserProfile: " + profileJson + "\nfreeSlots: " + freeJson + "\ntasks: " + taskJson;
     }
 
     private CommitAiResponse parseCommitAiResponse(String aiJson) {
@@ -1877,24 +936,8 @@ public class ScheduleService {
         }
     }
 
-    private String sanitizeJsonObject(String text) {
-        if (text == null) {
-            return "{}";
-        }
-        String s = text.trim();
-        if (s.startsWith("```")) {
-            int firstBrace = s.indexOf('{');
-            int lastBrace = s.lastIndexOf('}');
-            if (firstBrace >= 0 && lastBrace > firstBrace) {
-                s = s.substring(firstBrace, lastBrace + 1).trim();
-            }
-        }
-        int firstBrace = s.indexOf('{');
-        int lastBrace = s.lastIndexOf('}');
-        if (firstBrace >= 0 && lastBrace > firstBrace) {
-            return s.substring(firstBrace, lastBrace + 1).trim();
-        }
-        return s;
+    String sanitizeJsonObject(String text) {
+        return scheduleUtils.sanitizeJsonObject(text);
     }
 
     @lombok.Data
@@ -1903,71 +946,16 @@ public class ScheduleService {
         private List<TaskScheduleDto> candidateSchedules;
     }
 
-    private boolean allWithinFreeSlots(List<TaskScheduleDto> schedules, List<FreeSlotDto> freeSlots) {
-        if (schedules == null || schedules.isEmpty()) {
-            return true;
-        }
-        if (freeSlots == null || freeSlots.isEmpty()) {
-            return true;
-        }
-        for (TaskScheduleDto s : schedules) {
-            if (s == null || s.getStartTime() == null || s.getEndTime() == null) {
-                return false;
-            }
-            boolean ok = false;
-            for (FreeSlotDto f : freeSlots) {
-                if (f == null || f.getStart() == null || f.getEnd() == null) {
-                    continue;
-                }
-                boolean within = !s.getStartTime().isBefore(f.getStart()) && !s.getEndTime().isAfter(f.getEnd());
-                if (within) {
-                    ok = true;
-                    break;
-                }
-            }
-            if (!ok) {
-                return false;
-            }
-        }
-        return true;
+    boolean allWithinFreeSlots(List<TaskScheduleDto> schedules, List<FreeSlotDto> freeSlots) {
+        return scheduleValidator.allWithinFreeSlots(schedules, freeSlots);
     }
 
-    private List<FreeSlotDto> normalizeSlots(LocalDate date, List<FreeSlotDto> slots) {
-        if (slots == null || slots.isEmpty()) {
-            return List.of();
-        }
-        List<FreeSlotDto> list = slots.stream()
-                .filter(s -> s != null && s.getStart() != null && s.getEnd() != null && s.getEnd().isAfter(s.getStart()))
-                .filter(s -> s.getStart().toLocalDate().equals(date))
-                .sorted((a, b) -> a.getStart().compareTo(b.getStart()))
-                .collect(Collectors.toList());
-        List<FreeSlotDto> out = new ArrayList<>();
-        for (FreeSlotDto s : list) {
-            FreeSlotDto last = out.isEmpty() ? null : out.get(out.size() - 1);
-            if (last == null) {
-                out.add(s);
-                continue;
-            }
-            if (!s.getStart().isAfter(last.getEnd())) {
-                if (s.getEnd().isAfter(last.getEnd())) {
-                    last.setEnd(s.getEnd());
-                }
-            } else {
-                out.add(s);
-            }
-        }
-        return out;
+    List<FreeSlotDto> normalizeSlots(LocalDate date, List<FreeSlotDto> slots) {
+        return scheduleUtils.normalizeSlots(date, slots);
     }
 
-    private List<TaskScheduleDto> normalizeSchedules(List<TaskScheduleDto> schedules) {
-        if (schedules == null) {
-            return List.of();
-        }
-        return schedules.stream()
-                .filter(s -> s != null && s.getTaskId() != null && s.getStartTime() != null && s.getEndTime() != null)
-                .filter(s -> s.getEndTime().isAfter(s.getStartTime()))
-                .sorted((a, b) -> a.getStartTime().compareTo(b.getStartTime()))
-                .collect(Collectors.toList());
+    List<TaskScheduleDto> normalizeSchedules(List<TaskScheduleDto> schedules) {
+        return scheduleUtils.normalizeSchedules(schedules);
     }
 
     private String buildPlanPrompt(LocalDate date, List<FreeSlotDto> freeSlots, List<GoalTaskDto> tasks, SchedulePreferenceDto pref) {
@@ -1988,16 +976,11 @@ public class ScheduleService {
             "maxDailyMinutes", p.getMaxDailyMinutes(),
             "procrastinationIndex", p.getProcrastinationIndex()
         ));
-        return PLAN_SYSTEM_PROMPT + "\nplanDate: " + date + "\nuserProfile: " + profileJson + "\nfreeSlots: " + freeJson + "\ntasks: " + taskJson;
+        return aiPrompts.getPlanSystem() + "\nplanDate: " + date + "\nuserProfile: " + profileJson + "\nfreeSlots: " + freeJson + "\ntasks: " + taskJson;
     }
 
-    private CandidateAiResponse parseCandidateAiResponse(String aiJson) {
-        try {
-            String sanitized = sanitizeJsonObject(aiJson);
-            return objectMapper.readValue(sanitized, CandidateAiResponse.class);
-        } catch (Exception e) {
-            throw new IllegalArgumentException("候选计划解析失败");
-        }
+    private ScheduleUtils.CandidateAiResponse parseCandidateAiResponse(String aiJson) {
+        return scheduleUtils.parseCandidateAiResponse(aiJson);
     }
 
     private List<TaskSchedule> buildLocalSchedules(List<GoalTaskDto> tasks, List<ScheduleClient.TimeSlot> slots) {
@@ -2057,189 +1040,31 @@ public class ScheduleService {
         return out;
     }
 
-    private List<TaskScheduleDto> ruleBasedCandidateSchedules(List<FreeSlotDto> freeSlots, List<GoalTaskDto> tasks, SchedulePreferenceDto pref) {
-        if (freeSlots == null || freeSlots.isEmpty() || tasks == null || tasks.isEmpty()) {
-            return List.of();
-        }
-        SchedulePreferenceDto p = resolvePreference(pref);
-        int sessionMin = p.getFocusMinutes();
-        int breakMin = p.getBreakMinutes();
-        int maxDaily = p.getMaxDailyMinutes();
-        float proIndex = p.getProcrastinationIndex();
-        int deepLimit = proIndex > 0.6f ? 1 : 3;
-        int minSlotMinutes = proIndex > 0.6f ? 20 : 15;
-
-        List<GoalTaskDto> sortedTasks = tasks.stream()
-                .filter(t -> t != null && t.getId() != null)
-                .sorted((a, b) -> {
-                    int ap = a.getPriority() == null ? 0 : a.getPriority();
-                    int bp = b.getPriority() == null ? 0 : b.getPriority();
-                    if (bp != ap) return Integer.compare(bp, ap);
-                    int am = a.getEstimatedMinutes() == null ? 30 : a.getEstimatedMinutes();
-                    int bm = b.getEstimatedMinutes() == null ? 30 : b.getEstimatedMinutes();
-                    return Integer.compare(bm, am);
-                })
-                .collect(Collectors.toList());
-
-        List<FreeSlotDto> slots = freeSlots.stream()
-                .filter(s -> s != null && s.getStart() != null && s.getEnd() != null && s.getEnd().isAfter(s.getStart()))
-                .sorted((a, b) -> a.getStart().compareTo(b.getStart()))
-                .collect(Collectors.toList());
-
-        List<TaskScheduleDto> out = new ArrayList<>();
-        int taskIdx = 0;
-        int deepCount = 0;
-        int dayMinutes = 0;
-        LocalDate current = slots.get(0).getStart().toLocalDate();
-
-        for (FreeSlotDto slot : slots) {
-            if (!slot.getStart().toLocalDate().equals(current)) {
-                current = slot.getStart().toLocalDate();
-                deepCount = 0;
-                dayMinutes = 0;
-            }
-            LocalDateTime cursor = slot.getStart();
-            while (taskIdx < sortedTasks.size() && cursor.isBefore(slot.getEnd())) {
-                if (dayMinutes >= maxDaily) break;
-                GoalTaskDto t = sortedTasks.get(taskIdx);
-                int minutes = t.getEstimatedMinutes() == null || t.getEstimatedMinutes() <= 0 ? 30 : t.getEstimatedMinutes();
-                boolean isDeep = minutes >= 60;
-                if (isDeep && deepCount >= deepLimit) {
-                    taskIdx++;
-                    continue;
-                }
-                long remaining = java.time.Duration.between(cursor, slot.getEnd()).toMinutes();
-                if (remaining < minSlotMinutes) {
-                    break;
-                }
-                int useMinutes = (int) Math.min(Math.min(sessionMin, minutes), remaining);
-                useMinutes = (int) Math.min(useMinutes, maxDaily - dayMinutes);
-                if (useMinutes < minSlotMinutes) break;
-                TaskScheduleDto s = new TaskScheduleDto();
-                s.setTaskId(t.getId());
-                s.setStartTime(cursor);
-                s.setEndTime(cursor.plusMinutes(useMinutes));
-                s.setStatus(0);
-                out.add(s);
-                dayMinutes += useMinutes;
-                if (isDeep && useMinutes >= 60) {
-                    deepCount++;
-                }
-                cursor = s.getEndTime().plusMinutes(breakMin);
-                taskIdx++;
-            }
-            if (taskIdx >= sortedTasks.size()) {
-                break;
-            }
-        }
-        return out;
-    }
-
-    private String writeJson(Object obj) {
-        try {
-            return objectMapper.writeValueAsString(obj);
-        } catch (Exception e) {
-            return "[]";
-        }
+    String writeJson(Object obj) {
+        return scheduleUtils.writeJson(obj);
     }
 
     private <T> T readJsonList(String json, TypeReference<T> type) {
-        if (json == null || json.isBlank()) {
-            return null;
-        }
-        try {
-            return objectMapper.readValue(json, type);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    @lombok.Data
-    static class CandidateAiResponse {
-        private String note;
-        private List<FreeSlotDto> suggestedFreeSlots;
-        private List<TaskScheduleDto> candidateSchedules;
-        private List<TaskScheduleDto> suggestedSchedules;
+        return scheduleUtils.readJsonList(json, type);
     }
 
     public List<TaskScheduleDto> listTaskSchedules(Long userId, LocalDateTime from, LocalDateTime to) {
-        LambdaQueryWrapper<TaskSchedule> qw = new LambdaQueryWrapper<TaskSchedule>()
-                .eq(TaskSchedule::getUserId, userId)
-                .orderByAsc(TaskSchedule::getStartTime);
-        if (from != null) {
-            qw.ge(TaskSchedule::getStartTime, from);
-        }
-        if (to != null) {
-            qw.le(TaskSchedule::getStartTime, to);
-        }
-        List<TaskSchedule> list = taskScheduleMapper.selectList(qw);
-        if (list == null || list.isEmpty()) {
-            return List.of();
-        }
-
-        List<Long> taskIds = list.stream().map(TaskSchedule::getTaskId).distinct().collect(Collectors.toList());
-        Map<Long, String> titleMap = new HashMap<>();
-        try {
-            Result<List<GoalTaskDto>> r = goalClient.getTasksByIds(taskIds);
-            if (r != null && r.getCode() == 200 && r.getData() != null) {
-                for (GoalTaskDto t : r.getData()) {
-                    if (t != null && t.getId() != null) {
-                        titleMap.put(t.getId(), t.getTitle());
-                    }
-                }
-            }
-        } catch (Exception ignored) {
-        }
-
-        return list.stream().map(s -> {
-            TaskScheduleDto dto = new TaskScheduleDto();
-            dto.setId(s.getId());
-            dto.setUserId(s.getUserId());
-            dto.setTaskId(s.getTaskId());
-            dto.setTaskTitle(titleMap.get(s.getTaskId()));
-            dto.setStartTime(s.getStartTime());
-            dto.setEndTime(s.getEndTime());
-            dto.setStatus(s.getStatus());
-            return dto;
-        }).collect(Collectors.toList());
+        return taskScheduleService.listTaskSchedules(userId, from, to);
     }
 
     public void updateTaskScheduleStatus(Long scheduleId, Integer status) {
-        TaskSchedule ts = new TaskSchedule();
-        ts.setId(scheduleId);
-        ts.setStatus(status);
-        taskScheduleMapper.updateById(ts);
+        taskScheduleService.updateTaskScheduleStatus(scheduleId, status);
     }
 
     public void deleteFutureTaskSchedules(Long userId) {
-        taskScheduleMapper.delete(new LambdaQueryWrapper<TaskSchedule>()
-                .eq(TaskSchedule::getUserId, userId)
-                .ge(TaskSchedule::getStartTime, LocalDateTime.now()));
+        taskScheduleService.deleteFutureTaskSchedules(userId);
     }
 
     public void deleteTaskSchedulesByTaskIds(Long userId, List<Long> taskIds) {
-        if (userId == null || userId <= 0) {
-            throw new IllegalArgumentException("未授权");
-        }
-        List<Long> ids = taskIds == null ? List.of() : taskIds.stream()
-                .filter(x -> x != null && x > 0)
-                .distinct()
-                .collect(Collectors.toList());
-        if (ids.isEmpty()) return;
-        taskScheduleMapper.delete(new LambdaQueryWrapper<TaskSchedule>()
-                .eq(TaskSchedule::getUserId, userId)
-                .in(TaskSchedule::getTaskId, ids));
+        taskScheduleService.deleteTaskSchedulesByTaskIds(userId, taskIds);
     }
 
     public void deleteTaskSchedulesByDate(Long userId, String dateStr) {
-        if (userId == null || userId <= 0) throw new IllegalArgumentException("未授权");
-        if (dateStr == null || dateStr.isBlank()) throw new IllegalArgumentException("日期不能为空");
-        LocalDate date = LocalDate.parse(dateStr.trim());
-        LocalDateTime start = date.atStartOfDay();
-        LocalDateTime end = date.plusDays(1).atStartOfDay();
-        taskScheduleMapper.delete(new LambdaQueryWrapper<TaskSchedule>()
-                .eq(TaskSchedule::getUserId, userId)
-                .ge(TaskSchedule::getStartTime, start)
-                .lt(TaskSchedule::getStartTime, end));
+        taskScheduleService.deleteTaskSchedulesByDate(userId, dateStr);
     }
 }

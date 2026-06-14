@@ -7,26 +7,34 @@ export const useNotifyStore = defineStore('notify', {
     ownerUserId: null,
     recentReminderSig: {},
     _recentPushSig: {},
+    _pendingTimeouts: [],
     items: [],
     reminders: [],
     signalSeq: {
       GOAL_TASK_READY: 0,
+      GOAL_DECOMPOSE_FAILED: 0,
       SCHEDULE_DONE: 0,
       SCHEDULE_FAILED: 0,
       RESOURCE_ADVICE_DONE: 0,
       RESOURCE_ADVICE_FAILED: 0,
+      CRAWL_COMPLETED: 0,
     },
-    lastSignal: null,
+    lastSignalData: {},
   }),
   actions: {
     setOwner(userId) {
       const uid = userId != null ? Number(userId) : null
       const next = Number.isFinite(uid) && uid > 0 ? uid : null
       if (this.ownerUserId && next && this.ownerUserId !== next) {
+        this._clearTimeouts()
         this.$reset()
       }
       this.ownerUserId = next
       this._restoreReminders()
+    },
+    _clearTimeouts() {
+      (this._pendingTimeouts || []).forEach(t => clearTimeout(t))
+      this._pendingTimeouts = []
     },
     push(message, type = 'info', timeout = 4500) {
       const msg = String(message ?? '').trim()
@@ -52,6 +60,14 @@ export const useNotifyStore = defineStore('notify', {
         type,
         timeout,
       })
+      if (timeout > 0) {
+        const t1 = setTimeout(() => {
+          this.close(id)
+          const t2 = setTimeout(() => this.remove(id), 300)
+          this._pendingTimeouts = (this._pendingTimeouts || []).filter(t => t !== t1).concat(t2)
+        }, timeout)
+        this._pendingTimeouts = (this._pendingTimeouts || []).concat(t1)
+      }
       return id
     },
     close(id) {
@@ -143,8 +159,8 @@ export const useNotifyStore = defineStore('notify', {
       const t = String(type || '').trim()
       if (t && Object.prototype.hasOwnProperty.call(this.signalSeq, t)) {
         this.signalSeq[t] = Number(this.signalSeq[t] || 0) + 1
+        this.lastSignalData[t] = payload
       }
-      this.lastSignal = { type: t, payload: payload ?? null, ts: Date.now() }
     },
   },
 })
