@@ -150,36 +150,12 @@ public class GoalAiWorker {
             final int finalTaskCount = tasks.size();
             final List<String> finalTaskTitles = taskTitles;
             final String finalGoalDesc = goalDescription;
-
-            // 先发送 DONE 通知，资源检索/爬虫异步执行不阻塞用户反馈
-            sendDecomposeProgress(userId, "GOAL_DECOMPOSE_DONE", goalDescription, "DONE", 100,
-                    "拆解完成，共生成 " + finalTaskCount + " 个任务", finalTaskCount, finalTaskTitles);
-            NotificationMessage notif = new NotificationMessage();
-            notif.setUserId(userId);
-            notif.setType("GOAL_TASK_READY");
-            notif.setContent("AI任务拆解已完成！");
-            java.util.Map<String, Object> readyPayload = new java.util.LinkedHashMap<>();
-            readyPayload.put("stage", "DONE");
-            readyPayload.put("progress", 100);
-            readyPayload.put("message", "拆解完成，共生成 " + finalTaskCount + " 个任务");
-            readyPayload.put("nav", "/schedule");
-            readyPayload.put("level", "success");
-            readyPayload.put("taskCount", finalTaskCount);
-            readyPayload.put("taskTitles", finalTaskTitles);
-            readyPayload.put("goal", finalGoalDesc);
-            readyPayload.put("ai", java.util.Map.of(
-                    "userPrompt", "触发：goal_task_ready。目标任务拆解已完成。请生成一句简短提醒（不固定模板），引导用户去日程/排程查看。数据：" + java.util.Map.of(
-                            "goal", finalGoalDesc
-                    )
-            ));
-            readyPayload.put("data", java.util.Map.of(
-                    "goal", finalGoalDesc
-            ));
-            notif.setPayload(readyPayload);
-            rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, notif);
-
-            // 资源检索和爬虫异步执行，不阻塞 DONE 通知和 MQ ACK
             final Long finalUserId = userId;
+
+            sendDecomposeProgress(userId, "GOAL_DECOMPOSE_SAVING", goalDescription, "SAVING", 75,
+                    "任务已保存，正在后台检索资源…", finalTaskCount, finalTaskTitles);
+
+            // 资源检索/爬虫异步执行，完成后发送 DONE 通知，MQ ACK 不受影响
             CompletableFuture.runAsync(() -> {
                 try {
                     resourceClient.searchOnlineCourses(finalGoalDesc);
@@ -204,6 +180,33 @@ public class GoalAiWorker {
                 if (!savedTasks.isEmpty()) {
                     prefetchTaskResources(finalUserId, savedTasks);
                 }
+
+                // 资源检索和爬虫全部触发完毕后，发送完成通知
+                sendDecomposeProgress(finalUserId, "GOAL_DECOMPOSE_DONE", finalGoalDesc, "DONE", 100,
+                        "拆解完成，共生成 " + finalTaskCount + " 个任务", finalTaskCount, finalTaskTitles);
+                NotificationMessage notif = new NotificationMessage();
+                notif.setUserId(finalUserId);
+                notif.setType("GOAL_TASK_READY");
+                notif.setContent("AI任务拆解已完成！");
+                java.util.Map<String, Object> readyPayload = new java.util.LinkedHashMap<>();
+                readyPayload.put("stage", "DONE");
+                readyPayload.put("progress", 100);
+                readyPayload.put("message", "拆解完成，共生成 " + finalTaskCount + " 个任务");
+                readyPayload.put("nav", "/schedule");
+                readyPayload.put("level", "success");
+                readyPayload.put("taskCount", finalTaskCount);
+                readyPayload.put("taskTitles", finalTaskTitles);
+                readyPayload.put("goal", finalGoalDesc);
+                readyPayload.put("ai", java.util.Map.of(
+                        "userPrompt", "触发：goal_task_ready。目标任务拆解已完成。请生成一句简短提醒（不固定模板），引导用户去日程/排程查看。数据：" + java.util.Map.of(
+                                "goal", finalGoalDesc
+                        )
+                ));
+                readyPayload.put("data", java.util.Map.of(
+                        "goal", finalGoalDesc
+                ));
+                notif.setPayload(readyPayload);
+                rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, notif);
             });
 
         } catch (Exception e) {
