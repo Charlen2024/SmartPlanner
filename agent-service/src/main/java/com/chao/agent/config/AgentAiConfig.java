@@ -153,25 +153,29 @@ public class AgentAiConfig {
             hnswAttrs.put("M", 16);
             hnswAttrs.put("EF_CONSTRUCTION", 200);
             hnswAttrs.put("DISTANCE_METRIC", "COSINE");
-            jedisPooled.ftCreate("smartplanner-rag",
-                    redis.clients.jedis.search.FTCreateParams.createParams()
-                            .on(redis.clients.jedis.search.IndexDataType.JSON)
-                            .prefix("sp:emb:"),
-                    java.util.List.of(
-                            redis.clients.jedis.search.schemafields.TextField.of("$.content").as("content"),
-                            redis.clients.jedis.search.schemafields.TagField.of("$.userId").as("userId"),
-                            redis.clients.jedis.search.schemafields.TagField.of("$.type").as("type"),
-                            redis.clients.jedis.search.schemafields.TagField.of("$.goalId").as("goalId"),
-                            redis.clients.jedis.search.schemafields.TagField.of("$.taskId").as("taskId"),
-                            redis.clients.jedis.search.schemafields.TagField.of("$.journalId").as("journalId"),
-                            redis.clients.jedis.search.schemafields.TagField.of("$.punchId").as("punchId"),
-                            redis.clients.jedis.search.schemafields.VectorField.builder()
-                                    .fieldName("$.embedding")
-                                    .algorithm(redis.clients.jedis.search.schemafields.VectorField.VectorAlgorithm.HNSW)
-                                    .attributes(hnswAttrs)
-                                    .as("embedding")
-                                    .build()));
-            log.info("Created index smartplanner-rag with full schema (content + embedding + TAG fields)");
+            try {
+                jedisPooled.ftCreate("smartplanner-rag",
+                        redis.clients.jedis.search.FTCreateParams.createParams()
+                                .on(redis.clients.jedis.search.IndexDataType.JSON)
+                                .prefix("sp:emb:"),
+                        java.util.List.of(
+                                redis.clients.jedis.search.schemafields.TextField.of("$.content").as("content"),
+                                redis.clients.jedis.search.schemafields.TagField.of("$.userId").as("userId"),
+                                redis.clients.jedis.search.schemafields.TagField.of("$.type").as("type"),
+                                redis.clients.jedis.search.schemafields.TagField.of("$.goalId").as("goalId"),
+                                redis.clients.jedis.search.schemafields.TagField.of("$.taskId").as("taskId"),
+                                redis.clients.jedis.search.schemafields.TagField.of("$.journalId").as("journalId"),
+                                redis.clients.jedis.search.schemafields.TagField.of("$.punchId").as("punchId"),
+                                redis.clients.jedis.search.schemafields.VectorField.builder()
+                                        .fieldName("$.embedding")
+                                        .algorithm(redis.clients.jedis.search.schemafields.VectorField.VectorAlgorithm.HNSW)
+                                        .attributes(hnswAttrs)
+                                        .as("embedding")
+                                        .build()));
+                log.info("Created index smartplanner-rag with full schema (content + embedding + TAG fields)");
+            } catch (Exception ex) {
+                log.warn("Failed to create index (may already exist from another instance): {}", ex.getMessage());
+            }
         }
         return RedisVectorStore.builder(jedisPooled, embeddingModel)
                 .indexName("smartplanner-rag")

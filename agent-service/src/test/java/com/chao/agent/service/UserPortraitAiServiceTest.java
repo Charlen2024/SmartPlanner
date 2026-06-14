@@ -154,13 +154,13 @@ public class UserPortraitAiServiceTest {
     }
 
     @Test
-    void clamp_recommendation_focusMinutesInvalid_clampedTo45() throws Exception {
+    void clamp_recommendation_focusMinutesInvalid_clampedTo90() throws Exception {
         AiPortraitResult r = new AiPortraitResult();
         SchedulePreferenceDto rec = new SchedulePreferenceDto();
         rec.setFocusMinutes(999);
         r.setRecommendation(rec);
         invokeClamp(r);
-        assertEquals(45, r.getRecommendation().getFocusMinutes());
+        assertEquals(90, r.getRecommendation().getFocusMinutes());
     }
 
     @Test
@@ -173,13 +173,13 @@ public class UserPortraitAiServiceTest {
     }
 
     @Test
-    void clamp_recommendation_breakMinutes_always10() throws Exception {
+    void clamp_recommendation_breakMinutes_clampedTo25() throws Exception {
         AiPortraitResult r = new AiPortraitResult();
         SchedulePreferenceDto rec = new SchedulePreferenceDto();
         rec.setBreakMinutes(30);
         r.setRecommendation(rec);
         invokeClamp(r);
-        assertEquals(10, r.getRecommendation().getBreakMinutes());
+        assertEquals(25, r.getRecommendation().getBreakMinutes());
     }
 
     @Test
@@ -253,8 +253,8 @@ public class UserPortraitAiServiceTest {
         assertEquals(100, r.getMorningPersonScore());
         assertEquals(120, r.getFocusDurationAvg());
         assertEquals(1.0, r.getProcrastinationIndex(), 0.001);
-        assertEquals(45, r.getRecommendation().getFocusMinutes());
-        assertEquals(10, r.getRecommendation().getBreakMinutes());
+        assertEquals(90, r.getRecommendation().getFocusMinutes());
+        assertEquals(25, r.getRecommendation().getBreakMinutes());
         assertEquals(300, r.getRecommendation().getMaxDailyMinutes());
     }
 

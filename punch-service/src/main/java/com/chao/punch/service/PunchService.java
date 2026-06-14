@@ -173,7 +173,7 @@ public class PunchService {
             habit.setLastAnalysisTime(LocalDateTime.now());
             userHabitMapper.updateById(habit);
         } catch (Exception e) {
-            log.warn("autoUpdateHabit failed: {}", e.getMessage());
+            log.warn("autoUpdateHabit failed", e);
         }
     }
 

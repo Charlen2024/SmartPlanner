@@ -331,7 +331,7 @@ public class SmartPlannerTools {
             try {
                 agentRagIndexer.ensureUserRagIndexed(userId);
                 FilterExpressionBuilder fb = new FilterExpressionBuilder();
-                var filter = fb.or(fb.eq("userId", userId), fb.eq("type", "course")).build();
+                var filter = fb.or(fb.eq("userId", String.valueOf(userId)), fb.eq("type", "course")).build();
                 List<Document> docs = vectorStore.similaritySearch(
                         SearchRequest.builder().query(q).topK(k).filterExpression(filter).build());
                 if (docs != null) {
@@ -393,6 +393,11 @@ public class SmartPlannerTools {
             }
         }
 
+        if (wd == null) {
+            Map<String, Object> err = new HashMap<>();
+            err.put("error", "天气服务暂不可用，请稍后重试");
+            return err;
+        }
         Map<String, Object> out = new HashMap<>();
         out.put("location", displayLocation);
         out.put("temperature_C", wd.getTemperature());
@@ -610,8 +615,8 @@ public class SmartPlannerTools {
         }
 
         try {
-            List<ResourceClient.CourseResource> list = safeList(resourceClient.searchOnlineCourses(q));
-            for (ResourceClient.CourseResource r : list) {
+            List<SearchResourceItem> list = safeList(resourceClient.searchOnlineCourses(q));
+            for (SearchResourceItem r : list) {
                 if (r == null) continue;
                 Map<String, Object> m = new HashMap<>();
                 m.put("type", "course");

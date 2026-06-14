@@ -268,7 +268,11 @@ public class AgentReminderService {
         m.setContent(content);
         m.setTs(System.currentTimeMillis());
         m.setPayload(payload);
-        rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, m);
+        try {
+            rabbitTemplate.convertAndSend(RabbitMqConfig.NOTIFICATION_EXCHANGE, RabbitMqConfig.NOTIFICATION_ROUTING_KEY, m);
+        } catch (Exception e) {
+            log.error("Failed to send notification type={} userId={}: {}", type, userId, e.getMessage());
+        }
     }
 
     private String fallback(String trigger, Map<String, Object> data) {

@@ -8,6 +8,8 @@ import com.chao.common.dto.GoalTaskDto;
 import com.chao.common.dto.ScheduleAdviceItem;
 import com.chao.common.dto.ScheduleAdviceResponse;
 import com.chao.common.dto.TaskAdviceDto;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.HashMap;
@@ -18,6 +20,7 @@ import java.util.LinkedHashMap;
 
 @Service
 public class TaskAdviceAiService {
+    private static final Logger log = LoggerFactory.getLogger(TaskAdviceAiService.class);
     private final OpenAiCompatClient openAiCompatClient;
     private final ObjectMapper objectMapper;
 
@@ -119,6 +122,7 @@ public class TaskAdviceAiService {
             });
             return out;
         } catch (Exception e) {
+            log.warn("Failed to parse task advice JSON, raw text length={}: {}", text != null ? text.length() : 0, e.getMessage());
             return Map.of();
         }
     }
@@ -145,6 +149,7 @@ public class TaskAdviceAiService {
             }
             return new ScheduleAdviceResponse(header, items);
         } catch (Exception e) {
+            log.warn("Failed to parse schedule advice JSON, raw text length={}: {}", text != null ? text.length() : 0, e.getMessage());
             return new ScheduleAdviceResponse("", Map.of());
         }
     }

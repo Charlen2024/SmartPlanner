@@ -37,6 +37,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -234,11 +235,11 @@ public class AgentChatService {
         AgentUserContext.set(userId);
         try {
             ReactAgent a = ensureAgent(userId);
-            RunnableConfig config = RunnableConfig.builder().threadId("u:" + userId).build();
+            RunnableConfig config = RunnableConfig.builder().threadId("u:" + userId + ":" + UUID.randomUUID()).build();
             String prompt = buildStatusPrefix(userId) + buildJournalPrefix(userId, q) + ChatTextUtils.todayPrefix() + q;
             AssistantMessage msg = a.call(prompt, config);
             return ChatTextUtils.extractAnswer(msg != null ? msg.getText() : null);
-        } catch (Throwable e) {
+        } catch (Exception e) {
             log.error("agent chat failed, userId={}, q={}", userId, q, e);
             return "助手暂时不可用，请稍后重试。";
         } finally {
@@ -273,11 +274,11 @@ public class AgentChatService {
         ReactAgent a;
         try {
             a = ensureAgent(userId);
-        } catch (Throwable e) {
+        } catch (Exception e) {
             log.error("buildAgent failed in chatStream, userId={}", userId, e);
             try { return Flux.just(chat(userId, q)); } finally { AgentUserContext.clear(); }
         }
-        RunnableConfig config = RunnableConfig.builder().threadId("u:" + userId).build();
+        RunnableConfig config = RunnableConfig.builder().threadId("u:" + userId + ":" + UUID.randomUUID()).build();
         String prompt = buildStatusPrefix(userId) + buildJournalPrefix(userId, q) + ChatTextUtils.todayPrefix() + q;
         long startNs = System.nanoTime();
         AtomicReference<String> maxPrevious = new AtomicReference<>("");
@@ -291,7 +292,7 @@ public class AgentChatService {
                         String type = out == null ? "null" : out.getClass().getName();
                         log.debug("agent stream event: type={}, t={}ms", type, ms);
                     });
-        } catch (Throwable e) {
+        } catch (Exception e) {
             try { return Flux.just(chat(userId, q)); } finally { AgentUserContext.clear(); toolCache.remove(); }
         }
         return raw.handle((Object out, reactor.core.publisher.SynchronousSink<String> sink) -> {
