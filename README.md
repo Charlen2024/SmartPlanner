@@ -146,6 +146,31 @@ gateway-service 基于 Spring Cloud Gateway，7 个文件组成 4 层过滤器�
 - CORS 全开放策略（`AllowedOriginPatterns: *`，AllowCredentials: true），适合演示环境；生产需限定域名
 - 限流 key 粒度：已认证用户按 userId，未认证按 IP，每秒一个窗口独立计数
 
+### 2.1.5 admin-server 监控架构
+
+admin-server 基于 Spring Boot Admin 3.2.3，通过 Nacos 自动发现所有微服务，提供健康、指标、日志、环境变量、线程转储等监控能力。
+
+| 组件 | 类型 | 职责 |
+|------|------|------|
+| `AdminServerApplication` | @SpringBootApplication | 启动类 + @EnableAdminServer |
+| `SecurityConfig` | @Configuration | Reactive 表单登录保护面板（@EnableWebFluxSecurity） |
+| `application.yml` | 配置 | 服务发现、监控参数、钉钉告警、账密 |
+
+**安全加固：**
+- SBA 面板通过表单登录保护，默认账密 `admin/admin123`，通过 `SBA_ADMIN_USER`/`SBA_ADMIN_PASSWORD` 环境变量自定义
+- `/actuator/**` 路径放行，供监控数据采集
+- 基于 WebFlux Security，与 SBA 3.x 的 Reactive 架构一致
+
+**告警通知：**
+- 钉钉 Webhook 告警，通过 `SBA_DINGTALK_ENABLED`/`SBA_DINGTALK_WEBHOOK`/`SBA_DINGTALK_SECRET` 环境变量激活
+- 提醒去重：服务宕机 5 分钟后首次提醒，每 2 小时间隔，最多 3 次；恢复后计数重置
+- 告警防抖：`ignore-changes-until-status-is-no-longer-down: true`，避免抖动告警风暴
+
+**Git 版本信息：**
+- 父 pom 集成 `git-commit-id-maven-plugin`，编译生成 `git.properties`
+- 各服务版本/commit 信息在 SBA 面板直接展示
+- Docker 构建时无 `.git` 目录自动降级（`failOnError: false`）
+
 ### 2.2 基础设施
 
 | 组件 | 端口 | 说明 |
@@ -975,7 +1000,7 @@ docker compose up -d --build
 - RabbitMQ 管理台：http://localhost:15672（默认账号 `sp` / `sp123`）
 - Nacos：http://localhost:8848
 - Elasticsearch：http://localhost:9201
-- Spring Boot Admin：http://localhost:9090
+- Spring Boot Admin：http://localhost:9090（默认账号 `admin` / 密码 `admin123`，可通过 `SBA_ADMIN_USER`/`SBA_ADMIN_PASSWORD` 环境变量配置）
 - Adminer：http://localhost:8085（系统 MySQL，账号 root / 密码 root）
 
 ### 11.2 本地开发（不走容器）
@@ -2457,3 +2482,14 @@ gateway-service 此前在 README 中仅有端口表一行（8088）和拓扑图�
 - **4 层过滤器链**（ApiKeyAuthFilter → UserContextForwardFilter → RedisRateLimitFilter → SecurityWebFilterChain），明确顺序和职责
 - **3 个配置组件**（JwtDecoderConfig、RateLimitConfig、GatewayApplication）
 - **关键设计决策**：双 SecurityWebFilterChain 防止过期 token 阻塞登录、CORS 全开放策略、限流 key 粒度（userId → IP 回退）
+
+### 15.53 admin-server 安全加固 + 告警 + Git 版本信息（2026-06-14）
+
+admin-server 此前零安全配置，面板裸奔。本次 4 项增强：
+
+1. **Reactive 表单登录**：`@EnableWebFluxSecurity` + SecurityWebFilterChain，默认账密 `admin/admin123`
+2. **钉钉告警**：服务宕机 5 分钟后首次提醒，每 2 小时间隔，最多 3 次，恢复后重置
+3. **Git 版本信息**：父 pom 集成 git-commit-id-maven-plugin，SBA 面板展示各服务 commit
+4. **事件去抖**：`ignore-changes-until-status-is-no-longer-down: true`
+
+遇到 SBA 3.x 为 WebFlux 架构，`@EnableWebSecurity`(Servlet) 导致 `ClassNotFoundException: jakarta.servlet.Filter`，已修复为 Reactive Security。
