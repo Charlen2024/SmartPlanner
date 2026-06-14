@@ -56,6 +56,93 @@ SmartPlanner 是一个面向个人学习场景的微服务应用：从“目标 
 | punch-service | 8084 | 打卡记录、习惯数据 |
 | admin-server | 9090 | Spring Boot Admin 监控面板（健康、指标、日志、线程、环境变量） |
 
+### 2.1.1 user-service 控制器架构
+
+user-service 从单一 `UserController`（1000+ 行）拆分为 7 个领域控制器 + 1 个共享支持组件：
+
+| 控制器 | 路由前缀 | 职责 |
+|--------|----------|------|
+| `UserController` | `/api/user/dashboard`, `/api/user/internal/**` | 仪表盘聚合、内部接口 |
+| `GoalController` | `/api/user/goals/**`, `/api/user/journals/**` | 目标 CRUD、AI 拆解、随笔 |
+| `TaskController` | `/api/user/tasks/**` | 任务查询、AI 建议、任务资源推荐 |
+| `ScheduleController` | `/api/user/schedule/**` | 排程、课表导入、候选方案、日计划 |
+| `PunchController` | `/api/user/punch/**` | 打卡提交、连续天数、习惯 |
+| `ResourceController` | `/api/user/resources/**` | 资源搜索、爬取、CRUD |
+| `AssistantController` | `/api/user/assistant/**` | AI 排程建议 + 心情分析 |
+
+所有控制器通过 `UserControllerSupport`（`@Component`）共享 `resolveUserId`、`buildMoodHint`、`buildSchedulePreference`、资源缓存等公共逻辑，避免继承耦合。
+
+### 2.1.2 goal-service 组件架构
+
+goal-service 经过两轮重构，从单一 God Class（`GoalService` 396 行 + `GoalAiWorker` 301 行）拆分为 8 个职责组件：
+
+| 组件 | 类型 | 职责 |
+|------|------|------|
+| `GoalCrudService` | @Service | 目标 CRUD、随笔列表、话题聚合、关联排程清理 |
+| `TaskService` | @Service | 任务 CRUD、标题归一化去重（bigram Jaccard）、MQ 通知 |
+| `AiTaskOrchestrator` | @Service | 创建目标并触发 AI 拆解、任务重新生成（含反馈） |
+| `GoalAiWorker` | @Service | MQ 消费端：AI 拆解执行、任务保存、资源预取、SSE 进度通知 |
+| `JournalService` | @Service | 随笔保存/删除、消极情感检测、JOURNAL_CREATED 索引通知 |
+| `AiResponseParser` | @Component | AI 响应净化：禁止词/日期时间过滤、耗时/优先级归一化、递归子任务处理 |
+| `AiPromptConfig` | @ConfigurationProperties | 外部化 system/advancedSystem 提示词（`smartplanner.prompts.*`） |
+| `AiConfig` | @ConfigurationProperties | AI 调用参数（`smartplanner.ai.decompose-timeout-seconds` 等） |
+
+拆分原则：
+- `GoalCrudService`：纯 Goal CRUD + 简单的列表查询，无 AI/MQ 编排逻辑
+- `TaskService`：Task CRUD + 去重检测 + 创建通知，自包含（内部类 `DuplicateTaskException`）
+- `AiTaskOrchestrator`：编排层——创建 Goal → 发送 MQ，或加载历史 → 删除旧任务 → 发送 MQ 重生成
+
+关键设计决策：
+- `AiResponseParser` 作为独立 `@Component`，`GoalAiWorker` 注入使用，替代内联 109 行净化代码
+- MQ 超时从硬编码 90s 改为 `@ConfigurationProperties` 可配置
+- `goal.ai.queue` 配置死信队列（DLX→DLQ），防止消费失败时消息丢失
+- `GoalAiWorker` 使用 `TransactionTemplate` 精确控制事务边界，AI 调用和 Feign 调用不在事务内
+
+### 2.1.3 common 共享模块架构
+
+common 模块共 50 个 Java 源文件（~1300 行），为所有微服务提供统一的 API 契约和基础设施：
+
+| 包 | 文件数 | 说明 |
+|------|--------|------|
+| `com.chao.common.dto` | 34 | 数据传输对象：`Result<T>` 统一响应体、28 个业务 DTO、2 个资源 DTO（`SearchResourceItem`、`ResourceAdviceResult`） |
+| `com.chao.common.client` | 7 | OpenFeign 客户端接口：GoalClient、ScheduleClient、ResourceClient、PunchClient、AgentAdviceClient、AgentPortraitClient、UserInternalClient |
+| `com.chao.common.config` | 3 | RabbitMqConfig（3 交换机 5 队列 + DLX）、TaskExecutorConfig、HttpClientConfig |
+| `com.chao.common.util` | 3 | WeatherClient（天气 + 翻译）、DateUtils（多格式日期解析）、TextSimilarity（bigram Jaccard） |
+| `com.chao.common.ai` | 2 | OpenAiCompatAutoConfiguration、OpenAiCompatClient（Spring AI ChatClient 封装） |
+| `com.chao.common.handler` | 1 | GlobalExceptionHandler（400/401/500 → Result<T>） |
+
+关键设计决策：
+- DTO 与 Client 分层严格分离：DTO 不引用 Feign 接口（2026-06-14 修复了 `ResourceAdviceJobStatusResponse → ResourceClient` 的循环依赖）
+- `Result<T>` 作为统一 API 契约被所有 7 个服务引用
+- Feign 客户端接口集中定义在 common 中，避免服务间重复声明
+- `DateUtils` 支持 11 种日期格式的回退解析，全部失败时记录 `log.warn` 而非静默返回 null
+
+### 2.1.4 gateway-service 网关架构
+
+gateway-service 基于 Spring Cloud Gateway，7 个文件组成 4 层过滤器链（全局 Filter → Security Filter Chain → 下游微服务）：
+
+**过滤器链及执行顺序**
+
+| 顺序 | 组件 | 类型 | 职责 |
+|------|------|------|------|
+| -100 | `ApiKeyAuthFilter` | GlobalFilter | X-API-KEY 头部校验，/actuator 路径放行，未配置或匹配则返回 401 JSON |
+| -90 | `UserContextForwardFilter` | GlobalFilter | 从 JWT 提取 userId/username/roles，注入 X-User-Id/X-Username/X-Roles 头部转发下游 |
+| -80 | `RedisRateLimitFilter` | GlobalFilter | Redis 秒级计数器限流，burst 容量可配（默认 10 req/s），超限返回 429 |
+| — | `SecurityConfig` (order=1) | SecurityWebFilterChain | JWT Bearer Token 校验，支持 URL query parameter 传 token，/api/auth/** 和 /actuator/** 放行 |
+
+**配置组件**
+
+| 组件 | 类型 | 职责 |
+|------|------|------|
+| `JwtDecoderConfig` | @Configuration | NimbusReactiveJwtDecoder 创建（HmacSHA256），启动时校验 JWT_SECRET ≥ 32 字符 |
+| `RateLimitConfig` | @Configuration | KeyResolver Bean：userId（JWT）→ IP 回退，为限流提供用户标识 |
+| `GatewayApplication` | @SpringBootApplication | 启动类 |
+
+**关键设计决策：**
+- 双 SecurityWebFilterChain：order=0 处理认证白名单路径（/api/auth/** + /actuator/**），order=1 保护其余 /api/ 路径。防止过期 token 阻塞登录
+- CORS 全开放策略（`AllowedOriginPatterns: *`，AllowCredentials: true），适合演示环境；生产需限定域名
+- 限流 key 粒度：已认证用户按 userId，未认证按 IP，每秒一个窗口独立计数
+
 ### 2.2 基础设施
 
 | 组件 | 端口 | 说明 |
@@ -276,6 +363,38 @@ goal-service 直接接口见 [GoalController.java](file:///c:/Users/%E5%88%98%E8
 
 因此创建目标后，拆解通过 MQ 异步执行，完成后发通知。
 
+### 6.3 goal-service 内部架构
+
+goal-service 经过两轮重构，当前由 8 个职责组件构成（详见 [2.1.2 节](#212-goal-service-组件架构)）：
+
+| 组件 | 职责 |
+|------|------|
+| `GoalCrudService` | 目标 CRUD、随笔列表、话题聚合、关联排程清理 |
+| `TaskService` | 任务 CRUD、标题归一化去重（bigram Jaccard）、MQ 通知 |
+| `AiTaskOrchestrator` | 创建目标并触发 AI 拆解、任务重新生成（含反馈） |
+| `GoalAiWorker` | MQ 消费端：AI 拆解执行、任务保存、资源预取、SSE 进度通知 |
+| `JournalService` | 随笔保存/删除、消极情感检测（消极词触发 AGENT_REMINDER）、JOURNAL_CREATED 索引通知 |
+| `AiResponseParser` | AI 响应净化：禁止词过滤、日期时间过滤、耗时/优先级归一化、递归子任务处理 |
+| `AiPromptConfig` | `@ConfigurationProperties("smartplanner.prompts")` 外部化 system/advancedSystem 提示词 |
+| `AiConfig` | `@ConfigurationProperties("smartplanner.ai")` 拆解超时等 AI 调用参数 |
+
+`GoalAiWorker` 注入 `AiResponseParser` 替代内联净化方法，注入 `AiConfig` 替代硬编码超时值（90s），使用 `TransactionTemplate` 精确控制事务边界。`AiTaskOrchestrator` 负责编排层——创建 Goal → 发送 MQ，或加载历史 → 删除旧任务 → 发送 MQ 重生成。
+
+第一轮重构（v1.0.0）将单一 God Class（594+369 行）拆为 6 组件；第二轮重构（2026-06-14）将 `GoalService` 进一步拆为 `GoalCrudService` + `TaskService` + `AiTaskOrchestrator`，并收窄 `GoalAiWorker` 事务边界。
+
+### 6.4 任务去重
+
+`createTask` 通过 `normalizeTitle`（去空格/标点/全小写）后做三层去重：
+1. 精确匹配（a.equals(b)）
+2. 子串包含（a.contains(b) || b.contains(a)，标题长度 ≥ 4）
+3. Bigram Jaccard ≥ 0.86（TextSimilarity）
+
+命中任一层抛出 `DuplicateTaskException`，前端弹窗提示用户选择覆盖或取消。
+
+### 6.5 死信队列（DLQ）
+
+`goal.ai.queue` 配置了死信交换机 `goal.dlx.exchange` → 死信队列 `goal.ai.dlq`。消费者抛异常或消息被拒绝（requeue=false）时，消息路由到 DLQ 防止无限重试导致消息丢失。DLQ 中的消息可手动检查后重新投递或丢弃。
+
 ---
 
 ## 7. 智能排程（schedule-engine：空闲时间、排程、候选方案、日计划 job）
@@ -328,6 +447,43 @@ weekNumber = floor(daysBetween / 7) + 1
 - `GET  /api/user/schedule/daily-plan/jobs/{jobId}`：查询 `RUNNING/DONE/FAILED`（主要用于排障）
 
 前端主流程不轮询 job 状态：启动后页面静止，等待 SSE 通知 `SCHEDULE_DONE / SCHEDULE_FAILED` 后自动刷新。
+
+### 7.5 schedule-engine 内部架构
+
+schedule-engine 在 v1.0.0 重构中从单一 God Class（`ScheduleService` 2267 行）拆分为 9 个职责清晰的组件：
+
+| 组件 | 类型 | 职责 |
+|------|------|------|
+| `ScheduleService` | @Service | 排程核心编排：AI 排程、候选方案、日计划提交（16 个依赖注入，纯委托层） |
+| `ScheduleValidator` | @Component | 纯逻辑验证：重叠过滤、最小间隔约束、日总量限制、空闲时段减法、候选项合规检查 |
+| `TaskScheduleService` | @Service | 任务排程 CRUD：查询/更新/删除，DTO 富化（批量从 goal-service 获取任务标题） |
+| `FreeTimeCalculator` | @Service | 空闲时间计算：课表查询 → 周过滤 → 碎片合并 → 午餐扣除 → 空闲时段输出 |
+| `ScheduleImportService` | @Service | 课表导入解析：ICS/CSV/Excel 三格式，节数→时间映射、周范围解析、RRULE/BYDAY 处理 |
+| `PlanCandidateWorker` | @Service | 候选方案生成：AI 候选生成（`@Async`）+ 规则排程降级（优先级+耗时贪心） |
+| `ScheduleUtils` | @Component | JSON 共享工具：AI 响应净化、序列化/反序列化、时区规范化、候选响应解析 |
+| `ScheduleAiConfig` | @ConfigurationProperties | 排程参数：时段/间隔/每日上限/超时（`smartplanner.schedule.*`） |
+| `ScheduleAiPrompts` | @ConfigurationProperties | AI 提示词外部化（`smartplanner.schedule.prompts.*`） |
+
+**组件关系**
+
+```
+ScheduleService (编排层，全部委托)
+  ├── ScheduleImportService   ← 课表导入/删除/首周周一
+  ├── FreeTimeCalculator      ← 空闲时间计算、课表查询
+  ├── ScheduleValidator       ← 全部验证逻辑（纯函数，无外部依赖）
+  ├── TaskScheduleService     ← 任务排程 CRUD + GoalClient 远程调用
+  ├── PlanCandidateWorker     ← 候选方案 AI 生成 + 规则降级
+  ├── ScheduleUtils           ← JSON 净化/序列化/解析
+  ├── ScheduleAiConfig        ← 全部排程配置参数
+  └── ScheduleAiPrompts       ← 全部 AI 提示词
+```
+
+关键设计决策：
+- `ScheduleValidator` 零依赖纯逻辑组件，所有方法接收参数而非读取配置，便于单元测试
+- `PlanCandidateWorker` 与 `ScheduleService` 的 200 行重复代码已消除，统一使用 `ScheduleUtils`
+- `FreeTimeCalculator.calculateFreeTime` 硬编码午休 12:00-14:00（第 3-4 节与第 5-6 节之间）
+- `ScheduleImportService` 支持中英文表头自动识别（课程名称/Course Name 等）、全角数字归一化、10 节中国大学标准节数映射（08:00-20:40）
+- 53% 代码缩减（2267 → 1070 行），0 回归（52 个单元测试全部通过）
 
 ---
 
@@ -478,7 +634,7 @@ agent-service 使用 Spring AI 的 `RedisVectorStore`（DashScope embedding）�
   - 缓存：按 taskId 缓存推荐结果（TTL 2 天）
   - 强制刷新：传 `{ "refresh": true }` 可跳过缓存重新检索
 
-对应实现见 [UserController.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/user-service/src/main/java/com/chao/user/controller/UserController.java)。
+对应实现见 [TaskController.java](file:///c:/Users/%E5%88%98%E8%B6%85/Documents/SmartPlanner/user-service/src/main/java/com/chao/user/controller/TaskController.java)。
 
 ### 8.8 web-front：Agent 窗口关怀推送（登录即显示）
 
@@ -682,7 +838,7 @@ maxDaily = max(120, baseTier − procPenalty)
 user_habits → user-service (buildSchedulePreference) → request.preference → schedule-engine
 ```
 
-`UserController` 在以下三个排程端点中自动注入偏好数据：
+`ScheduleController` 在以下三个排程端点中自动注入偏好数据：
 - `POST /api/user/schedule/daily-plan/commit`
 - `POST /api/user/schedule/daily-plan/jobs`
 - `POST /api/user/schedule/plan-candidates`
@@ -1008,7 +1164,19 @@ curl -N -X POST "http://localhost:8088/api/agent/chat/stream" ^
 
 **预防**：确保 `smartplanner.crawler.quality-filter.enabled=true`（默认开启），新爬取数据入库前会经过 bigram 相似度 + 中文字符匹配过滤。
 
-### 13.7 Agent 流式不生效 / 一次性显示 / 断流
+### 13.7 RabbitMQ 队列参数冲突（PRECONDITION_FAILED）
+
+**症状**：服务日志报 `PRECONDITION_FAILED - inequivalent arg 'x-dead-letter-exchange' for queue 'goal.ai.queue'`，`Broker not available; cannot force queue declarations`，但 RabbitMQ 管理台显示队列正在运行且消费者已连接。
+
+**原因**：RabbitMQ 数据卷中已存在旧版队列（无 DLX 参数），新版代码尝试声明同名队列但参数不同。队列参数在 RabbitMQ 中不可变。
+
+**处理**：
+1. 检查队列消息数：`docker exec rabbitmq rabbitmqctl list_queues name messages | grep goal`
+2. 确认消息数为 0 后删除：`docker exec rabbitmq rabbitmqctl delete_queue goal.ai.queue`
+3. 重启 goal-service：`docker compose restart goal-service`
+4. 验证 DLQ 已创建：`docker exec rabbitmq rabbitmqctl list_queues name arguments | grep goal`
+
+### 13.8 Agent 流式不生效 / 一次性显示 / 断流
 
 按优先级从高到低排查：
 
@@ -2077,7 +2245,7 @@ if (out.isEmpty() && !q.isBlank()) {
 | `CrawlerOrchestratorService` | 注入 `RabbitTemplate`，新增 `crawlTopicAsync(topic, userId)` 重载，`allOf().orTimeout()` 后链式调用 `thenRunAsync` 发送 `CRAWL_COMPLETED` 通知 |
 | `ResourceController` | `/api/resources/crawl` 新增 `userId` 参数 |
 | `ResourceClient` (Feign) | `crawlTopic()` 新增 `userId` 参数 |
-| `UserController` | `crawlResources()` 从 JWT 提取 userId 传递 |
+| `ResourceController` | `crawlResources()` 从 JWT 提取 userId 传递 |
 | `GoalAiWorker` | `crawlTopic()` 调用补传 userId |
 
 通知 payload：
@@ -2105,3 +2273,184 @@ if (out.isEmpty() && !q.isBlank()) {
 4. 前端 `EventSource` 收到 `CRAWL_COMPLETED` → `notify.signal()` → `ResourcesView` watch 触发 → `searchFast()` 自动刷新
 
 **无 userId 兼容路径**：`ResourceService.searchResources()` 回退时调用无参重载 `crawlTopicAsync(topic)`，不推送通知（前端已通过 `triggerCrawl` 单独发起带 userId 的爬取请求）。
+
+### 15.46 前端导航栏优化（2026-06-13）
+
+**问题**：顶部导航栏存在多项可优化点：主题切换文字按钮占用空间、退出按钮视觉权重过高、长用户名无截断、桌面端汉堡菜单冗余。
+
+**改动**（`DefaultLayout.vue`）：
+| 项 | Before | After |
+|----|--------|-------|
+| 主题切换 | `<v-btn>浅色/深色</v-btn>` | `<v-btn :icon="mdi-weather-sunny/night" />` |
+| 退出按钮 | `variant="tonal" color="primary"` | `variant="plain"` |
+| 用户名 | 无限制 | `max-width: 120px; text-overflow: ellipsis` |
+| 汉堡菜单 | 始终显示 | `v-show="display.mobile.value"` 移动端才显示 |
+
+### 15.47 多页面 UI 优化（2026-06-13）
+
+**PlanView** — 模板以裸 `<v-row>` 开头，缺少 `<v-container>` 外层包裹，导致水平间距与其他页面不一致。补加 `v-container`。
+
+**ProfileView** — 三处修复：
+- `avgDelay`（平均延迟）进度条语义颠倒：越低越好但进度条越满，移除进度条改为文字标注"越少越好"
+- 数据加载前闪现"0%/0天/0分钟"误导读数，加 `v-if="!loading && portrait"` 守卫 + 加载进度条 + 空数据提示
+- 删除无效 CSS 类 `metric-card--*`（动态拼接但无对应样式定义）
+
+**PunchView** — 四处修复：
+- 首次进入闪现空状态文案，加 `v-if="!loading"` 守卫 + 加载进度条
+- "完成打卡"按钮无二次确认，改为先弹确认对话框再执行
+- 删除打卡记录无确认且无错误处理，改为弹确认对话框 + try-catch
+- `catch (Throwable e)` → `catch (Exception e)`
+
+**DecomposePanel** — 三处修复：
+- 移动端固定 300px 宽占满屏幕，改为 `min(300px, calc(100vw - 32px))`
+- 关闭按钮 `size="x-small"`(16px) 太小，改为 `size="small"`
+- 任务列表 max-height 从 200px 改为 `min(360px, 50vh)` 动态适配
+- 列表 `:key="i"`（数组索引）改为 `:key="t.title + i"`
+
+**ScheduleView** — 课表管理区左列"更新课表"标题与右列"课表（周视图）"标题未对齐，左列改为 `d-flex align-center` + `min-height:28px` 使两端基线一致。
+
+### 15.48 agent-service 稳定性修复（2026-06-13）
+
+7 项防御性修复，防止极端情况下服务崩溃或数据异常：
+
+| # | 文件 | 问题 | 修复 |
+|---|------|------|------|
+| 1 | `SmartPlannerTools.java` | `weatherClient.fetch()` 返回 null 时直接 `wd.getLocation()` 触发 NPE | 加 null 检查，返回 `{"error": "天气服务暂不可用"}` |
+| 2 | `AgentChatService.java` | 同一用户并发请求共用 `threadId("u:" + userId)`，会话历史交错污染 | threadId 追加 `UUID.randomUUID()` 确保请求隔离 |
+| 3 | `AgentAiConfig.java` | 多实例同时 `ftCreate` 索引无 try-catch，第二个实例启动失败 | `ftCreate` 外包 try-catch，冲突时 log.warn |
+| 4 | `TaskAdviceAiService.java` | AI 返回非 JSON 时静默返回空 Map + HTTP 200 | 加 `log.warn` 记录原始文本长度便于排查 |
+| 5 | `AgentReminderService.java` | `rabbitTemplate.convertAndSend` 失败静默丢弃 | 外包 try-catch + `log.error` |
+| 6 | `SmartPlannerTools.java` | RAG 过滤器 `userId` 传 Long，索引端存 String，类型不一致可能过滤失效 | 统一 `String.valueOf(userId)` |
+| 7 | `AgentChatService.java` | `catch (Throwable e)` 捕获 OOM/StackOverflow 致命错误 | 全部改为 `catch (Exception e)` |
+
+### 15.49 RabbitMQ DLQ 队列冲突修复 + 全线测试验证（2026-06-14）
+
+**问题**：`docker compose restart` 后，goal-service 和 schedule-engine 日志持续报 `PRECONDITION_FAILED - inequivalent arg 'x-dead-letter-exchange' for queue 'goal.ai.queue'`，`SimpleMessageListenerContainer` 无法强制声明队列（`Broker not available; cannot force queue declarations`）。`punch`、`resource` 等其他队列正常。
+
+**根因**：RabbitMQ 数据卷中持久化了旧版 `goal.ai.queue`（无 `x-dead-letter-exchange` 参数）。新版代码（`RabbitMqConfig`）声明同名队列时带了 `x-dead-letter-exchange=goal.dlx.exchange`，参数不匹配导致 channel 被关闭（5 次重试后放弃）。这是 RabbitMQ 的队列参数不可变原则——不是"没停就重建"的问题，即使 `docker compose down -v` 外删除也会出现。
+
+**修复**：
+
+1. **删除旧队列**：`rabbitmqctl delete_queue goal.ai.queue`（已验证队列空：messages=0, ready=0, unacked=0）
+2. **重启 goal-service**：Spring AMQP `RabbitAdmin` 用新版参数重建队列，channel 正常创建，无报错
+3. **自动重建死信链路**：`goal.ai.dlq` + `goal.dlx.exchange → goal.ai.dlq` 绑定一并自动创建
+
+**验证结果**（完整业务链路测试）：
+
+```
+POST /api/goals "测试MQ链路恢复"
+  → goal.exchange → goal.ai.queue (DLX: goal.dlx.exchange)
+  → GoalAiWorker 消费 → AI 拆解 → 10 个任务入库
+  → 每任务预取 6 个学习资源
+  → 队列清空 (0/0/0) ✅
+```
+
+死信链路：`goal.ai.queue ──异常──▶ goal.dlx.exchange ──▶ goal.ai.dlq` ✅
+
+**全线测试结果**（198 个单元测试，0 失败）：
+
+| 模块 | 测试数 | 状态 |
+|------|--------|------|
+| common | 3 | ✅ |
+| goal-service | 49 | ✅ |
+| schedule-engine | 52 | ✅ |
+| user-service | 40 | ✅ |
+| resource-search | 21 | ✅ |
+| agent-service | 33 | ✅ |
+
+**附带修复 — UserPortraitAiServiceTest clamp 值更新**：
+
+`UserPortraitAiService.clampPortraitResult()` 中 `focusMinutes` clamp 范围从 `{30,45,60} else 45` 改为 `[25, 90]` 连续值，`breakMinutes` 从固定 10 改为 `[5, 25]` 比例缩放。3 个测试用例的断言值与新 clamp 范围不一致（预期45→实际90，预期10→实际25），已同步更新。
+
+**排障经验**：
+- RabbitMQ 队列参数变更后，仅重建容器不够——RabbitMQ 数据卷中的队列定义不变
+- 删除队列前务必确认 `messages=0`（`rabbitmqctl list_queues`）
+- Spring AMQP 的 `SimpleMessageListenerContainer` 在声明失败后会降级到"不强制声明"模式，可能静默连上旧队列，掩盖参数不一致问题
+- 排查建议：`docker logs goal-service | grep -i PRECONDITION_FAILED` 确认是否有队列参数冲突
+
+### 15.50 goal-service 第二轮重构：空 catch 修复 + God Class 拆分 + 事务收窄（2026-06-14）
+
+本次重构分三步，全部在 198 个单元测试 0 失败的保护下完成。
+
+**Step 1 — 空 catch 补日志（4 处）**
+
+| 文件 | 位置 | 修改 |
+|------|------|------|
+| `GoalService.deleteGoal` | 原 catch（吞 schedule 清理异常） | `log.warn("清理排程失败, goalId={}, userId={}", ..., e)` |
+| `GoalService.createTask` | 原 catch（吞 MQ 通知异常） | `log.warn("任务创建通知发送失败, ...", e)` |
+| `JournalService.save` | 原 catch（吞 JOURNAL_CREATED 通知异常） | `log.warn("JOURNAL_CREATED通知发送失败, ...", e)` |
+| `JournalService.save` | 原 catch（吞消极情绪提醒异常） | `log.warn("消极情绪提醒发送失败, ...", e)` |
+
+零风险改动，异常堆栈从不可见变为可见。
+
+**Step 2 — GoalService (396行, 19方法) 拆分为 3 个服务**
+
+| 新类 | 行数 | 方法数 | 依赖 |
+|------|------|--------|------|
+| `GoalCrudService` | ~100 | 8 | goalMapper, goalTaskMapper, userJournalMapper, scheduleClient |
+| `TaskService` | ~180 | 7 | goalTaskMapper, rabbitTemplate |
+| `AiTaskOrchestrator` | ~120 | 2 | goalMapper, goalTaskMapper, userJournalMapper, rabbitTemplate, aiPromptConfig |
+
+拆分要点：
+- `DuplicateTaskException` + `findSimilarExistingTask` + `normalizeTitle` 随 TaskService 一起迁移
+- `GoalController` 改为注入 4 个服务（3 个新 + JournalService），每个 endpoint 路由到对应服务
+- 清理了 GoalService 的 2 个死依赖：`openAiCompatClient`、`resourceClient`（仅 GoalAiWorker 使用）
+- `saveJournal` / `deleteJournal` 端点直接调用 JournalService（去掉一层无意义委托）
+
+**Step 3 — GoalAiWorker 事务边界收窄**
+
+改前：`@Transactional` 包裹整个 MQ 消费方法——AI 调用（10-30s）、Feign 调用均在事务内，期间 DB 连接被持有。
+
+改后：用 `TransactionTemplate.execute()` 仅包裹 DB 读取+写入（`existing` 查询 + `delete` + `saveTaskRecursive`），AI 调用/Feign 调用/进度通知均在事务外执行。
+
+```java
+// 改前
+@Transactional  // 太宽：AI 调用期间白白持有 DB 连接
+public void handleGoalAiTask(GoalAiTaskMessage message) { ... }
+
+// 改后
+public void handleGoalAiTask(GoalAiTaskMessage message) {
+    // AI 调用（事务外）
+    List<GoalTask> savedTasks = transactionTemplate.execute(status -> {
+        // 仅 DB 读写在此事务内
+    });
+    // Feign 调用 + 通知（事务外）
+}
+```
+
+安全性分析：
+- 原方法末尾 `catch(Exception)` 吞了所有异常，`@Transactional` 从不实际 rollback → 收窄后行为等价
+- DB 写入移入 `TransactionTemplate.execute()` 保证原子性：读现有 + 写新任务在同一事务内
+- `afterCommit` 通知改为事务后直接调用（`transactionTemplate.execute()` 阻塞直到 commit 完成，语义等价）
+- 移除了 `TransactionSynchronizationManager` 依赖（不再需要注册回调）
+
+### 15.51 common 模块：空 catch 修复 + 循环依赖解除（2026-06-14）
+
+本次修复 common 模块的两个问题，198 测试 0 失败保护。
+
+**Step A — DateUtils 空 catch 补日志**
+
+`DateUtils.parseLocalDateTime` 尝试 11 种日期格式的 fallback 解析，每种格式失败时 catch `DateTimeParseException` 后继续尝试下一个。问题是全部失败后静默返回 `null`，调用方无从排查。修复：添加 `@Slf4j` 注解，在最终 `return null` 前插入 `log.warn("无法解析日期字符串: {}", s)`。
+
+零风险改动，保留了原有的 fallback 语义。
+
+**Step B — 解除 ResourceClient ↔ ResourceAdviceJobStatusResponse 循环依赖**
+
+`ResourceAdviceJobStatusResponse`（dto 包）引用了 `ResourceClient.ResourceAdviceResponse`（client 包的内部类），而 `ResourceClient` 又引用了 `ResourceAdviceJobStatusResponse`，形成 client ↔ dto 循环依赖。
+
+修复方案：将 `ResourceClient.CourseResource` 和 `ResourceClient.ResourceAdviceResponse` 提取为独立 DTO：
+
+| 原类型 | 新类型 | 新位置 |
+|--------|--------|--------|
+| `ResourceClient.CourseResource` | `SearchResourceItem` | `com.chao.common.dto` |
+| `ResourceClient.ResourceAdviceResponse` | `ResourceAdviceResult` | `com.chao.common.dto` |
+
+影响范围：19 个文件（跨 5 个模块）的 import 和类型引用，全部机械替换，零逻辑变更。
+
+### 15.52 gateway-service 文档补充（2026-06-14）
+
+gateway-service 此前在 README 中仅有端口表一行（8088）和拓扑图一个节点，缺少架构文档。补充为 2.1.4 节，记录其 7 个组件：
+
+- **4 层过滤器链**（ApiKeyAuthFilter → UserContextForwardFilter → RedisRateLimitFilter → SecurityWebFilterChain），明确顺序和职责
+- **3 个配置组件**（JwtDecoderConfig、RateLimitConfig、GatewayApplication）
+- **关键设计决策**：双 SecurityWebFilterChain 防止过期 token 阻塞登录、CORS 全开放策略、限流 key 粒度（userId → IP 回退）
